@@ -415,6 +415,9 @@ pub(crate) struct RawPlaybackInfo {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct RawPublicSystemInfo {
+    /// 服务端自报的 `Id`。**不是**本机分配的 `ServerId`，只用于展示 / 对账。
+    #[serde(default)]
+    pub(crate) id: Option<String>,
     #[serde(default)]
     pub(crate) server_name: Option<String>,
     #[serde(default)]
@@ -724,11 +727,32 @@ pub(crate) fn map_item(raw: &RawItem, base: &Url) -> Result<MediaItem, ProviderE
 ///
 /// 媒体库里混着 `BoxSet`、`Person`、`Photo` 这些本层不认识的类型，
 /// 因为一条不认识就让整页失败是不可接受的。
-pub(crate) fn map_items(raws: &[RawItem], base: &Url) -> Vec<MediaItem> {
+///
+/// `parent_hint` 是“**直接子项**查询”里请求的父条目：实测 Jellyfin 12.4 的列表
+/// 响应不带 `ParentId`，不给回填的话 `MediaItem::parent_id` 在列表路径上恒为 `None`，
+/// 本地缓存就无法按媒体库检索（`nova items --cached --library` 只能拿顶层条目应付）。
+///
+/// 回填规则（两条都很重要）：
+///
+/// 1. **只在响应里没有 `ParentId` 时回填**：服务端明确给了值就以它为准，不覆盖
+///    （空串也算没给）。
+/// 2. **只对直接子项查询传 `Some`**：递归查询（`Recursive=true`）里各层级的父项
+///    各不相同，拿请求里的 parent 回填会把季 / 集全写成媒体库，语义是错的。
+///    调用方（`items()` / `children()`）负责只在确定是直接子项时给 `Some`。
+pub(crate) fn map_items(
+    raws: &[RawItem],
+    base: &Url,
+    parent_hint: Option<&ItemId>,
+) -> Vec<MediaItem> {
     let mut items = Vec::with_capacity(raws.len());
     for raw in raws {
         match map_item(raw, base) {
-            Ok(item) => items.push(item),
+            Ok(mut item) => {
+                if item.parent_id.is_none() {
+                    item.parent_id = parent_hint.cloned();
+                }
+                items.push(item);
+            }
             Err(error) => {
                 tracing::debug!(
                     item_type = raw.item_type.as_deref().unwrap_or(""),
@@ -1482,7 +1506,7 @@ mod tests {
         assert_eq!(response.total_record_count, Some(4));
         assert_eq!(response.items.len(), 4);
 
-        let items = map_items(&response.items, &prefixed_base());
+        let items = map_items(&response.items, &prefixed_base(), None);
         assert_eq!(items.len(), 3, "BoxSet 应当被跳过而不是让整页失败");
         assert_eq!(items[0].title, "银翼杀手 2049");
         assert_eq!(items[1].title, "沙丘");

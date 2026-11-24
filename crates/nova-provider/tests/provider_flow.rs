@@ -643,3 +643,59 @@ async fn emby_retries_with_the_legacy_password_field_after_401() {
         .await
         .expect("旧版 Emby 用 Password 重试后应当成功");
 }
+
+/// 列表响应不带 `ParentId`（Jellyfin 12 / Emby 4.10 实测如此）。
+/// 递归列表里只有"库的直接子项类型"（电影/剧集）回填请求的 parent，
+/// 季/集不能回填——它们的父项各不相同，统一写同一个父会让缓存按库检索出错。
+#[tokio::test]
+async fn recursive_list_backfills_parent_only_for_top_level_kinds() {
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryStore::new());
+    let provider = provider(&server, Flavor::Jellyfin, Arc::clone(&store));
+
+    common::mount_login(&server, Flavor::Jellyfin).await;
+    provider
+        .authenticate("tester", &SecretString::new("correct horse"))
+        .await
+        .expect("登录应当成功");
+
+    Mock::given(method("GET"))
+        .and(path(format!("/Users/{USER_ID}/Items")))
+        .and(query_param("ParentId", "library-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Items": [
+                { "Id": "m1", "Name": "电影", "Type": "Movie" },
+                { "Id": "s1", "Name": "剧集", "Type": "Series" },
+                { "Id": "e1", "Name": "第 1 集", "Type": "Episode" }
+            ],
+            "TotalRecordCount": 3
+        })))
+        .mount(&server)
+        .await;
+
+    let page = provider
+        .items(ItemQuery {
+            parent: Some(ItemId::new("library-1")),
+            ..ItemQuery::default()
+        })
+        .await
+        .expect("列条目应当成功");
+
+    let by_id = |id: &str| {
+        page.items
+            .iter()
+            .find(|item| item.id.as_str() == id)
+            .unwrap_or_else(|| panic!("缺少条目 {id}"))
+    };
+    assert_eq!(
+        by_id("m1").parent_id.as_ref().map(|id| id.as_str()),
+        Some("library-1"),
+        "电影是库的直接子项，应当回填"
+    );
+    assert_eq!(
+        by_id("s1").parent_id.as_ref().map(|id| id.as_str()),
+        Some("library-1"),
+        "剧集是库的直接子项，应当回填"
+    );
+    assert_eq!(by_id("e1").parent_id, None, "集的父项不是媒体库，不能回填");
+}

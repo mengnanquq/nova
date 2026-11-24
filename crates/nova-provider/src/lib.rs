@@ -49,7 +49,9 @@ pub use error::ProviderError;
 pub use http::{RetryPolicy, parse_base_url};
 pub use mapping::Flavor;
 pub use provider::MediaProvider;
-pub use types::{ImageKind, ImageRequest, ItemQuery, Library, Page, SortBy, StreamTarget};
+pub use types::{
+    ImageKind, ImageRequest, ItemQuery, Library, Page, PublicServerInfo, SortBy, StreamTarget,
+};
 
 /// 本 crate 在认证头里声明的客户端名。
 pub const CLIENT_NAME: &str = "Nova";

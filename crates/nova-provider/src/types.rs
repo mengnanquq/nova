@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use nova_core::{ItemId, MediaKind, SourceId};
+use nova_core::{ItemId, MediaKind, ServerKind, SourceId};
 
 /// 条目列表的排序字段。
 ///
@@ -148,6 +148,35 @@ pub struct Library {
     pub collection_type: Option<String>,
     /// 条目数量；服务端在列表接口上通常不提供，此时为 `None`。
     pub item_count: Option<u32>,
+}
+
+/// 服务端公开（无需登录）的自我介绍：`GET /System/Info/Public` 的可信子集。
+///
+/// 这是**窄**结构体，故意只装描述服务器本身的字段：
+///
+/// - 没有 `auth` / `user_id`：这两个字段描述的是**当前会话**，公开接口给不出来。
+///   让一个 `auth = Unauthorized`、`user_id = None` 的完整
+///   [`ServerInfo`](nova_core::ServerInfo) 到处流动，很容易被误当成“完整信息”
+///   写进本地记录，把已登录状态覆盖成未认证（CLI 侧已经踩过一次）。
+/// - 没有 `base_url` / `metadata_language`：这些是本机配置，不是服务端自述。
+///
+/// 需要完整 [`ServerInfo`](nova_core::ServerInfo) 时用
+/// [`MediaProvider::server_info`](crate::MediaProvider::server_info)（本地快照，含会话字段），
+/// 或者只为“把名字 / 版本合并进本地记录”用
+/// [`MediaProvider::public_info_as_server_info`](crate::MediaProvider::public_info_as_server_info)。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicServerInfo {
+    /// 服务器显示名（服务端自称；服务端没给时退回本机已有的显示名）。
+    pub name: String,
+    /// 服务端版本；个别分支（或 `/System/Info/Public` 缺字段时）为 `None`。
+    pub version: Option<String>,
+    /// 服务端类型（`ProductName` 判定，Emby 独有字段兜底，最后回退构造时的 flavor）。
+    pub kind: ServerKind,
+    /// 服务端自报的 `Id`（`/System/Info/Public` 的 `Id`）。
+    ///
+    /// **不是**本机分配的 [`ServerId`](nova_core::ServerId)：前者属于服务端，
+    /// 后者属于本地记录（凭证键、SQLite 主键都按它算），两者不要互相覆盖。
+    pub id: Option<String>,
 }
 
 /// 图片种类。取值为服务端 `Images/{Type}` 路径段。

@@ -884,7 +884,20 @@ impl MediaProvider for Provider {
         let url = self.url(&["Users", &user_id, "Items"], &Self::pairs(&params))?;
         let response: RawItemsResponse = self.get_json(url).await?;
 
-        let items = map_items(&response.items, &self.base);
+        let mut items = map_items(&response.items, &self.base, None);
+        // 列表响应不带 `ParentId`（Jellyfin 12 与 Emby 4.10 都实测如此），不回填的话
+        // 缓存无法按媒体库检索。但 `items()` 是递归查询，深层的季/集父项各不相同，
+        // 统一写同一个父是错的。所以只给**库的直接子项类型**（电影/剧集）回填：
+        // 季与集的父由服务端给出，缺失时就保持 `None`。
+        if let Some(parent) = &query.parent {
+            for item in &mut items {
+                if item.parent_id.is_none()
+                    && matches!(item.kind, MediaKind::Movie | MediaKind::Series)
+                {
+                    item.parent_id = Some(parent.clone());
+                }
+            }
+        }
         let total = response
             .total_record_count
             .unwrap_or_else(|| u32::try_from(items.len()).unwrap_or(u32::MAX));
@@ -914,7 +927,8 @@ impl MediaProvider for Provider {
             ],
         )?;
         let response: RawItemsResponse = self.get_json(url).await?;
-        Ok(map_items(&response.items, &self.base))
+        // `ParentId=id&Recursive=false`：这些都是 `id` 的直接子项，父项就是 `id`。
+        Ok(map_items(&response.items, &self.base, Some(id)))
     }
 
     async fn sources(&self, id: &ItemId) -> Result<Vec<MediaSource>, ProviderError> {
