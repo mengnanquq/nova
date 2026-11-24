@@ -65,7 +65,17 @@ pub trait MediaProvider: Send + Sync {
     ///
     /// 未登录也可以调用；[`authenticate`](Self::authenticate) 成功后会自己调一次，
     /// 其余方法不会重复请求这个端点。
-    async fn public_info(&self) -> Result<ServerInfo, ProviderError>;
+    /// 把公开信息合并进本地 [`ServerInfo`](nova_core::ServerInfo) 快照。
+    ///
+    /// 只覆盖 `name` / `kind` / `version` 三个"服务端自述"的字段，**不碰**
+    /// `auth` / `user_id` / `credential_key`——那些是本机会话状态。
+    async fn public_info_as_server_info(&self) -> Result<ServerInfo, ProviderError>;
+
+    /// 服务端的公开信息（不需要令牌）。
+    ///
+    /// 刻意返回窄结构体：公开端点拿不到 `auth` / `user_id`，用完整的 `ServerInfo`
+    /// 会把"已登录"的本地状态冲成未认证。
+    async fn public_info(&self) -> Result<crate::types::PublicServerInfo, ProviderError>;
 
     /// 用用户名密码登录。
     ///

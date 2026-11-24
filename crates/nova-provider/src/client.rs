@@ -806,27 +806,32 @@ impl MediaProvider for Provider {
         Ok(self.refresh_public_info(info).await)
     }
 
-    async fn public_info(&self) -> Result<ServerInfo, ProviderError> {
+    async fn public_info_as_server_info(&self) -> Result<ServerInfo, ProviderError> {
+        let public = self.public_info().await?;
+        let mut info = self.read_state().info.clone();
+        info.name = public.name;
+        info.kind = public.kind;
+        info.version = public.version;
+        Ok(info)
+    }
+
+    async fn public_info(&self) -> Result<crate::types::PublicServerInfo, ProviderError> {
         let url = self.url(&["System", "Info", "Public"], &[])?;
+        // 公开端点不带令牌也能读（`get_json_public` 走匿名请求）。
         let raw: RawPublicSystemInfo = self.get_json_public(url).await?;
-        let current = self.read_state().info.clone();
-        Ok(ServerInfo {
-            id: current.id,
+        Ok(crate::types::PublicServerInfo {
+            id: raw.id.clone(),
+            name: raw
+                .server_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "未命名服务器".to_owned()),
+            version: raw.version.clone(),
             kind: kind_from_public(
                 raw.product_name.as_deref(),
                 raw.local_addresses.is_some(),
                 self.flavor.server_kind(),
             ),
-            name: raw
-                .server_name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(current.name),
-            base_url: current.base_url,
-            version: raw.version.filter(|version| !version.trim().is_empty()),
-            // 这两个字段描述的是“当前会话”，不是服务器；公开接口也拿不到。
-            user_id: None,
-            auth: AuthState::Unauthorized,
-            metadata_language: current.metadata_language,
         })
     }
 

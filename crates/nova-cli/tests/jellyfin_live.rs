@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nova_core::{AuthState, ItemId, PlayMethod, PlaybackProgress, ServerId};
+use nova_core::{ItemId, PlayMethod, PlaybackProgress, ServerId};
 use nova_provider::{Flavor, MediaProvider, Provider, ProviderConfig};
 use nova_secrets::{CredentialStore, MemoryStore, SecretString};
 use nova_storage::{Database, unix_now};
@@ -169,8 +169,8 @@ async fn live_jellyfin_end_to_end() {
         public.version.as_deref().is_some_and(|v| !v.is_empty()),
         "公开信息应当带版本：{public:?}"
     );
-    assert_eq!(public.user_id, None, "公开信息不含会话字段");
-    assert_eq!(public.auth, AuthState::Unauthorized);
+    // 窄结构体本来就不含会话字段——这正是它存在的原因（防止误覆盖本地记录）。
+    assert!(!public.name.trim().is_empty(), "公开信息应当带服务器名");
 
     // ------------------------------------------------------------------
     // 1. 登录：令牌进凭证存储，服务器信息落 SQLite，令牌**不能**落 SQLite

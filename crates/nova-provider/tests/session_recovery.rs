@@ -13,7 +13,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{JELLYFIN_TOKEN, USER_ID, json_fixture, provider, provider_without_retry};
-use nova_core::{AuthState, ServerId, ServerKind};
+use nova_core::{ServerId, ServerKind};
 use nova_provider::{Flavor, MediaProvider, Provider, ProviderConfig, ProviderError};
 use nova_secrets::{CredentialStore, MemoryStore, SecretString};
 use serde_json::json;
@@ -166,9 +166,14 @@ async fn public_info_reports_kind_name_and_version() {
         assert_eq!(info.kind, expected, "ProductName = {product}");
         assert_eq!(info.name, "客厅的服务器");
         assert_eq!(info.version.as_deref(), Some("10.10.3"));
-        assert_eq!(info.user_id, None);
-        assert_eq!(info.auth, AuthState::Unauthorized);
-        assert_eq!(info.id, ServerId::new("srv-1"), "本机分配的标识原样保留");
+        // 窄结构体不含会话字段是**有意**的：公开端点拿不到 auth/user_id，
+        // 以前返回完整 `ServerInfo` 时一旦被整体写回本地记录，就会把已登录状态冲掉。
+        // 需要本机快照时用 `server_info()`。
+        assert_eq!(
+            provider.server_info().id,
+            ServerId::new("srv-1"),
+            "本机分配的标识不受公开信息影响"
+        );
     }
 }
 
