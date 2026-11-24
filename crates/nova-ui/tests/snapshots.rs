@@ -53,11 +53,24 @@ fn write_all_snapshots() {
     capture(&app, "home-filled.png");
     // Netflix 风格首页（同帧另存，供 UI 重设计验收）。
     capture(&app, "netflix-home.png");
+    // vw 尺寸基准帧（1280 宽：gutter 51px、16:9 卡 212px）。
+    capture(&app, "nf-home-1280.png");
 
     // 卡片聚焦放大覆盖层：headless 渲染器不落 Flickable 视口偏移，
     // 改用压缩 billboard 让行区进入首屏（真实窗口用滚轮/滚动验证）。
     app.ui().set_billboard_ratio(0.2);
     capture(&app, "netflix-card-focused.png");
+    // 卡片悬停放大（1.35 倍 + 56px 信息面板）同帧另存。
+    capture(&app, "nf-card-hover.png");
+
+    // 行悬停：鼠标移到继续观看第 1 张卡 → 行左右箭头出现（48×48 黑块）。
+    app.ui().window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(157.0, 290.0),
+    });
+    capture(&app, "nf-row-hover.png");
+    app.ui().window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(700.0, 100.0),
+    });
     app.ui().set_billboard_ratio(0.88);
 
     // 2a. 顶部横幅（warning + 动作按钮）：必须在滚动前拍——
@@ -167,4 +180,20 @@ fn write_all_snapshots() {
     volume.note_volume_change();
     app.set_player(&volume);
     capture(&app, "player-volume-hint.png");
+
+    // 1920 宽：验证 vw 缩放（gutter 固定 60px、16:9 卡 319px）。
+    // 旧窗口 resize 不触发重排，另开一个 1920×1080 的实例。
+    // 组件显式 width: 1280px 是初始逻辑宽：必须在 show 之前 set_size
+    // （show 过的 testing 窗口再 resize 不会重排）。
+    let wide = App::new_with(AppWindow::new().unwrap());
+    wide.ui().set_window_w(1920.0);
+    wide.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    let wide_home = home_filled();
+    install_posters(&wide, &home_image_ids(&wide_home));
+    install_backdrops(&wide, &["dune"]);
+    wide.set_home(&wide_home);
+    wide.show_page(Page::Home);
+    capture(&wide, "nf-home-1920.png");
 }

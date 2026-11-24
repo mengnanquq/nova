@@ -28,7 +28,7 @@ pub use focus::move_focus;
 pub use format::{
     badge, detail_meta_line, episode_code, format_duration, meta_line, progress_percent,
 };
-pub use home::HomeView;
+pub use home::{HomeView, LibraryRowView};
 pub use image::{ImageKey, ImageKind};
 pub use library::{LibraryTab, LibraryView};
 pub use nav::{Navigator, Route};

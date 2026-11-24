@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use i_slint_core::graphics::{Rgba8Pixel, SharedPixelBuffer};
 use nova_ui::{
-    App, CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerView, SourceOption,
-    TrackItem,
+    App, CardView, DetailView, HomeView, LibraryRowView, LibraryTab, LibraryView, PlayerView,
+    SourceOption, TrackItem,
 };
 
 /// 初始化 testing backend，内嵌软件光栅器（真实字体，可 `take_snapshot()`）。
@@ -277,10 +277,31 @@ pub fn home_filled() -> HomeView {
             .with_subtitle("1979 · 科幻")
             .with_badge("HDR"),
     ];
+    // 各库前 20 条（16:9，标题 = 库名）。
+    let library_rows = vec![
+        LibraryRowView {
+            title: "电影".to_owned(),
+            items: vec![
+                CardView::new("m1", "银翼杀手").with_subtitle("1982 · 科幻"),
+                CardView::new("m2", "2001 太空漫游").with_subtitle("1968 · 科幻"),
+                CardView::new("m3", "异形").with_subtitle("1979 · 恐怖"),
+                CardView::new("m4", "银翼杀手 2049").with_subtitle("2017 · 科幻"),
+            ],
+        },
+        LibraryRowView {
+            title: "剧集".to_owned(),
+            items: vec![
+                CardView::new("s1", "黑镜").with_subtitle("2011 · 科幻"),
+                CardView::new("s2", "西部世界").with_subtitle("2016 · 科幻"),
+                CardView::new("s3", "切尔诺贝利").with_subtitle("2019 · 剧情"),
+            ],
+        },
+    ];
     HomeView {
         hero: Some(hero),
         continue_watching,
         recently_added,
+        library_rows,
         library_tabs: tabs(),
     }
 }
@@ -438,5 +459,8 @@ pub fn home_image_ids(view: &HomeView) -> Vec<&str> {
             .map(|card| card.item_id.as_str()),
     );
     ids.extend(view.recently_added.iter().map(|card| card.item_id.as_str()));
+    for row in &view.library_rows {
+        ids.extend(row.items.iter().map(|card| card.item_id.as_str()));
+    }
     ids
 }

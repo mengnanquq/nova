@@ -25,8 +25,8 @@ slint::include_modules!();
 pub use pages::{App, ImageStore, KeyCommand, Page, PlayerKey};
 pub use viewmodel::{
     AUTO_HIDE_DELAY, AddServerError, AddServerErrorKind, AddServerState, AddServerView, BannerData,
-    BannerLevel, CardView, DetailView, HomeView, ImageKey, ImageKind, LibraryTab, LibraryView,
-    Navigator, PlayerShellView, PlayerView, Route, SourceOption, TimeMode, TrackItem,
+    BannerLevel, CardView, DetailView, HomeView, ImageKey, ImageKind, LibraryRowView, LibraryTab,
+    LibraryView, Navigator, PlayerShellView, PlayerView, Route, SourceOption, TimeMode, TrackItem,
     VOLUME_HINT_DURATION, VOLUME_STEP, badge, clock_text, detail_meta_line, episode_code,
     format_duration, meta_line, move_focus, progress_percent, validate_address,
 };

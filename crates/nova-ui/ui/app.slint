@@ -15,11 +15,31 @@ import { Banner } from "components/banner.slint";
 import { AddServerDialog } from "components/add_server.slint";
 
 export component AppWindow inherits Window {
-    width: 1280px;
+    // 窗口初始逻辑宽（真实启动 1280×800）。绑定只作初始值：用户手动缩窗时
+    // 窗口系统会直接写 width（覆盖本绑定）；测试可改 window-w 验证 vw 缩放。
+    in-out property <length> window-w: 1280px;
+    width: root.window-w;
     height: 800px;
     background: Theme.bg;
     default-font-family: Theme.font-family;
     forward-focus: keyboard;
+
+    // vw 驱动尺寸：视口宽度写回 Theme（gutter / 卡宽 / 链接间距都从这里派生）。
+    init => {
+        Theme.viewport-width = self.width;
+    }
+    changed width => {
+        Theme.viewport-width = self.width;
+    }
+
+    // 测试用：继续观看行的放大覆盖层几何（「放大不跳布局」断言）。
+    out property <length> zoom-rect-x: home-page.zoom-rect-x;
+    out property <length> zoom-rect-y: home-page.zoom-rect-y;
+    out property <length> zoom-rect-w: home-page.zoom-rect-w;
+    out property <length> zoom-rect-h: home-page.zoom-rect-h;
+    out property <bool> row0-zoom-on: home-page.row0-zoom-on;
+    out property <length> row0-y: home-page.row0-y;
+    out property <length> row0-arrow-y: home-page.row0-arrow-y;
 
     in property <HomeData> home;
     in property <LibraryData> library;

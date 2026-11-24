@@ -54,17 +54,17 @@ export component LibraryPage inherits Rectangle {
 
     states [
         zoomed when root.zoom-index >= 0 && root.zoom-index < root.card-count : {
-            zoom-factor: 1.08;
+            zoom-factor: Theme.zoom-factor;
             in {
                 animate zoom-factor {
-                    duration: 120ms;
-                    delay: 80ms;
+                    duration: Theme.zoom-duration;
+                    delay: Theme.zoom-delay;
                     easing: ease-out;
                 }
             }
             out {
                 animate zoom-factor {
-                    duration: 120ms;
+                    duration: Theme.zoom-duration;
                     easing: ease-out;
                 }
             }
@@ -178,7 +178,8 @@ export component LibraryPage inherits Rectangle {
                         property <length> center-y: grid-y
                             + floor(root.zoom-index / root.columns) * row-height
                             + root.card-height / 2;
-                        x: clamp(center-x - zw / 2, Theme.gutter, parent.width - Theme.gutter - zw);
+                        // 放大卡可以穿出左右 gutter（钳到窗口边缘）。
+                        x: clamp(center-x - zw / 2, 0px, parent.width - zw);
                         y: clamp(center-y - zh / 2, Theme.navbar-height, parent.height - zh);
                         width: zw;
                         card: root.data.cards[root.zoom-index];

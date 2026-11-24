@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 放大覆盖层卡片：行/网格里被聚焦或悬停的卡片按 zoom-factor 放大，
-//! 下方浮出标题 / 元信息 / 迷你进度条。
+//! 放大覆盖层卡片：行/网格里被聚焦或悬停的卡片按 zoom-factor（1.35）放大并上移
+//! 12px，底部展开 56px 的 `#181818` 信息面板（标题 14px bold / 元信息 12px
+//! `#B3B3B3` / 3px 红进度条）。
 //!
 //! 它是**独立覆盖层**，不参与行布局：行内基础卡片尺寸恒定，放大只改这张
 //! 后绘制的覆盖卡（后绘制的兄弟元素优先，能盖住相邻卡片），所以布局零跳动。
+//! 放大动画（400ms 延迟 + 200ms ease-out）由父级的 zoom-factor 状态动画驱动。
 
 import { Theme } from "theme.slint";
 import { CardData } from "models.slint";
@@ -15,12 +17,14 @@ export component CardZoom inherits Rectangle {
     // 基础卡尺寸（放大前的行内尺寸）。
     in property <length> base-width: 260px;
     in property <length> base-height: 390px;
-    // 缩放系数：1.0（未放大）→ 1.08。由父级的状态动画驱动。
+    // 缩放系数：1.0（未放大）→ 1.35。由父级的状态动画驱动。
     in property <float> zoom-factor: 1.0;
     callback clicked();
+    // 覆盖层是否正被悬停（放大完成后才接管，供父级锁存行激活态）。
+    out property <bool> hovered: zoom-area.has-hover;
 
     width: root.base-width * root.zoom-factor;
-    height: image-height + Theme.space-2 + 20px + 2px + 16px + Theme.space-2 + 3px;
+    height: image-height + Theme.zoom-info-height;
     background: transparent;
 
     property <length> image-height: root.base-height * root.zoom-factor;
@@ -61,13 +65,53 @@ export component CardZoom inherits Rectangle {
             source: root.card.image;
             image-fit: cover;
         }
+    }
 
-        // 迷你进度条：3px accent，贴卡片底部内侧，左右各 8px。
+    // 放大卡底部信息面板：56px、#181818。
+    panel := Rectangle {
+        x: 0;
+        y: image-height;
+        width: parent.width;
+        height: Theme.zoom-info-height;
+        border-radius: Theme.radius-panel;
+        background: Theme.zoom-panel-bg;
+
+        // 标题：14px bold。
+        panel-title := Text {
+            x: Theme.space-3;
+            y: Theme.space-2;
+            width: parent.width - Theme.space-3 * 2;
+            height: 18px;
+            text: root.card.title;
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-14;
+            font-weight: Theme.weight-bold;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        // 元信息：12px #B3B3B3。
+        panel-meta := Text {
+            x: Theme.space-3;
+            y: panel-title.y + panel-title.height;
+            width: parent.width - Theme.space-3 * 2;
+            height: 16px;
+            text: root.card.subtitle;
+            color: Theme.text-muted;
+            font-family: Theme.font-family;
+            font-size: Theme.font-12;
+            overflow: elide;
+            wrap: no-wrap;
+            visible: root.card.subtitle != "";
+        }
+
+        // 迷你进度条：3px 红条，距面板底 6px，左右各 6px。
         if (root.card.progress >= 0) :
             Rectangle {
-                x: Theme.space-2;
-                y: image-height - self.height - Theme.space-2;
-                width: parent.width - Theme.space-2 * 2;
+                x: Theme.space-2 + 2px;
+                y: parent.height - self.height - 6px;
+                width: parent.width - (Theme.space-2 + 2px) * 2;
                 height: 3px;
                 border-radius: 1.5px;
                 background: Theme.player-track;
@@ -83,36 +127,11 @@ export component CardZoom inherits Rectangle {
             }
     }
 
-    // 放大后浮出的信息（显式高度，不依赖字体测量）。
-    zoom-title := Text {
-        x: 0;
-        y: image-height + Theme.space-2;
-        width: parent.width;
-        height: 20px;
-        text: root.card.title;
-        color: Theme.text;
-        font-family: Theme.font-family;
-        font-size: Theme.font-14;
-        font-weight: Theme.weight-bold;
-        overflow: elide;
-        wrap: no-wrap;
-    }
-
-    zoom-meta := Text {
-        x: 0;
-        y: zoom-title.y + zoom-title.height + 2px;
-        width: parent.width;
-        height: 16px;
-        text: root.card.subtitle;
-        color: Theme.text-muted;
-        font-family: Theme.font-family;
-        font-size: Theme.font-12;
-        overflow: elide;
-        wrap: no-wrap;
-        visible: root.card.subtitle != "";
-    }
-
+    // 覆盖层的点击/悬停接管分两阶段：放大未完成时禁用（点击与悬停都穿透
+    // 给下面的基础卡，避免覆盖层一出现就抢走悬停导致抖动）；放大完成后启用，
+    // 指针在放大后的加宽区域里也能维持行激活。
     zoom-area := TouchArea {
+        enabled: root.zoom-factor > 1.3;
         clicked => {
             root.clicked();
         }

@@ -8,7 +8,8 @@ use crate::viewmodel::{
     CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerView, SourceOption, TrackItem,
 };
 use crate::{
-    CardData, DetailData, HomeData, LibraryData, PlayerData, SourceData, TabData, TrackData,
+    CardData, DetailData, HomeData, LibraryData, PlayerData, RowData, SourceData, TabData,
+    TrackData,
 };
 
 fn image_or_empty(images: &ImageStore, key: &crate::viewmodel::ImageKey) -> slint::Image {
@@ -66,6 +67,24 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
         ..card_data(hero, images)
     });
     let has_hero = hero.is_some();
+    let library_rows: Vec<RowData> = view
+        .library_rows
+        .iter()
+        .map(|row| RowData {
+            title: row.title.clone().into(),
+            cards: model(
+                row.items
+                    .iter()
+                    .map(|card| card_data(card, images))
+                    .collect(),
+            ),
+        })
+        .collect();
+    let library_row_count = view
+        .library_rows
+        .iter()
+        .filter(|row| !row.items.is_empty())
+        .count() as i32;
     HomeData {
         hero: hero.unwrap_or_default(),
         has_hero,
@@ -81,6 +100,8 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
                 .map(|card| card_data(card, images))
                 .collect(),
         ),
+        library_rows: model(library_rows),
+        library_row_count,
         tabs: model(view.library_tabs.iter().map(tab_data).collect()),
         current_tab: 0,
         empty: view.is_empty(),

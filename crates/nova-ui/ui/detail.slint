@@ -170,18 +170,8 @@ export component DetailPage inherits Rectangle {
                     visible: root.data.meta-line != "";
                 }
 
-                // 类型标签：text-secondary + `·` 分隔，不用胶囊。
-                Text {
-                    y: 92px + (root.data.original-title == "" ? 0px : 20px);
-                    width: parent.width;
-                    height: 20px;
-                    text: root.data.genres-line;
-                    color: Theme.text-muted;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-14;
-                    vertical-alignment: center;
-                    visible: root.data.genres-line != "";
-                }
+                // 不再单独画类型行：meta-line 已经是 `·` 分隔的完整元信息
+                // （年份 · 时长 · 类型），重复一同样式反而成了两个类型行。
             }
 
             // ---- 简介 / 按钮 / 版本下拉（backdrop 下方的黑底区）----

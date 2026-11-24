@@ -52,6 +52,11 @@ export global Theme {
     in property <color> player-menu-selected: #FFFFFF14;
     in property <color> warning: #E9A03C;
 
+    // ---- 视口（vw 驱动尺寸的基准；AppWindow 在 init / 变宽时写回）----
+    in-out property <length> viewport-width: 1280px;
+    // 1vw = 视口宽的百分之一；留白与卡宽全部从这里派生。
+    property <length> vw: root.viewport-width / 100;
+
     // ---- 间距（沿用 4·8·12·16·24·40·60）----
     in property <length> space-1: 4px;
     in property <length> space-2: 8px;
@@ -60,11 +65,35 @@ export global Theme {
     in property <length> space-5: 24px;
     in property <length> space-6: 40px;
     in property <length> space-8: 48px;
-    // 页面左右留白（Netflix 60px）。
-    in property <length> gutter: 60px;
+    // 页面左右留白：4vw（1280 → 51px），≥1920 固定 60px。
+    in property <length> gutter: root.viewport-width >= 1920px ? 60px : root.viewport-width * 0.04;
     in property <length> block-gap: 40px;
     in property <length> section-gap: 40px;
-    in property <length> card-gap: 12px;
+    // 行内卡间距（清单：8px，之前是 12px）。
+    in property <length> card-gap: 8px;
+    // 首行距 billboard 底 24px。
+    in property <length> first-row-gap: 24px;
+
+    // ---- 行内卡尺寸（vw 驱动：16.6vw 的 16:9 卡 / 14.2vw 的 2:3 卡）----
+    in property <length> card-landscape-w: root.viewport-width * 0.166;
+    in property <length> card-landscape-h: root.card-landscape-w * 9 / 16;
+    in property <length> card-portrait-w: root.viewport-width * 0.142;
+    in property <length> card-portrait-h: root.card-portrait-w * 3 / 2;
+
+    // ---- 卡片放大（清单：1.35 倍、延迟 400ms、200ms ease-out、上移 12px）----
+    in property <float> zoom-factor: 1.35;
+    in property <duration> zoom-delay: 400ms;
+    in property <duration> zoom-duration: 200ms;
+    in property <length> zoom-rise: 12px;
+    // 放大卡底部信息面板：56px、#181818。
+    in property <length> zoom-info-height: 56px;
+    in property <color> zoom-panel-bg: #181818;
+    // 行高里为放大卡下探预留的空间（覆盖 2:3 卡放大的最大下探量 ≈92px）。
+    in property <length> zoom-allowance: 96px;
+    // 行左右箭头：48×48 半透明黑圆角块。
+    in property <length> arrow-size: 48px;
+    // 顶栏链接间距：1.5vw（1280 → 19px）。
+    in property <length> nav-link-gap: root.viewport-width * 0.015;
     // 顶栏 68px，透明浮在 hero 上。
     in property <length> navbar-height: 68px;
     // 顶部横幅（通知位）：贴顶方角，出现时内容整体下移。
@@ -79,6 +108,7 @@ export global Theme {
     in property <length> font-12: 12px;
     in property <length> font-14: 14px;
     in property <length> font-16: 16px;
+    in property <length> font-20: 20px;
     in property <length> font-22: 22px;
     in property <length> font-34: 34px;
     in property <length> font-48: 48px;
@@ -95,9 +125,9 @@ export global Theme {
     in property <length> focus-width: 2px;
 
     // ---- 布局 ----
-    // Billboard：88vh、最大 720px（页面里按视口高度算）。
+    // Billboard：88vh、最大 720px（页面里按视口高度算）；左侧留白跟随 4vw gutter。
     in property <length> billboard-max: 720px;
-    in property <length> billboard-left: 60px;
+    in property <length> billboard-left: root.gutter;
     // 媒体库列数断点：宽 ≥1440 用 7 列，否则 6 列。
     in property <length> library-breakpoint: 1440px;
     // 行标题行高与"至少露出标题"的可见性约束。

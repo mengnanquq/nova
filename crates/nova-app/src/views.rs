@@ -13,7 +13,8 @@ use nova_core::{ItemId, MediaItem, MediaKind, MediaSource, ServerId, UserPrefere
 use nova_storage::Database;
 use nova_ui::viewmodel::{detail_meta_line, format_duration, meta_line};
 use nova_ui::{
-    CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerShellView, SourceOption,
+    CardView, DetailView, HomeView, LibraryRowView, LibraryTab, LibraryView, PlayerShellView,
+    SourceOption,
 };
 
 use crate::status::Status;
@@ -29,11 +30,15 @@ const DEFAULT_SORT_LABEL: &str = "排序：最近添加";
 
 /// 用本地缓存构建首页。
 ///
+/// 每个库行最多展示的条目数（Netflix 首页每行约 20 张卡）。
+const LIBRARY_ROW_LIMIT: usize = 20;
+
 /// 顺序：
 /// 1. “继续观看”来自 [`Database::continue_watching`]（SQL 侧过滤）；
 /// 2. “最近添加”来自顶层条目（按 `sort_title`，服务端列表不返回 `ParentId` 时也成立）；
-/// 3. hero 取继续观看第一条，否则最近添加第一条；
-/// 4. 离线/过期状态不再占用 hero 位：hero 始终是真实内容，状态由顶部横幅表达
+/// 3. 各媒体库前 [`LIBRARY_ROW_LIMIT`] 条（标题 = 库名；缓存里没有该库的条目时整行略过）；
+/// 4. hero 取继续观看第一条，否则最近添加第一条；
+/// 5. 离线/过期状态不再占用 hero 位：hero 始终是真实内容，状态由顶部横幅表达
 ///    （`Status::banner_data`，窗口模式在 `ui.rs` 里接入）。
 pub fn home_view(
     db: &Database,
@@ -49,6 +54,26 @@ pub fn home_view(
 
     view.continue_watching = in_progress.iter().map(card_view).collect();
     view.recently_added = recent.iter().map(card_view).collect();
+    view.library_rows = view
+        .library_tabs
+        .iter()
+        .filter(|tab| !tab.id.is_empty())
+        .map(
+            |tab| -> Result<LibraryRowView, nova_storage::StorageError> {
+                let parent = ItemId::new(tab.id.clone());
+                let items = db
+                    .children(server_id, Some(&parent))?
+                    .into_iter()
+                    .take(LIBRARY_ROW_LIMIT)
+                    .map(|item| card_view(&item))
+                    .collect();
+                Ok(LibraryRowView {
+                    title: tab.title.clone(),
+                    items,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
     view.hero = view
         .continue_watching
         .first()
@@ -309,6 +334,9 @@ fn apply_home_search(view: &mut HomeView, search: Option<&str>) {
         .retain(|card| matches(&card.title, &needle));
     view.recently_added
         .retain(|card| matches(&card.title, &needle));
+    for row in &mut view.library_rows {
+        row.items.retain(|card| matches(&card.title, &needle));
+    }
     let hero_matches = view.hero.as_ref().is_some_and(|hero| {
         hero.item_id == crate::status::STATUS_ITEM_ID || matches(&hero.title, &needle)
     });

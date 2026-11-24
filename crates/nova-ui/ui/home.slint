@@ -15,51 +15,68 @@ import { PosterCard } from "poster_card.slint";
 import { CardZoom } from "card_zoom.slint";
 import { EmptyState } from "empty_state.slint";
 
-// 一行卡片：标题 + 横向滚动 + 放大覆盖层。
+// 一行卡片：标题 + 横向滚动 + 放大覆盖层 + 行左右箭头。
 //
 // focused-index 是键盘焦点在本行内的局部索引（-1 表示焦点不在本行）；
 // 悬停（hot）优先于键盘焦点，同一时刻只放大一张卡。
+//
+// 卡片放大：scale 1.35、延迟 400ms 触发、200ms ease-out、上移 12px；
+// 放大卡是独立覆盖层（不参与行布局，其它卡坐标零跳动），且可以横向溢出
+// 到左右 4vw 留白区（裁切只发生在窗口边缘：纵向 Flickable 视口即遮罩）。
+// 行两端各留 gutter：基础卡从 gutter 开始滚动，放大卡可以穿出到留白上。
 component CardRow inherits Rectangle {
     in property <string> title;
     in property <[CardData]> cards;
-    in property <length> card-width: 260px;
-    in property <length> card-height: 390px;
+    // 2:3 海报行（最近添加）；默认 16:9 横版行。
+    in property <bool> portrait: false;
     in property <int> focused-index: -1;
     callback open-item(string);
 
+    property <length> card-width: root.portrait ? Theme.card-portrait-w : Theme.card-landscape-w;
+    property <length> card-height: root.portrait ? Theme.card-portrait-h : Theme.card-landscape-h;
     property <int> hot: -1;
-    property <int> zoom-index: root.hot >= 0 ? root.hot : root.focused-index;
+    // 悬停锁存：指针从基础卡移到放大后的加宽区/箭头上时，基础卡不再有悬停，
+    // 用 latch 记住最后悬停的卡，只要覆盖层或箭头仍被悬停就保持放大。
+    in-out property <int> latch: -1;
+    changed hot => {
+        if (root.hot >= 0) {
+            root.latch = root.hot;
+        }
+    }
+    property <int> zoom-index: root.hot >= 0 ? root.hot
+        : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
+            ? root.latch : root.focused-index);
     property <length> gap: Theme.card-gap;
-    // 放大后浮出的信息区高度（标题 + 元信息 + 进度条 + 边距）。
-    property <length> zoom-info: 76px;
+    property <length> title-off: Theme.section-title-height + Theme.space-3;
     property <float> zoom-factor: 1.0;
 
     states [
         zoomed when root.zoom-index >= 0 : {
-            zoom-factor: 1.08;
+            zoom-factor: Theme.zoom-factor;
             in {
                 animate zoom-factor {
-                    duration: 120ms;
-                    delay: 80ms;
+                    duration: Theme.zoom-duration;
+                    delay: Theme.zoom-delay;
                     easing: ease-out;
                 }
             }
             out {
                 animate zoom-factor {
-                    duration: 120ms;
+                    duration: Theme.zoom-duration;
                     easing: ease-out;
                 }
             }
         }
     ]
 
-    height: Theme.section-title-height + Theme.space-3 + root.card-height + root.zoom-info;
+    // 行高：标题区 + 卡 + 放大下探预留（覆盖层可能溢出行底）。
+    height: title-off + root.card-height + Theme.zoom-allowance;
 
-    // 行标题 + 查看全部。
+    // 行标题 + 查看全部（与卡同起于 gutter）。
     HorizontalLayout {
-        x: 0;
+        x: Theme.gutter;
         y: 0;
-        width: parent.width;
+        width: parent.width - Theme.gutter * 2;
         height: Theme.section-title-height;
         spacing: Theme.space-3;
 
@@ -104,17 +121,19 @@ component CardRow inherits Rectangle {
         }
     }
 
-    // 横向滚动的基础卡片（尺寸恒定）。
+    // 横向滚动的基础卡片（尺寸恒定）：两端各留 gutter，
+    // 滚动时卡片只在窗口边缘被裁掉（外层纵向视口即遮罩）。
     flick := Flickable {
         x: 0;
-        y: Theme.section-title-height + Theme.space-3;
+        y: title-off;
         width: parent.width;
         height: root.card-height;
         interactive: true;
-        content-width: row.preferred-width;
+        content-width: Theme.gutter * 2 + row.preferred-width;
         content-height: root.card-height;
 
         row := HorizontalLayout {
+            x: Theme.gutter;
             spacing: root.gap;
             height: root.card-height;
 
@@ -137,24 +156,97 @@ component CardRow inherits Rectangle {
     }
 
     // 放大覆盖层：按 zoom-index 画一张放大的卡（后绘制 → 盖住相邻卡片）。
-    if (root.zoom-index >= 0 && root.zoom-index < root.cards.length) :
-        CardZoom {
-            property <length> zw: root.card-width * root.zoom-factor;
-            property <length> zh: root.card-height * root.zoom-factor;
-            // 基础卡中心（视口坐标）= idx*(w+gap) + w/2 - 滚动偏移；放大卡与它同心。
-            property <length> center-x: root.zoom-index * (root.card-width + root.gap)
-                + root.card-width / 2 - flick.content-x;
-            x: clamp(center-x - zw / 2, 0px, parent.width - zw);
-            y: Theme.section-title-height + Theme.space-3 + root.card-height / 2 - zh / 2;
-            width: zw;
-            card: root.cards[root.zoom-index];
-            base-width: root.card-width;
-            base-height: root.card-height;
-            zoom-factor: root.zoom-factor;
+    // 常驻实例 + visible 门控：不参与布局，测试可以稳定读到覆盖层几何。
+    zoom-ov := CardZoom {
+        property <int> zi: root.cards.length > 0
+            ? clamp(root.zoom-index, 0, root.cards.length - 1) : 0;
+        property <length> zw: root.card-width * root.zoom-factor;
+        property <length> zh: root.card-height * root.zoom-factor;
+        // 基础卡中心（视口坐标）= gutter + idx*(w+gap) + w/2 - 滚动偏移。
+        property <length> center-x: Theme.gutter + zi * (root.card-width + root.gap)
+            + root.card-width / 2 - flick.content-x;
+        // 放大卡可以穿出左右 gutter（钳到窗口边缘）；上移 12px。
+        x: clamp(center-x - zw / 2, 0px, parent.width - zw);
+        y: title-off + root.card-height / 2 - zh / 2 - Theme.zoom-rise;
+        width: zw;
+        visible: root.cards.length > 0 && root.zoom-index >= 0
+            && root.zoom-index < root.cards.length;
+        card: root.cards[zi];
+        base-width: root.card-width;
+        base-height: root.card-height;
+        zoom-factor: root.zoom-factor;
+        clicked => {
+            root.open-item(root.cards[root.zoom-index].id);
+        }
+    }
+
+    // 放大覆盖层几何（测试断言「放大不跳布局」用：差异区域必须被它完全包含）。
+    out property <bool> zoom-on: zoom-ov.visible;
+    out property <length> zoom-rect-x: zoom-ov.x;
+    out property <length> zoom-rect-y: zoom-ov.y;
+    out property <length> zoom-rect-w: zoom-ov.width;
+    out property <length> zoom-rect-h: zoom-ov.height;
+    out property <length> arrow-y: arrow-left.y;
+
+    // 行左右箭头：48×48 半透明黑圆角块，垂直居中，悬停行时出现；
+    // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
+    arrow-left := Rectangle {
+        x: 0;
+        y: title-off + (root.card-height - Theme.arrow-size) / 2;
+        width: Theme.arrow-size;
+        height: Theme.arrow-size;
+        border-radius: Theme.radius-badge;
+        background: Theme.badge-bg;
+        visible: root.zoom-index >= 0 || arrow-left-area.has-hover;
+
+        // ‹ 箭头：字体字形（Inter / DejaVu 都有 U+2039，实测不豆腐；
+        // transform-rotation 在 1.19 渲染器里不生效，不能用短棒旋转拼）。
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "\u{2039}";
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: 26px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        arrow-left-area := TouchArea {
             clicked => {
-                root.open-item(root.cards[root.zoom-index].id);
+                flick.content-x = max(flick.content-x - root.width, 0px);
             }
         }
+    }
+
+    arrow-right := Rectangle {
+        x: parent.width - self.width;
+        y: arrow-left.y;
+        width: Theme.arrow-size;
+        height: Theme.arrow-size;
+        border-radius: Theme.radius-badge;
+        background: Theme.badge-bg;
+        visible: root.zoom-index >= 0 || arrow-right-area.has-hover;
+
+        // › 箭头：与左侧镜像（U+203A）。
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "\u{203A}";
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: 26px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        arrow-right-area := TouchArea {
+            clicked => {
+                flick.content-x = min(flick.content-x + root.width,
+                    max(flick.content-width - root.width, 0px));
+            }
+        }
+    }
 }
 
 export component HomePage inherits Rectangle {
@@ -195,33 +287,46 @@ export component HomePage inherits Rectangle {
 
     // 内容总高度：显式计算（不用 preferred-height —— 无头渲染器布局中途
     // 会把未决的 preferred 读成 0，Flickable 会把 content-y 钳回 0）。
+    //
+    // billboard 槽位比 88vh 少 16px：块间距 40px，补回后首行标题正好
+    // 落在 billboard（88vh）底 24px 处。
+    property <length> billboard-slot: root.data.has-hero ? billboard-height - 16px : 0px;
     property <length> continue-row-h: Theme.section-title-height + Theme.space-3
-        + landscape-h + 76px;
+        + Theme.card-landscape-h + Theme.zoom-allowance;
     property <length> recent-row-h: Theme.section-title-height + Theme.space-3
-        + portrait-h + 76px;
+        + Theme.card-portrait-h + Theme.zoom-allowance;
+    property <length> library-row-h: continue-row-h;
     property <int> visible-blocks: (root.data.has-hero ? 1 : 0)
-        + (root.continue-count > 0 ? 1 : 0) + (root.recent-count > 0 ? 1 : 0);
-    property <length> content-total: (root.data.has-hero ? billboard-height : 0px)
+        + (root.continue-count > 0 ? 1 : 0) + (root.recent-count > 0 ? 1 : 0)
+        + root.data.library-row-count;
+    property <length> content-total: root.billboard-slot
         + (root.continue-count > 0 ? continue-row-h : 0px)
         + (root.recent-count > 0 ? recent-row-h : 0px)
+        + root.data.library-row-count * library-row-h
         + (root.visible-blocks > 0 ? (root.visible-blocks - 1) * Theme.section-gap : 0px)
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
 
     // Billboard：88vh、最大 720px。
     property <length> billboard-height: min(self.height * root.billboard-ratio, Theme.billboard-max);
-    // 行卡片尺寸：继续观看 16:9（320px），最近添加 2:3（260px）。
-    property <length> landscape-w: 320px;
-    property <length> landscape-h: 180px;
-    property <length> portrait-w: 260px;
-    property <length> portrait-h: 390px;
     property <int> continue-count: root.data.continue-watching.length;
     property <int> recent-count: root.data.recently-added.length;
     // 键盘焦点落到行内的局部索引（焦点不在该行时为 -1）。
     property <int> continue-focus: root.focus-index < root.continue-count
         ? root.focus-index : -1;
+    // 焦点不在本行（越界）时必须是 -1：大下标不能点亮下一行的箭头/放大。
     property <int> recent-focus: root.focus-index >= root.continue-count
+        && root.focus-index - root.continue-count < root.recent-count
         ? root.focus-index - root.continue-count : -1;
+
+    // 测试用：继续观看行的几何（「放大不跳布局」断言的基准）。
+    out property <length> row0-y: row0.y - flick.content-y;
+    out property <length> zoom-rect-x: row0.zoom-rect-x;
+    out property <length> zoom-rect-y: row0.zoom-rect-y + row0.y - flick.content-y;
+    out property <length> zoom-rect-w: row0.zoom-rect-w;
+    out property <length> zoom-rect-h: row0.zoom-rect-h;
+    out property <bool> row0-zoom-on: row0.zoom-on;
+    out property <length> row0-arrow-y: row0.arrow-y + row0.y - flick.content-y;
 
     if (root.data.empty) :
         EmptyState {
@@ -257,7 +362,8 @@ export component HomePage inherits Rectangle {
             if (root.data.has-hero) :
                 hero := Rectangle {
                     width: parent.width;
-                    height: root.billboard-height;
+                    // 槽位比 88vh 少 16px：补回块间距后首行距 billboard 底 24px。
+                    height: root.billboard-height - 16px;
                     clip: true;
 
                     Image {
@@ -287,14 +393,14 @@ export component HomePage inherits Rectangle {
                         background: @linear-gradient(90deg, Theme.scrim 0%, #00000000 65%);
                     }
 
-                    // 文案块：左留白 60px，底边锚在 78% 高度（垂直居下 22%）。
+                    // 文案块：底边锚在距 billboard 底 18% 处（清单数值）。
                     // 用固定高度容器 + alignment: end，不依赖 preferred-height 反推。
                     Rectangle {
                         x: Theme.billboard-left;
                         width: parent.width - Theme.billboard-left - Theme.gutter;
                         // 有简介：标题 58 + 元信息 20 + 简介 78 + 按钮 44 + 间距；无简介收紧。
                         height: root.data.hero.overview != "" ? 240px : 160px;
-                        y: parent.height * 0.78 - self.height;
+                        y: parent.height * 0.82 - self.height;
                         background: transparent;
 
                         VerticalLayout {
@@ -314,28 +420,30 @@ export component HomePage inherits Rectangle {
                             wrap: no-wrap;
                         }
 
-                        Text {
-                            text: root.data.hero.subtitle;
-                            color: Theme.text-muted;
-                            font-family: Theme.font-family;
-                            font-size: Theme.font-14;
-                            height: 20px;
-                            overflow: elide;
-                            wrap: no-wrap;
-                            visible: root.data.hero.subtitle != "";
-                        }
+                        // 条件实例而不是 visible:false：布局器不给未实例化的元素留位，
+                        // 无副标题/简介时按钮真正收紧（visible:false 仍会被 VerticalLayout 占位）。
+                        if (root.data.hero.subtitle != "") :
+                            Text {
+                                text: root.data.hero.subtitle;
+                                color: Theme.text-muted;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-14;
+                                height: 20px;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
 
-                        Text {
-                            text: root.data.hero.overview;
-                            color: Theme.text;
-                            font-family: Theme.font-family;
-                            font-size: Theme.font-16;
-                            width: 560px;
-                            height: 78px;
-                            wrap: word-wrap;
-                            overflow: elide;
-                            visible: root.data.hero.overview != "";
-                        }
+                        if (root.data.hero.overview != "") :
+                            Text {
+                                text: root.data.hero.overview;
+                                color: Theme.text;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-16;
+                                width: 560px;
+                                height: 78px;
+                                wrap: word-wrap;
+                                overflow: elide;
+                            }
 
                             HorizontalLayout {
                                 spacing: Theme.space-3;
@@ -442,7 +550,8 @@ export component HomePage inherits Rectangle {
                     if (root.data.hero.badge != "") :
                         Rectangle {
                             x: parent.width - self.width - Theme.billboard-left;
-                            y: parent.height * 0.78;
+                            // 与按钮同一行（按钮高 44，徽标 24 → 上移 34 居中）。
+                            y: parent.height * 0.82 - 34px;
                             width: hero-badge.preferred-width + Theme.space-3;
                             height: 24px;
                             border-radius: Theme.radius-badge;
@@ -462,29 +571,40 @@ export component HomePage inherits Rectangle {
                         }
                 }
 
-            // ---- 继续观看（16:9 横版缩略图）----
-            if (root.continue-count > 0) :
-                CardRow {
-                    width: parent.width;
-                    title: "继续观看";
-                    cards: root.data.continue-watching;
-                    card-width: root.landscape-w;
-                    card-height: root.landscape-h;
-                    focused-index: root.continue-focus;
-                    open-item(id) => {
-                        root.open-item(id);
-                    }
+            // ---- 继续观看（16:9 横版缩略图，带进度）----
+            // 常驻实例 + visible 门控：布局器跳过不可见元素，
+            // 测试也能稳定读到行几何。
+            row0 := CardRow {
+                width: parent.width;
+                visible: root.continue-count > 0;
+                title: "继续观看";
+                cards: root.data.continue-watching;
+                focused-index: root.continue-focus;
+                open-item(id) => {
+                    root.open-item(id);
                 }
+            }
 
             // ---- 最近添加（2:3 竖版海报）----
-            if (root.recent-count > 0) :
+            row1 := CardRow {
+                width: parent.width;
+                visible: root.recent-count > 0;
+                title: "最近添加";
+                portrait: true;
+                cards: root.data.recently-added;
+                focused-index: root.recent-focus;
+                open-item(id) => {
+                    root.open-item(id);
+                }
+            }
+
+            // ---- 各库前 20 条（16:9，标题 = 库名）----
+            for row-data in root.data.library-rows :
                 CardRow {
                     width: parent.width;
-                    title: "最近添加";
-                    cards: root.data.recently-added;
-                    card-width: root.portrait-w;
-                    card-height: root.portrait-h;
-                    focused-index: root.recent-focus;
+                    visible: row-data.cards.length > 0;
+                    title: row-data.title;
+                    cards: row-data.cards;
                     open-item(id) => {
                         root.open-item(id);
                     }

@@ -79,7 +79,7 @@ export component Navbar inherits Rectangle {
                 text: "NOVA";
                 color: Theme.text;
                 font-family: Theme.font-family;
-                font-size: Theme.font-22;
+                font-size: Theme.font-20;
                 font-weight: Theme.weight-bold;
                 letter-spacing: -0.5px;
                 vertical-alignment: center;
@@ -88,15 +88,22 @@ export component Navbar inherits Rectangle {
 
         // 库标签可能很多（真实 Emby 上 10+ 个）：放进可裁剪容器里，
         // 让它占剩余宽度并在内部裁掉溢出部分，搜索框宽度不受影响。
-        tabs-view := Flickable {
+        // Flickable 自身的 horizontal-stretch 不生效（preferred 宽 = 内容宽），
+        // 包一层 Rectangle 来占满剩余宽度，搜索/头像才能贴到右缘。
+        tabs-stretch := Rectangle {
             horizontal-stretch: 1;
+            height: parent.height;
+            clip: false;
+
+        tabs-view := Flickable {
+            width: parent.width;
             height: parent.height;
             content-width: tabs-row.preferred-width;
             content-height: parent.height;
             interactive: true;
 
             tabs-row := HorizontalLayout {
-                spacing: Theme.space-5;
+                spacing: Theme.nav-link-gap;
                 height: parent.height;
                 cross-axis-alignment: center;
 
@@ -127,6 +134,7 @@ export component Navbar inherits Rectangle {
                 }
             }
         }
+        }
 
         // 搜索：图标按钮，聚焦时展开为 240px 输入框。
         Rectangle {
@@ -140,43 +148,106 @@ export component Navbar inherits Rectangle {
                 easing: ease-out;
             }
 
-            // 放大镜：圆环 + 45° 手柄，全部用 Theme 颜色。
+            // 放大镜：24px 描边 2px（圆环 + 45° 手柄），不用字体字形。
             search-icon := Rectangle {
                 visible: !root.search-focused;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                width: 20px;
-                height: 20px;
+                width: 24px;
+                height: 24px;
                 background: transparent;
 
                 Rectangle {
-                    x: 1px;
-                    y: 1px;
-                    width: 12px;
-                    height: 12px;
+                    x: 0.5px;
+                    y: 0.5px;
+                    width: 15px;
+                    height: 15px;
                     border-radius: Theme.radius-pill;
                     border-width: 2px;
                     border-color: search-area.has-hover ? Theme.text : Theme.text-muted;
                     background: transparent;
                 }
 
+                // 柄：╲ 字形当 45° 斜线（transform-rotation 在 1.19 渲染器不生效，
+                // 该字形笔画只有 1px，错位叠两个凑成 2px 描边，与圆环一致）。
+                // 盒子要比字形大：Text 会按自身几何裁剪，盒小了斜线会被裁没。
+                Text {
+                    x: 6px;
+                    y: 6px;
+                    width: 22px;
+                    height: 22px;
+                    text: "\u{2572}";
+                    color: search-area.has-hover ? Theme.text : Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: 18px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 7px;
+                    y: 6px;
+                    width: 22px;
+                    height: 22px;
+                    text: "\u{2572}";
+                    color: search-area.has-hover ? Theme.text : Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: 18px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // 展开态左侧的 20px 小放大镜。
+            search-icon-mini := Rectangle {
+                visible: root.search-focused;
+                x: Theme.space-2;
+                y: (parent.height - self.height) / 2;
+                width: 20px;
+                height: 20px;
+                background: transparent;
+
                 Rectangle {
-                    x: 14.5px;
-                    y: 14.5px;
-                    width: 7px;
-                    height: 2px;
-                    border-radius: 1px;
-                    background: search-area.has-hover ? Theme.text : Theme.text-muted;
-                    transform-rotation: 45deg;
-                    transform-origin: { x: 0px, y: 0px };
+                    x: 0.5px;
+                    y: 0.5px;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: Theme.radius-pill;
+                    border-width: 2px;
+                    border-color: Theme.text-muted;
+                    background: transparent;
+                }
+
+                Text {
+                    x: 6px;
+                    y: 6px;
+                    width: 15px;
+                    height: 15px;
+                    text: "\u{2572}";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 7px;
+                    y: 6px;
+                    width: 15px;
+                    height: 15px;
+                    text: "\u{2572}";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
 
             // 占位：聚焦但无输入时显示。
             Text {
                 visible: root.search-focused && root.search-text == "";
-                x: Theme.space-2;
-                width: parent.width - Theme.space-2 * 2;
+                x: Theme.space-2 + 20px + Theme.space-2;
+                width: parent.width - Theme.space-2 * 2 - 20px;
                 height: parent.height;
                 text: "搜索";
                 color: Theme.text-faint;
@@ -187,8 +258,8 @@ export component Navbar inherits Rectangle {
 
             search-input := TextInput {
                 visible: root.search-focused;
-                x: Theme.space-2;
-                width: parent.width - Theme.space-2 * 2
+                x: Theme.space-2 + 20px + Theme.space-2;
+                width: parent.width - Theme.space-2 * 2 - 20px
                     - (root.search-text == "" ? 0px : clear-button.width + Theme.space-1);
                 height: parent.height;
                 text <=> root.search-text;
@@ -251,7 +322,7 @@ export component Navbar inherits Rectangle {
             }
         }
 
-        // 用户头像：红色圆形。
+        // 用户头像：32px 圆，红底 + 白色首字母 14px bold。
         Rectangle {
             width: 32px;
             height: 32px;
@@ -263,7 +334,7 @@ export component Navbar inherits Rectangle {
                 color: Theme.accent-contrast;
                 font-family: Theme.font-family;
                 font-size: Theme.font-14;
-                font-weight: Theme.weight-semibold;
+                font-weight: Theme.weight-bold;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }

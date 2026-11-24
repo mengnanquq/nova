@@ -16,6 +16,11 @@ export struct CardData {
     image: image,
 }
 
+export struct RowData {
+    title: string,
+    cards: [CardData],
+}
+
 export struct TabData {
     id: string,
     title: string,
@@ -33,10 +38,16 @@ export struct HomeData {
     has-hero: bool,
     continue-watching: [CardData],
     recently-added: [CardData],
+    // 各媒体库前 20 条的行（16:9，标题 = 库名）。
+    library-rows: [RowData],
+    // 非空库行数（内容高度计算用）。
+    library-row-count: int,
     tabs: [TabData],
     current-tab: int,
     empty: bool,
 }
+
+
 
 export struct LibraryData {
     id: string,

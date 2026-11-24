@@ -8,6 +8,15 @@ use crate::viewmodel::focus::chunked_rows;
 use crate::viewmodel::image::{ImageKey, ImageKind};
 use crate::viewmodel::library::LibraryTab;
 
+/// 首页里的一个媒体库行（16:9，标题 = 库名，最多 20 条）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LibraryRowView {
+    /// 行标题（库名）。
+    pub title: String,
+    /// 行内卡片。
+    pub items: Vec<CardView>,
+}
+
 /// 首页。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HomeView {
@@ -17,6 +26,8 @@ pub struct HomeView {
     pub continue_watching: Vec<CardView>,
     /// “最近添加”网格。
     pub recently_added: Vec<CardView>,
+    /// 各媒体库前 20 条的行（继续观看 / 最近添加之后）。
+    pub library_rows: Vec<LibraryRowView>,
     /// 顶部导航标签。
     pub library_tabs: Vec<LibraryTab>,
 }
@@ -35,9 +46,12 @@ impl HomeView {
         }
     }
 
-    /// 首页是否完全没有内容（hero 与两个列表都空）。
+    /// 首页是否完全没有内容（hero、两个列表与库行都空）。
     pub fn is_empty(&self) -> bool {
-        self.hero.is_none() && self.continue_watching.is_empty() && self.recently_added.is_empty()
+        self.hero.is_none()
+            && self.continue_watching.is_empty()
+            && self.recently_added.is_empty()
+            && self.library_rows.iter().all(|row| row.items.is_empty())
     }
 
     /// 首页需要的图片键：hero 需要背景图与海报兜底，卡片需要海报。
@@ -49,6 +63,9 @@ impl HomeView {
         }
         keys.extend(self.continue_watching.iter().map(CardView::poster_key));
         keys.extend(self.recently_added.iter().map(CardView::poster_key));
+        for row in &self.library_rows {
+            keys.extend(row.items.iter().map(CardView::poster_key));
+        }
         keys
     }
 

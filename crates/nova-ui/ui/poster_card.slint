@@ -71,13 +71,14 @@ export component PosterCard inherits Rectangle {
             }
         }
 
-    // 底部进度条：3px accent，贴底。
+    // 底部进度条：3px 红，距卡底 6px，左右各 6px。
     if (root.card.progress >= 0) :
         Rectangle {
-            x: 0;
-            y: parent.height - self.height;
-            width: parent.width;
+            x: 6px;
+            y: parent.height - self.height - 6px;
+            width: parent.width - 12px;
             height: 3px;
+            border-radius: 1.5px;
             background: Theme.player-track;
 
             Rectangle {
@@ -85,6 +86,7 @@ export component PosterCard inherits Rectangle {
                 y: 0;
                 height: parent.height;
                 width: parent.width * clamp(root.card.progress, 0, 1);
+                border-radius: 1.5px;
                 background: Theme.accent;
             }
         }
