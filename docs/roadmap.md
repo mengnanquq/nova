@@ -101,9 +101,11 @@
 
 ### 阶段 3 遗留债
 
-1. **`nova-ui` 缺搜索框的文本属性**：只有 `search-focused: bool` 与 `search()` 回调，没有输入文本，
-   所以"输入即时过滤"接不上（过滤逻辑已在 `nova-app` 实现并可用 `--print-view --search` 验证）。
-2. **`nova-ui` 没有横幅/通知位**：登录过期只能占用 hero 位置显示状态卡。
+1. ~~`nova-ui` 缺搜索框的文本属性~~ **已修**：`search-text` 双向绑定 + `search-changed/submit/clear/escape`，
+   输入即时过滤已接上（`nova-app` 的 `apply_search`）。
+2. ~~`nova-ui` 没有横幅/通知位~~ **已修**：`BannerData`（info/warning/danger + 可选动作），
+   登录过期与未连接服务器改用横幅，hero 恢复显示真实内容。够外加了逐像素断言：
+   横幅出现只平移内容、不改任何元素尺寸。
 3. `nova-images::FetchError` 无法表达 provider 的错误分类（`FetchError::Transport` 需要不可构造的 `reqwest::Error`），
    provider 侧的 `Network/Decode/Server` 只能降级成"空体"。应把 `Fetcher` 的错误改成上层可自定义的泛型或 trait 对象。
 4. SQLite 没有 libraries 表（`Library` 不是 `MediaItem`），离线启动时标签退化为"全部"。
