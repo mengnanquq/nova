@@ -16,13 +16,24 @@ export component HomePage inherits Rectangle {
     in property <HomeData> data;
     in-out property <int> focus-index: 0;
     in property <bool> search-focused: false;
+    // 搜索框文本（与 AppWindow 双向同步）。
+    in-out property <string> search-text;
 
     callback open-item(string);
     callback hero-play();
     callback tab-activated(string);
     callback search();
-    // 空状态的"连接服务器"：真正的连接流程在上层（这里只发回调）。
+    callback search-changed(string);
+    callback search-submit();
+    callback search-clear();
+    callback search-escape();
+    // 空状态的“连接服务器”：真正的连接流程在上层（这里只发回调）。
     callback connect-server();
+
+    /// 把焦点交给搜索输入框（Ctrl+F / 点击胶囊时由上层调到这里）。
+    public function focus-input() {
+        nav.focus-input();
+    }
 
     background: Theme.bg;
     property <length> card-width: root.width < Theme.library-breakpoint
@@ -53,16 +64,29 @@ export component HomePage inherits Rectangle {
         && root.recent-top + section-recent.height > 0px;
 
     VerticalLayout {
-        Navbar {
+        nav := Navbar {
             height: Theme.navbar-height;
             tabs: root.data.tabs;
             current-index: root.data.current-tab;
             search-focused: root.search-focused;
+            search-text <=> root.search-text;
             tab-activated(id) => {
                 root.tab-activated(id);
             }
             search => {
                 root.search();
+            }
+            search-changed(text) => {
+                root.search-changed(text);
+            }
+            search-submit => {
+                root.search-submit();
+            }
+            search-clear => {
+                root.search-clear();
+            }
+            search-escape => {
+                root.search-escape();
             }
         }
 

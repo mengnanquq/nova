@@ -10,8 +10,24 @@ export component Navbar inherits Rectangle {
     in property <[TabData]> tabs;
     in property <int> current-index: 0;
     in property <bool> search-focused: false;
+    // 搜索框文本：与 AppWindow 双向同步（TextInput ⇄ 这里 ⇄ 上层）。
+    in-out property <string> search-text;
+
     callback tab-activated(string);
     callback search();
+    // 输入即时过滤：每次编辑都发。
+    callback search-changed(string);
+    // Enter 提交。
+    callback search-submit();
+    // 清除按钮（有输入时出现）。
+    callback search-clear();
+    // 输入框里按 Esc：交由上层退出聚焦。
+    callback search-escape();
+
+    /// 让搜索输入框拿到键盘焦点（Ctrl+F 由 Rust 侧调到这里）。
+    public function focus-input() {
+        search-input.focus();
+    }
 
     height: Theme.navbar-height;
     background: Theme.bg;
@@ -112,20 +128,79 @@ export component Navbar inherits Rectangle {
             border-width: 1px;
             border-color: root.search-focused ? Theme.accent : Theme.hairline;
 
+            // 占位：空态且未聚焦时显示（有焦点或有输入时让位给真实文本）。
             Text {
+                visible: root.search-text == "" && !search-input.has-focus;
                 x: Theme.space-3;
                 width: parent.width - Theme.space-3 * 2;
                 height: parent.height;
                 text: "搜索  ·  Ctrl+F";
-                color: root.search-focused ? Theme.text : Theme.text-faint;
+                color: Theme.text-faint;
                 font-family: Theme.font-family;
                 font-size: Theme.font-12;
                 vertical-alignment: center;
             }
 
+            // 点击胶囊空白处也聚焦（TextInput 自身区域由它处理鼠标）。
             TouchArea {
                 clicked => {
                     root.search();
+                }
+            }
+
+            search-input := TextInput {
+                x: Theme.space-3;
+                width: parent.width - Theme.space-3 * 2
+                    - (root.search-text == "" ? 0px : clear-button.width + Theme.space-2);
+                height: parent.height;
+                text <=> root.search-text;
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                vertical-alignment: center;
+                single-line: true;
+
+                edited => {
+                    root.search-changed(root.search-text);
+                }
+                accepted => {
+                    root.search-submit();
+                }
+                key-pressed(event) => {
+                    // Esc 不进文本框：退出聚焦（由上层把焦点还给全局键盘处理）。
+                    if (event.text == Key.Escape) {
+                        root.search-escape();
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+
+            // 清除按钮：只在有输入时出现。
+            clear-button := Rectangle {
+                visible: root.search-text != "";
+                x: parent.width - self.width - Theme.space-2;
+                y: (parent.height - self.height) / 2;
+                width: 20px;
+                height: 20px;
+                border-radius: Theme.radius-pill;
+                background: clear-area.has-hover ? Theme.wash : Theme.surface-raised;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "×";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                clear-area := TouchArea {
+                    clicked => {
+                        root.search-clear();
+                    }
                 }
             }
         }

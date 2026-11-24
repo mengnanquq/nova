@@ -16,7 +16,7 @@ use nova_ui::{
     CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerShellView, SourceOption,
 };
 
-use crate::status::{Status, decorate_home};
+use crate::status::Status;
 
 /// 播放页状态文案（阶段 3 只有外壳）。
 pub const PLAYER_STATUS: &str = "播放引擎将在阶段 4 接入";
@@ -30,15 +30,16 @@ const DEFAULT_SORT_LABEL: &str = "排序：最近添加";
 /// 用本地缓存构建首页。
 ///
 /// 顺序：
-/// 1. "继续观看"来自 [`Database::continue_watching`]（SQL 侧过滤）；
-/// 2. "最近添加"来自顶层条目（按 `sort_title`，服务端列表不返回 `ParentId` 时也成立）；
+/// 1. “继续观看”来自 [`Database::continue_watching`]（SQL 侧过滤）；
+/// 2. “最近添加”来自顶层条目（按 `sort_title`，服务端列表不返回 `ParentId` 时也成立）；
 /// 3. hero 取继续观看第一条，否则最近添加第一条；
-/// 4. 离线/过期状态下 hero 换成状态卡（缓存列表保留）。
+/// 4. 离线/过期状态不再占用 hero 位：hero 始终是真实内容，状态由顶部横幅表达
+///    （`Status::banner_data`，窗口模式在 `ui.rs` 里接入）。
 pub fn home_view(
     db: &Database,
     server_id: &ServerId,
     preferences: &UserPreferences,
-    status: &Status,
+    _status: &Status,
     tabs: Vec<LibraryTab>,
     search: Option<&str>,
 ) -> Result<HomeView, nova_storage::StorageError> {
@@ -54,7 +55,6 @@ pub fn home_view(
         .cloned()
         .or_else(|| view.recently_added.first().cloned());
 
-    decorate_home(&mut view, status);
     apply_home_search(&mut view, search);
     Ok(view)
 }
@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_status_replaces_hero_but_keeps_cached_cards() {
+    fn offline_keeps_real_hero_and_cached_cards() {
         let db = Database::open_in_memory().expect("内存库");
         let server = server("srv-1");
         db.upsert_server(&server.info, 1).expect("写服务器");
@@ -464,9 +464,10 @@ mod tests {
         )
         .expect("构建首页");
 
+        // 状态不再占用 hero 位：hero 恢复为真实内容，状态由顶部横幅表达。
         assert_eq!(
             home.hero.as_ref().map(|hero| hero.title.as_str()),
-            Some("未连接服务器")
+            Some("缓存里的片子")
         );
         assert_eq!(home.recently_added.len(), 1);
         let summary = summary(&Status::NoServer, &home);

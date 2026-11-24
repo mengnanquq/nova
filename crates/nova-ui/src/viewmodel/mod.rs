@@ -5,6 +5,7 @@
 //!
 //! 上层把 `nova-core` 的媒体模型压成这些结构，界面只读它们。
 
+pub mod banner;
 pub mod card;
 pub mod detail;
 pub mod focus;
@@ -15,6 +16,7 @@ pub mod library;
 pub mod nav;
 pub mod player;
 
+pub use banner::{BannerData, BannerLevel};
 pub use card::CardView;
 pub use detail::{DetailView, SourceOption};
 pub use focus::move_focus;

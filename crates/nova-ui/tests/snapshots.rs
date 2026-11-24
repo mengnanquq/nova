@@ -11,9 +11,9 @@ use common::{
     player_buffering, player_controls_hidden, player_error, player_subtitle_menu, player_view,
     snapshots_dir, write_png,
 };
-use nova_ui::{App, AppWindow, Page};
+use nova_ui::{App, AppWindow, BannerData, BannerLevel, KeyCommand, Page};
 use slint::ComponentHandle;
-use slint::platform::WindowEvent;
+use slint::platform::{Key, WindowEvent};
 
 fn capture(app: &App, name: &str) {
     app.ui()
@@ -53,7 +53,35 @@ fn write_all_snapshots() {
     app.show_page(Page::Home);
     capture(&app, "home-filled.png");
 
-    // 2b. 首页滚动后：区块标题贴住视口顶（粘性），不会被视口底腰斩。
+    // 2a. 顶部横幅（warning + 动作按钮）：必须在滚动前拍——
+    // 横幅只应把内容整体下移 48px，元素尺寸不变（卡片高度与 home-filled 逐像素一致）。
+    app.set_banner(Some(
+        BannerData::new(
+            "登录已过期：重新运行 nova login；本地缓存仍可浏览",
+            BannerLevel::Warning,
+        )
+        .with_action("重新登录"),
+    ));
+    capture(&app, "banner-warning.png");
+    app.set_banner(None);
+
+    // 2b. 搜索框聚焦 + 有输入（占位消失，右侧出现清除按钮）；拍完退出聚焦并清空。
+    assert!(app.handle_key(KeyCommand::Search));
+    let window = app.ui().window();
+    for ch in "dune".chars() {
+        let text: slint::SharedString = ch.to_string().into();
+        window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        window.dispatch_event(WindowEvent::KeyReleased { text });
+    }
+    capture(&app, "search-active.png");
+    app.set_search_text("");
+    let escape: slint::SharedString = Key::Escape.into();
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: escape.clone(),
+    });
+    window.dispatch_event(WindowEvent::KeyReleased { text: escape });
+
+    // 2c. 首页滚动后：区块标题贴住视口顶（粘性），不会被视口底腰斩。
     // 用鼠标移入 + 滚轮事件推进 Flickable（testing backend 会正常处理 Wheel 事件）。
     app.ui().window().dispatch_event(WindowEvent::PointerMoved {
         position: slint::LogicalPosition::new(640.0, 500.0),

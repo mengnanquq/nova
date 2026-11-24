@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod banner;
 pub mod convert;
 pub mod detail;
 pub mod home;

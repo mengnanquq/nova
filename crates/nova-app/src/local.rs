@@ -28,7 +28,7 @@ use nova_ui::{DetailView, HomeView, ImageKey, LibraryTab, LibraryView, PlayerShe
 use crate::env::Env;
 use crate::error::AppError;
 use crate::images::{IMAGE_CACHE_BUDGET, ImageSpec};
-use crate::status::{Status, decorate_home};
+use crate::status::Status;
 use crate::views;
 
 /// 本地状态：一次启动内共享（`Arc<Local>`）。
@@ -176,7 +176,7 @@ impl Local {
         }
     }
 
-    /// 用缓存构建首页（包含离线状态卡）。
+    /// 用缓存构建首页（离线状态由顶部横幅表达，hero 始终是真实内容）。
     pub fn home(&self, search: Option<&str>) -> Result<HomeView, AppError> {
         let status = self.status();
         let tabs = self.tabs();
@@ -189,11 +189,7 @@ impl Local {
                 tabs,
                 search,
             )?),
-            None => {
-                let mut view = HomeView::empty(tabs);
-                decorate_home(&mut view, &status);
-                Ok(view)
-            }
+            None => Ok(HomeView::empty(tabs)),
         }
     }
 
@@ -512,11 +508,11 @@ mod tests {
         assert!(matches!(local.status(), Status::NoServer));
         assert!(local.server.is_none());
         assert!(local.tabs().is_empty());
+        // 状态不再占用 hero 位：首页是空态，状态由顶部横幅表达。
         let home = local.home(None).expect("构建首页");
-        assert_eq!(
-            home.hero.as_ref().map(|hero| hero.title.as_str()),
-            Some("未连接服务器")
-        );
+        assert!(home.hero.is_none());
+        assert!(home.continue_watching.is_empty() && home.recently_added.is_empty());
+        assert!(local.status().banner_data().is_some());
     }
 
     #[test]

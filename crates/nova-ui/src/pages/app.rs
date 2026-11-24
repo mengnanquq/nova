@@ -13,9 +13,10 @@ use std::time::Duration;
 use slint::ComponentHandle;
 
 use crate::AppWindow;
-use crate::pages::{assets::ImageStore, detail, home, library, player};
+use crate::pages::{assets::ImageStore, banner, detail, home, library, player};
 use crate::viewmodel::{
-    DetailView, HomeView, ImageKey, LibraryView, Navigator, PlayerView, Route, move_focus,
+    BannerData, DetailView, HomeView, ImageKey, LibraryView, Navigator, PlayerView, Route,
+    move_focus,
 };
 
 /// 页面编号。
@@ -155,6 +156,10 @@ struct Callbacks {
     play: Option<StrHandler>,
     back: Option<VoidHandler>,
     search: Option<VoidHandler>,
+    search_changed: Option<StrHandler>,
+    search_submit: Option<VoidHandler>,
+    search_clear: Option<VoidHandler>,
+    banner_action: Option<VoidHandler>,
     sort: Option<VoidHandler>,
     tab: Option<StrHandler>,
     source: Option<StrHandler>,
@@ -210,6 +215,8 @@ struct State {
     detail: DetailView,
     player: PlayerView,
     player_fullscreen: bool,
+    // 当前顶部横幅；`None` 表示隐藏。
+    banner: Option<BannerData>,
     // 上一次推给引擎的字幕抬升量（`sub-margin-y`）：不变就不重复发。
     subtitle_margin: Option<i64>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
@@ -227,6 +234,7 @@ impl Default for State {
             detail: DetailView::default(),
             player: PlayerView::default(),
             player_fullscreen: false,
+            banner: None,
             subtitle_margin: None,
             images: Rc::new(RefCell::new(ImageStore::new())),
             callbacks: Callbacks::default(),
@@ -446,6 +454,27 @@ impl App {
         handle_key(&self.ui, &self.state, command)
     }
 
+    /// 设置顶部横幅；`None` 隐藏。
+    pub fn set_banner(&self, banner: Option<BannerData>) {
+        self.state.borrow_mut().banner = banner.clone();
+        banner::apply(&self.ui, banner.as_ref());
+    }
+
+    /// 当前横幅快照。
+    pub fn banner(&self) -> Option<BannerData> {
+        self.state.borrow().banner.clone()
+    }
+
+    /// 当前搜索框文本。
+    pub fn search_text(&self) -> String {
+        self.ui.get_search_text().to_string()
+    }
+
+    /// 设置搜索框文本（不触发 `search-changed`，测试与上层回填用）。
+    pub fn set_search_text(&self, text: &str) {
+        self.ui.set_search_text(text.into());
+    }
+
     /// 打开详情回调。
     pub fn on_open_detail(&self, handler: impl Fn(&str) + 'static) {
         self.state.borrow_mut().callbacks.open_detail = Some(Rc::new(handler));
@@ -461,9 +490,29 @@ impl App {
         self.state.borrow_mut().callbacks.back = Some(Rc::new(handler));
     }
 
-    /// 搜索回调。
+    /// 搜索回调（聚焦请求，如点击胶囊）。
     pub fn on_search(&self, handler: impl Fn() + 'static) {
         self.state.borrow_mut().callbacks.search = Some(Rc::new(handler));
+    }
+
+    /// 搜索文本变化回调（输入即时过滤；空串表示清空）。
+    pub fn on_search_changed(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.search_changed = Some(Rc::new(handler));
+    }
+
+    /// Enter 提交搜索回调。
+    pub fn on_search_submit(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.search_submit = Some(Rc::new(handler));
+    }
+
+    /// 清除搜索文本回调（导航栏的“×”按钮）。
+    pub fn on_search_clear(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.search_clear = Some(Rc::new(handler));
+    }
+
+    /// 横幅动作按钮回调。
+    pub fn on_banner_action(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.banner_action = Some(Rc::new(handler));
     }
 
     /// 排序条回调。
@@ -627,6 +676,54 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         ui.on_search(move || {
             if let Some(ui) = weak.upgrade() {
                 focus_search(&ui, &state);
+            }
+        });
+    }
+    {
+        // 输入即时过滤：文本变化原样转出，业务在上层。
+        let state = state.clone();
+        ui.on_search_changed(move |text| {
+            let handler = state.borrow().callbacks.search_changed.clone();
+            if let Some(handler) = handler {
+                handler(text.as_str());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_search_submit(move || {
+            let handler = state.borrow().callbacks.search_submit.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+        });
+    }
+    {
+        // “×”按钮：清空文本并把空串发出去（等价于一次清空后的过滤）。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search_clear(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            ui.set_search_text("".into());
+            let clear = state.borrow().callbacks.search_clear.clone();
+            if let Some(handler) = clear {
+                handler();
+            }
+            let changed = state.borrow().callbacks.search_changed.clone();
+            if let Some(handler) = changed {
+                handler("");
+            }
+        });
+    }
+    {
+        // 横幅动作按钮：动作在上层（重新登录 / 重试…）。
+        let state = state.clone();
+        ui.on_banner_action(move || {
+            let handler = state.borrow().callbacks.banner_action.clone();
+            if let Some(handler) = handler {
+                handler();
             }
         });
     }
@@ -1015,6 +1112,7 @@ fn go_back(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
 
 fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     ui.set_search_focused(true);
+    ui.invoke_focus_search_input();
     let handler = state.borrow().callbacks.search.clone();
     if let Some(handler) = handler {
         handler();

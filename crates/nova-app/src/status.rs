@@ -3,14 +3,13 @@
 
 //! 连接状态与降级文案。
 //!
-//! `nova-ui` 没有专门的"横幅"属性（阶段 3 的界面只有四个页面），所以桌面端把状态
-//! 渲染成首页 hero 位上的**状态卡**：标题是结论（"未连接服务器" / "登录已过期"），
-//! 副标题是下一步该敲的命令。缓存里的继续观看/最近添加仍然保留在下方，离线可浏览。
+//! 桌面端把离线 / 过期状态渲染成顶部**横幅**（`BannerData`）：一句话说明 + 下一步该敲的
+//! 命令；不再占用首页 hero 位，hero 恢复显示真实内容或空态。
 //!
-//! 状态卡的 `item_id` 固定为 [`STATUS_ITEM_ID`]，界面回调遇到它直接忽略，
-//! 不会进入详情页或播放页。
+//! `STATUS_ITEM_ID` 仍保留给历史缓存数据（旧版本可能已把状态卡写进 hero 位的引用路径），
+//! 界面回调遇到它直接忽略，不会进入详情页或播放页。
 
-use nova_ui::{CardView, HomeView};
+use nova_ui::{BannerData, BannerLevel};
 
 /// 状态卡使用的伪条目 id。
 pub const STATUS_ITEM_ID: &str = "nova-status";
@@ -93,16 +92,24 @@ impl Status {
         }
     }
 
-    /// 状态卡；已连接时返回 `None`（不占据 hero 位）。
-    pub fn banner(&self) -> Option<CardView> {
-        if self.is_connected() {
-            return None;
+    /// 顶部横幅；已连接时返回 `None`（不显示）。
+    ///
+    /// 令牌问题（过期 / 缺失）是 warning，动作是重新登录；
+    /// 没配服务器是 info；刷新失败是 warning，动作是重试。
+    pub fn banner_data(&self) -> Option<BannerData> {
+        let text = format!("{}：{}", self.headline(), self.hint());
+        match self {
+            Self::Connected { .. } => None,
+            Self::NoServer | Self::AmbiguousServer { .. } => {
+                Some(BannerData::new(text, BannerLevel::Info))
+            }
+            Self::MissingToken { .. } | Self::Expired { .. } => {
+                Some(BannerData::new(text, BannerLevel::Warning).with_action("重新登录"))
+            }
+            Self::RefreshFailed { .. } => {
+                Some(BannerData::new(text, BannerLevel::Warning).with_action("重试"))
+            }
         }
-        Some(
-            CardView::new(STATUS_ITEM_ID, self.headline())
-                .with_subtitle(self.hint())
-                .with_badge("离线"),
-        )
     }
 
     /// 供 `--print-view` 使用的稳定文本行。
@@ -111,13 +118,6 @@ impl Status {
             format!("status: {}", self.headline()),
             format!("hint: {}", self.hint()),
         ]
-    }
-}
-
-/// 把状态放进首页：非连接状态下覆盖 hero。
-pub fn decorate_home(home: &mut HomeView, status: &Status) {
-    if let Some(banner) = status.banner() {
-        home.hero = Some(banner);
     }
 }
 
@@ -153,24 +153,31 @@ mod tests {
             base_url: "http://host:8096".to_owned(),
         };
         assert!(status.is_connected());
-        assert!(status.banner().is_none());
+        assert!(status.banner_data().is_none());
         assert!(status.headline().contains("家里"));
     }
 
     #[test]
-    fn banner_uses_the_status_pseudo_id() {
-        let banner = Status::NoServer.banner().expect("离线应有状态卡");
-        assert_eq!(banner.item_id, STATUS_ITEM_ID);
-        assert_eq!(banner.badge.as_deref(), Some("离线"));
-    }
+    fn offline_states_have_banners_with_levels_and_actions() {
+        let no_server = Status::NoServer.banner_data().expect("离线应有横幅");
+        assert_eq!(no_server.level, BannerLevel::Info);
+        assert_eq!(no_server.action_label, None);
+        assert!(no_server.text.contains("nova login"));
 
-    #[test]
-    fn decorate_home_keeps_lists_but_replaces_hero() {
-        let mut home = HomeView::new();
-        home.recently_added = vec![CardView::new("a", "A")];
-        home.hero = Some(CardView::new("a", "A"));
-        decorate_home(&mut home, &Status::NoServer);
-        assert_eq!(home.hero.expect("状态卡").title, "未连接服务器");
-        assert_eq!(home.recently_added.len(), 1, "缓存内容必须保留");
+        let expired = Status::Expired {
+            url: "http://127.0.0.1:8096".to_owned(),
+        }
+        .banner_data()
+        .expect("过期应有横幅");
+        assert_eq!(expired.level, BannerLevel::Warning);
+        assert_eq!(expired.action_label.as_deref(), Some("重新登录"));
+
+        let failed = Status::RefreshFailed {
+            message: "网络不可达".to_owned(),
+        }
+        .banner_data()
+        .expect("刷新失败应有横幅");
+        assert_eq!(failed.level, BannerLevel::Warning);
+        assert_eq!(failed.action_label.as_deref(), Some("重试"));
     }
 }

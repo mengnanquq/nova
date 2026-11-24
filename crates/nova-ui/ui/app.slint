@@ -11,6 +11,7 @@ import { HomePage } from "home.slint";
 import { LibraryPage } from "library.slint";
 import { DetailPage } from "detail.slint";
 import { PlayerShellPage } from "player_shell.slint";
+import { Banner } from "components/banner.slint";
 
 export component AppWindow inherits Window {
     width: 1280px;
@@ -30,6 +31,15 @@ export component AppWindow inherits Window {
     in-out property <int> library-focus: 0;
     in-out property <int> detail-focus: 0;
     in-out property <bool> search-focused: false;
+    // 搜索框文本：与导航栏的 TextInput 双向同步，Rust 侧读写这里。
+    in-out property <string> search-text: "";
+    // 顶部横幅（通知位）：不遮挡导航栏，出现时内容整体下移。
+    in property <bool> banner-visible: false;
+    // 语义级别：0 info / 1 warning / 2 danger。
+    in property <int> banner-level: 0;
+    in property <string> banner-text: "";
+    // 空字符串表示没有动作按钮。
+    in property <string> banner-action-label: "";
     // 拖动进度条时的气泡文本（Rust 侧用视图模型格式化）。
     in-out property <string> player-scrub-text: "";
     in-out property <bool> player-fullscreen: false;
@@ -41,6 +51,10 @@ export component AppWindow inherits Window {
     callback hero-play();
     callback back();
     callback search();
+    callback search-changed(string);
+    callback search-submit();
+    callback search-clear();
+    callback banner-action();
     callback connect-server();
     callback sort();
     callback tab-activated(string);
@@ -164,75 +178,127 @@ export component AppWindow inherits Window {
         }
     }
 
-    HomePage {
-        width: parent.width;
-        height: parent.height;
-        visible: root.page == 0;
-        data: root.home;
-        focus-index <=> root.home-focus;
-        search-focused: root.search-focused;
-        open-item(id) => {
-            root.open-item(id);
-        }
-        hero-play => {
-            root.hero-play();
-        }
-        connect-server => {
-            root.connect-server();
-        }
-        tab-activated(id) => {
-            root.tab-activated(id);
-        }
-        search => {
-            root.search();
+    // 横幅在最上方：出现时把页面整体下移 48px，不遮挡导航栏；隐藏时完全不占位。
+    // 不用布局器，直接显式偏移，避免布局对隐藏元素的预留空间。
+    Banner {
+        y: 0;
+        width: root.width;
+        height: root.banner-visible ? Theme.banner-height : 0px;
+        visible: root.banner-visible;
+        clip: true;
+        level: root.banner-level;
+        text: root.banner-text;
+        action-label: root.banner-action-label;
+        action => {
+            root.banner-action();
         }
     }
 
-    LibraryPage {
-        width: parent.width;
+    content := Rectangle {
+        y: root.banner-visible ? Theme.banner-height : 0px;
+        width: root.width;
+        // 高度不随横幅缩短：内部几何与无横幅时完全一致（卡片等元素尺寸逐像素不变），
+        // 底部超出窗口的部分由窗口裁掉（页面自身有 48px 底部留白，且内容可滚动）。
         height: parent.height;
-        visible: root.page == 1;
-        data: root.library;
-        focus-index <=> root.library-focus;
-        search-focused: root.search-focused;
-        open-item(id) => {
-            root.open-item(id);
-        }
-        tab-activated(id) => {
-            root.tab-activated(id);
-        }
-        sort => {
-            root.sort();
-        }
-        search => {
-            root.search();
-        }
-    }
 
-    DetailPage {
-        width: parent.width;
-        height: parent.height;
-        visible: root.page == 2;
-        data: root.detail;
-        focus-index <=> root.detail-focus;
-        back => {
-            root.back();
-        }
-        play => {
-            root.play-item(root.detail.item-id);
-        }
-        source-selected(id) => {
-            root.source-selected(id);
-        }
-    }
+            home-page := HomePage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 0;
+                data: root.home;
+                focus-index <=> root.home-focus;
+                search-focused: root.search-focused;
+                search-text <=> root.search-text;
+                open-item(id) => {
+                    root.open-item(id);
+                }
+                hero-play => {
+                    root.hero-play();
+                }
+                connect-server => {
+                    root.connect-server();
+                }
+                tab-activated(id) => {
+                    root.tab-activated(id);
+                }
+                search => {
+                    root.search();
+                }
+                search-changed(text) => {
+                    root.search-changed(text);
+                }
+                search-submit => {
+                    root.search-submit();
+                }
+                search-clear => {
+                    root.search-clear();
+                }
+                search-escape => {
+                    // 焦点还给全局键盘处理；Rust / 测试从 search-focused 读状态。
+                    keyboard.focus();
+                    root.search-focused = false;
+                }
+            }
 
-    PlayerShellPage {
-        width: parent.width;
-        height: parent.height;
-        visible: root.page == 3;
-        data: root.player;
-        scrub-text: root.player-scrub-text;
-        fullscreen: root.player-fullscreen;
+            lib-page := LibraryPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 1;
+                data: root.library;
+                focus-index <=> root.library-focus;
+                search-focused: root.search-focused;
+                search-text <=> root.search-text;
+                open-item(id) => {
+                    root.open-item(id);
+                }
+                tab-activated(id) => {
+                    root.tab-activated(id);
+                }
+                sort => {
+                    root.sort();
+                }
+                search => {
+                    root.search();
+                }
+                search-changed(text) => {
+                    root.search-changed(text);
+                }
+                search-submit => {
+                    root.search-submit();
+                }
+                search-clear => {
+                    root.search-clear();
+                }
+                search-escape => {
+                    keyboard.focus();
+                    root.search-focused = false;
+                }
+            }
+
+            DetailPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 2;
+                data: root.detail;
+                focus-index <=> root.detail-focus;
+                back => {
+                    root.back();
+                }
+                play => {
+                    root.play-item(root.detail.item-id);
+                }
+                source-selected(id) => {
+                    root.source-selected(id);
+                }
+            }
+
+            PlayerShellPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 3;
+                data: root.player;
+                scrub-text: root.player-scrub-text;
+                fullscreen: root.player-fullscreen;
 
         back => {
             root.player-back();
@@ -312,6 +378,17 @@ export component AppWindow inherits Window {
 
         subtitle-external => {
             root.player-subtitle-external();
+        }
+        }
+    }
+
+    /// 把焦点交给当前页的搜索输入框（Ctrl+F 由 Rust 侧调到这里）。
+    public function focus-search-input() {
+        if (root.page == 0) {
+            home-page.focus-input();
+        }
+        if (root.page == 1) {
+            lib-page.focus-input();
         }
     }
 }

@@ -155,9 +155,10 @@ pub fn run_window(
     let ui = AppWindow::new()?;
     let app = Rc::new(App::new_with(ui));
     let status = local.status();
-    // 离线优先：先用 SQLite 里的缓存建好首页，再启动后台刷新。
+    // 离线优先：先用 SQLite 里的缓存建好首页，再启动后台刷新；状态由顶部横幅表达。
     let home = local.home(None)?;
     app.set_home(&home);
+    app.set_banner(status.banner_data());
 
     let online: Option<Arc<dyn MediaProvider>> = local.provider_dyn();
     let images = Arc::new(ImageService::new(
@@ -421,6 +422,20 @@ impl Shell {
         });
     }
 
+    fn apply_search(&self, text: &str) {
+        // 空串 = 清空过滤；本地缓存查询是同步读，输入防抖交给阶段 3 的现状即可。
+        let term = text.trim();
+        let search = (!term.is_empty()).then_some(term);
+        match self.local.home(search) {
+            Ok(home) => {
+                self.app.set_home(&home);
+                self.request_images(home.image_keys());
+                self.state.borrow_mut().home = home;
+            }
+            Err(error) => tracing::warn!(%error, "搜索过滤本地缓存失败"),
+        }
+    }
+
     fn apply_refresh(&self, payload: Refreshed) {
         let Refreshed {
             status,
@@ -428,6 +443,8 @@ impl Shell {
             library,
         } = payload;
         self.app.set_home(&home);
+        // 刷新后的连接状态同步到顶部横幅（过期 / 断开时出现，恢复后消失）。
+        self.app.set_banner(status.banner_data());
         if matches!(self.app.current_route(), Some(Route::Library { .. })) {
             if let Some(library) = &library {
                 self.app.set_library(library);
@@ -628,10 +645,39 @@ fn install_callbacks(shell: &Rc<Shell>) {
         });
     }
     {
-        // 阶段 3 的界面没有搜索输入框属性（只有 Ctrl+F 聚焦），
-        // 过滤逻辑已经实现并可通过 `--print-view --search` 验证；这里只记录一次。
+        // 阶段 3 遗留债清理：搜索框已可输入，每次编辑都用本地缓存过滤重建首页。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_changed(move |text| {
+            if let Some(shell) = weak.upgrade() {
+                shell.apply_search(text);
+            }
+        });
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_submit(move || {
+            if let Some(shell) = weak.upgrade() {
+                let text = shell.app.search_text();
+                shell.apply_search(&text);
+            }
+        });
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_clear(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.apply_search("");
+            }
+        });
         shell.app.on_search(|| {
-            tracing::debug!("搜索框已聚焦；界面暂未暴露输入文本，过滤请用 --print-view --search");
+            tracing::debug!("搜索框已聚焦");
+        });
+    }
+    {
+        // 横幅动作按钮：阶段 3 只记录意图；真正的重新登录 / 重试流程在阶段 4+ 接入。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_banner_action(move || {
+            if let Some(shell) = weak.upgrade() {
+                if let Some(banner) = shell.app.banner() {
+                    tracing::info!(text = banner.text, "横幅动作触发");
+                }
+            }
         });
     }
     {

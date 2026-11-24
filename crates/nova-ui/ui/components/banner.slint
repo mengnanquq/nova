@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 顶部细横幅（通知位）：三种语义级别，左侧一句话 + 右侧可选动作按钮。
+//!
+//! 由 `app.slint` 用 VerticalLayout 放在导航栏上方：出现时内容整体下移，
+//! 不遮挡导航栏。贴顶、方角、高度 48。
+
+import { Theme } from "../theme.slint";
+
+export component Banner inherits Rectangle {
+    // 语义级别：0 info / 1 warning / 2 danger。
+    in property <int> level: 0;
+    in property <string> text: "";
+    // 空字符串表示没有动作按钮。
+    in property <string> action-label: "";
+    callback action();
+
+    height: Theme.banner-height;
+    background: root.level == 2 ? Theme.danger
+        : root.level == 1 ? Theme.warning
+        : Theme.surface-raised;
+
+    // info 态用一条 1px 分隔线与页面内容分层；warning / danger 底色已足够。
+    Rectangle {
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.hairline;
+        visible: root.level == 0;
+    }
+
+    HorizontalLayout {
+        x: Theme.gutter;
+        width: parent.width - Theme.gutter * 2;
+        height: parent.height;
+        spacing: Theme.space-3;
+        cross-axis-alignment: center;
+
+        Text {
+            text: root.text;
+            // warning / danger 用深色文字保证对比度；info 是面板底，正常文字色。
+            color: root.level == 0 ? Theme.text : Theme.accent-contrast;
+            font-family: Theme.font-family;
+            font-size: Theme.font-14;
+            font-weight: root.level == 0 ? Theme.weight-regular : Theme.weight-semibold;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            horizontal-stretch: 1;
+        }
+
+        if (root.action-label != "") : Rectangle {
+            width: banner-action-text.preferred-width + Theme.space-3 * 2;
+            height: 32px;
+            border-radius: Theme.radius-badge;
+            background: root.level == 0 ? Theme.surface : Theme.accent-contrast;
+            border-width: root.level == 0 ? 1px : 0px;
+            border-color: Theme.hairline-strong;
+
+            banner-action-text := Text {
+                x: Theme.space-3;
+                height: parent.height;
+                text: root.action-label;
+                // info 态：surface 底 + 正常文字；warning / danger 态：深色底 + 主文字色。
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => {
+                    root.action();
+                }
+            }
+        }
+    }
+}

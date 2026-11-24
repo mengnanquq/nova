@@ -85,7 +85,8 @@ fn print_view_without_server_is_offline_and_empty() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("status: 未连接服务器"), "{stdout}");
     assert!(stdout.contains("hint: 先在终端运行 nova login"), "{stdout}");
-    assert!(stdout.contains("hero: 未连接服务器"), "{stdout}");
+    // 状态不再占用 hero 位：hero 为空（“-”），状态由顶部横幅表达。
+    assert!(stdout.contains("hero: -"), "{stdout}");
     assert!(stdout.contains("recent: 0"), "{stdout}");
     assert!(stdout.contains("continue: 0"), "{stdout}");
     // 空库启动也不该创建快照之外的东西；数据库与图片目录都已就绪。
