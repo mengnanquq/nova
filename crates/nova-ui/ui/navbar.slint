@@ -80,37 +80,56 @@ export component Navbar inherits Rectangle {
             background: Theme.hairline;
         }
 
-        for tab[i] in root.tabs : Rectangle {
-            width: tab-label.preferred-width + Theme.space-5;
-            height: 40px;
-            border-radius: Theme.radius-pill;
-            background: tab-area.has-hover ? Theme.wash : transparent;
+        // 库标签可能很多（真实 Emby 上 10+ 个）：放进可裁剪容器里，
+        // 让它占剩余宽度并在内部裁掉溢出部分，**搜索框宽度不受影响**。
+        // 之前标签是 HorizontalLayout 的直接子元素，标签一多就把右侧搜索框挤成 0 宽。
+        // 用 Flickable 而不是普通容器：布局项的最小宽度默认会继承子元素的首选宽度，
+        // 十个库标签加起来 1000+px，普通容器会把自己撑到溢满、把搜索框挤出可视区。
+        // Flickable 的最小宽度是 0，天生裁剪，还能横向滚动查看后面的库。
+        Flickable {
+            horizontal-stretch: 1;
+            height: parent.height;
+            viewport-width: tabs-row.preferred-width;
+            viewport-height: parent.height;
+            interactive: false;
 
-            tab-label := Text {
-                x: Theme.space-3;
+            tabs-row := HorizontalLayout {
+                spacing: Theme.space-6;
                 height: parent.height;
-                text: tab.title;
-                color: i == root.current-index ? Theme.accent : Theme.text-muted;
-                font-family: Theme.font-family;
-                font-size: Theme.font-14;
-                font-weight: i == root.current-index ? Theme.weight-semibold : Theme.weight-regular;
-                vertical-alignment: center;
-            }
-
-            Rectangle {
-                x: Theme.space-3;
-                y: parent.height - 6px;
-                width: parent.width - Theme.space-5;
-                height: 2px;
+                cross-axis-alignment: center;
+            for tab[i] in root.tabs : Rectangle {
+                width: tab-label.preferred-width + Theme.space-5;
+                height: 40px;
                 border-radius: Theme.radius-pill;
-                background: i == root.current-index ? Theme.accent : transparent;
-            }
+                background: tab-area.has-hover ? Theme.wash : transparent;
 
-            tab-area := TouchArea {
-
-                clicked => {
-                    root.tab-activated(tab.id);
+                tab-label := Text {
+                    x: Theme.space-3;
+                    height: parent.height;
+                    text: tab.title;
+                    color: i == root.current-index ? Theme.accent : Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    font-weight: i == root.current-index ? Theme.weight-semibold : Theme.weight-regular;
+                    vertical-alignment: center;
                 }
+
+                Rectangle {
+                    x: Theme.space-3;
+                    y: parent.height - 6px;
+                    width: parent.width - Theme.space-5;
+                    height: 2px;
+                    border-radius: Theme.radius-pill;
+                    background: i == root.current-index ? Theme.accent : transparent;
+                }
+
+                tab-area := TouchArea {
+
+                    clicked => {
+                        root.tab-activated(tab.id);
+                    }
+                }
+            }
             }
         }
 
