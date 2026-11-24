@@ -1,0 +1,56 @@
+[package]
+name = "nova-app"
+description = "Nova 桌面应用：把 SQLite 缓存、provider、图片缓存与 Slint 界面装配起来"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nova-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "nova_app"
+path = "src/lib.rs"
+
+[dependencies]
+nova-core = { path = "../nova-core" }
+nova-images = { path = "../nova-images" }
+nova-playback = { path = "../nova-playback" }
+nova-playback-mpv = { path = "../nova-playback-mpv" }
+nova-provider = { path = "../nova-provider" }
+nova-secrets = { path = "../nova-secrets" }
+nova-storage = { path = "../nova-storage" }
+nova-ui = { path = "../nova-ui" }
+
+# `ProgressSink` 是 async trait，实现方需要同一个宏。#[async_trait]
+async-trait = { workspace = true }
+# 只为了 `futures::Stream` 这个 trait：引擎事件流是 `&mut dyn Stream`（不 await，只 poll 一次）。
+futures = "0.3"
+
+# 与 nova-ui 完全一致的版本与 feature：界面渲染器只选 winit + femtovg。
+slint = { version = "1.19", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "compat-1-2",
+] }
+
+# `--snapshot` 用的无头后端：testing backend 内嵌软件光栅器，不依赖合成器帧回调。
+# 它只在快照模式下真正初始化；正常窗口模式仍走 winit。
+i-slint-backend-testing = { version = "1.19", features = ["renderer-software"] }
+i-slint-core = "1.19"
+png = "0.18"
+
+tokio = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+nova-core = { path = "../nova-core" }
+nova-storage = { path = "../nova-storage" }
+tempfile = { workspace = true }
