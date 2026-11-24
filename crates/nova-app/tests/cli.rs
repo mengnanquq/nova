@@ -102,7 +102,8 @@ fn print_view_reads_preseeded_cache_without_network() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // 服务器存在但内存凭证里没有令牌 → 明确的"未登录"状态。
     assert!(stdout.contains("status: 未登录"), "{stdout}");
-    assert!(stdout.contains("tabs: 全部"), "{stdout}");
+    // 「首页」标签始终在第一位，其后才是库标签（离线时是合成的「全部」）。
+    assert!(stdout.contains("tabs: 首页,全部"), "{stdout}");
     assert!(stdout.contains("recent: 2"), "{stdout}");
     assert!(stdout.contains("recent[0]: Alpha"), "{stdout}");
     assert!(stdout.contains("recent[1]: Beta"), "{stdout}");

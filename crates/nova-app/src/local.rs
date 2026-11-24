@@ -22,6 +22,9 @@ use nova_core::{AuthState, MediaItem, MediaSource, ServerId, ServerKind, UserPre
 use nova_images::ImageCache;
 use nova_provider::{DeviceInfo, Flavor, Library, MediaProvider, Provider, ProviderConfig};
 use nova_secrets::CredentialStore;
+
+/// 「首页」标签的哨兵 id（与真实库 id 不会冲突）。
+pub const HOME_TAB_ID: &str = "@home";
 use nova_storage::{Database, StoredServer};
 use nova_ui::{DetailView, HomeView, ImageKey, LibraryTab, LibraryView, PlayerShellView};
 
@@ -171,21 +174,29 @@ impl Local {
 
     /// 顶部导航标签。
     ///
-    /// 刷新前没有服务端媒体库记录（SQLite 里没有 libraries 表），此时只要缓存里
-    /// 有条目就合成一个"全部"标签，保证离线也能进媒体库页。
+    /// 刷新前没有服务端媒体库记录（SQLite 里没有 libraries 表），此时只要缓存里有内容，
+    /// 就合成一个「全部」标签；「首页」标签始终在第一位。
     pub fn tabs(&self) -> Vec<LibraryTab> {
+        // 第一个标签永远是「首页」：库标签是刷新之后才出现的，如果没有这个入口，
+        // 用户进了媒体库就再也回不到首页（实测：刷新完成时首页入口直接消失）。
+        // 用独立哨兵 id 而不是空串——空串在离线分支里表示合成出来的「全部」库，
+        // 两者必须区分，否则 `library("")` 会拿到首页标签。
+        let mut tabs = vec![LibraryTab::new(HOME_TAB_ID, "首页")];
         let libraries = self.libraries();
         if !libraries.is_empty() {
-            return libraries
-                .iter()
-                .map(|library| LibraryTab::new(library.id.as_str(), library.name.clone()))
-                .collect();
+            tabs.extend(
+                libraries
+                    .iter()
+                    .map(|library| LibraryTab::new(library.id.as_str(), library.name.clone())),
+            );
+            return tabs;
         }
         match self.server() {
             Some(server) if self.db.item_count(&server.info.id).unwrap_or(0) > 0 => {
-                vec![LibraryTab::new("", "全部")]
+                tabs.push(LibraryTab::new("", "全部"));
+                tabs
             }
-            _ => Vec::new(),
+            _ => tabs,
         }
     }
 
@@ -544,7 +555,10 @@ mod tests {
         let local = Local::open(&env, None).expect("空目录应能启动");
         assert!(matches!(local.status(), Status::NoServer));
         assert!(local.server().is_none());
-        assert!(local.tabs().is_empty());
+        // 即使没有任何库/缓存，「首页」标签也必须存在——否则用户无法回到首页。
+        let tabs = local.tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].title, "首页");
         // 状态不再占用 hero 位：首页是空态，状态由顶部横幅表达。
         let home = local.home(None).expect("构建首页");
         assert!(home.hero.is_none());
@@ -567,7 +581,8 @@ mod tests {
         }
         let local = Local::open(&env, None).expect("打开状态目录");
         assert!(matches!(local.status(), Status::MissingToken { .. }));
-        assert_eq!(local.tabs().len(), 1, "离线时合成一个“全部”标签");
+        // 「首页」+「全部」
+        assert_eq!(local.tabs().len(), 2, "离线时应是 首页 + 全部 两个标签");
         let home = local.home(None).expect("构建首页");
         assert_eq!(home.recently_added.len(), 1);
         assert_eq!(home.recently_added[0].title, "缓存电影");

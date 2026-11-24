@@ -699,6 +699,17 @@ impl Shell {
     }
 
     fn activate_tab(&self, library_id: &str) {
+        // 空 id 约定为「首页」标签：库标签要等刷新完成才出现，没有这个入口
+        // 用户进了媒体库就回不到首页。
+        if library_id == crate::local::HOME_TAB_ID {
+            if let Ok(home) = self.local.home(None) {
+                let keys = image_keys(&home, None, None);
+                self.app.set_home(&home);
+                self.state.borrow_mut().home = home;
+                self.request_images(keys);
+            }
+            return;
+        }
         match self.local.library(library_id, None) {
             Ok(view) => {
                 let keys = view.image_keys();

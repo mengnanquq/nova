@@ -91,7 +91,8 @@ export component Navbar inherits Rectangle {
             height: parent.height;
             viewport-width: tabs-row.preferred-width;
             viewport-height: parent.height;
-            interactive: false;
+            // 可拖动/滚轮横向滚动：标签老老实实排在视口外，而不是被裁掉看不见。
+            interactive: true;
 
             tabs-row := HorizontalLayout {
                 spacing: Theme.space-6;
