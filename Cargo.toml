@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "spikes/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+nova-core = { path = "crates/nova-core" }
+nova-secrets = { path = "crates/nova-secrets" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+async-trait = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# rustls + 平台根证书校验：默认即验证证书与主机名，不提供"跳过校验"开关。
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+    "gzip",
+] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+rusqlite = { version = "0.43", features = ["bundled"] }
+
+# 仅测试用
+tempfile = "3"
+wiremock = "0.6"
+
+# 依赖自身正确性；本项目的优化留给 release。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
