@@ -1,0 +1,42 @@
+[package]
+name = "nova-playback-mpv"
+description = "Nova 的 libmpv 播放引擎：OpenGL render API 零拷贝路径，实现 nova-playback 的 PlaybackEngine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nova-playback = { path = "../nova-playback" }
+nova-core = { workspace = true }
+
+# libmpv2 的 safe 层只有 OpenGl 一种 RenderParamApiType，且 render() 硬编码 FBO+FlipY，
+# 无法传 MPV_RENDER_PARAM_OPENGL_INIT_PARAMS / DRM_DISPLAY_V2，所以直接用 raw 绑定（ADR-0001）。
+libmpv2-sys = "4.0.1"
+# 与 nova-ui 完全相同的 feature 集合：本 crate 只借用 Slint 的 GL 加载器类型语义，
+# 不建窗口、不 include_modules（那是 nova-app 的事）。
+slint = { version = "1.19", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-femtovg",
+  "compat-1-2",
+] }
+
+# `PlaybackEngine` 是 async trait；实现方自己也要用 #[async_trait] 宏。
+async-trait = { workspace = true }
+# 实现 `events()` 要求的 `dyn Stream`：直接实现 futures::Stream（与 nova-playback 一致）。
+futures = "0.3"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# 工作区 tokio 没有开 net / io-util（外挂字幕下载用），这里按需追加 feature，
+# 不改动根 Cargo.toml。
+tokio = { workspace = true, features = ["net", "io-util"] }
+url = { workspace = true }
+# 外挂字幕必须先落盘再 sub-add（调研 §六.2：sub-file 是否接受 http 未验证，不赌）。
+tempfile = { workspace = true }
+
+[dev-dependencies]
+# 集成测试要在没有显示会话的机器上拿到一个真实的 GL 上下文：用 dlopen("libEGL.so.1")
+# 建 surfaceless 上下文。**不链接** libEGL/libGL（只用 dlsym），所以 libc 只在测试里出现。
+libc = "0.2"
