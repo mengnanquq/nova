@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 进度条：0.0..=1.0。只画轨道与填充，不画阴影。
+
+import { Theme } from "theme.slint";
+
+export component ProgressBar inherits Rectangle {
+    in property <float> value: 0;
+    in property <length> track-height: 3px;
+    in property <color> fill-color: Theme.accent;
+
+    height: track-height;
+    border-radius: Theme.radius-pill;
+    background: Theme.hairline;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        height: parent.height;
+        width: parent.width * clamp(root.value, 0, 1);
+        border-radius: Theme.radius-pill;
+        background: root.fill-color;
+    }
+}

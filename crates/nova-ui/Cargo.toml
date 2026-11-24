@@ -1,0 +1,32 @@
+[package]
+name = "nova-ui"
+description = "Nova 的 Slint 界面与纯 Rust 视图模型（无 I/O）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 只要 winit（Wayland/X11）+ femtovg（OpenGL）渲染器。
+slint = { version = "1.19", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "compat-1-2",
+] }
+
+[dev-dependencies]
+# 无头测试：testing backend 内嵌软件光栅器，配合 take_snapshot() 存 PNG。
+# 不用 slint 的 mcp/app 后端：那条路会额外引入 prost 等一大堆依赖。
+i-slint-backend-testing = { version = "1.19", features = ["renderer-software"] }
+i-slint-core = "1.19"
+png = "0.18"
+
+[features]
+# 无头快照测试开关。testing backend（software renderer）已在 dev-dependencies 中固定，
+# 不进入运行时依赖；`cargo test -p nova-ui` 即可生成快照。
+testing = []
+
+[build-dependencies]
+slint-build = "1.19"

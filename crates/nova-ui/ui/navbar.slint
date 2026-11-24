@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 顶部导航：品牌 + 媒体库标签 + 搜索入口。下缘一条 1px hairline。
+
+import { Theme } from "theme.slint";
+import { TabData } from "models.slint";
+
+export component Navbar inherits Rectangle {
+    in property <[TabData]> tabs;
+    in property <int> current-index: 0;
+    in property <bool> search-focused: false;
+    callback tab-activated(string);
+    callback search();
+
+    height: Theme.navbar-height;
+    background: Theme.bg;
+
+    Rectangle {
+        x: 0;
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.hairline;
+    }
+
+    HorizontalLayout {
+        x: Theme.gutter;
+        width: parent.width - Theme.gutter * 2;
+        height: parent.height;
+        spacing: Theme.space-6;
+        cross-axis-alignment: center;
+
+        Rectangle {
+            width: brand.preferred-width + Theme.space-3;
+            height: 28px;
+            background: transparent;
+
+            Rectangle {
+                x: 0;
+                y: 11px;
+                width: 6px;
+                height: 6px;
+                border-radius: Theme.radius-badge;
+                background: Theme.accent;
+            }
+
+            brand := Text {
+                x: Theme.space-3;
+                height: parent.height;
+                text: "NOVA";
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-22;
+                font-weight: Theme.weight-bold;
+                letter-spacing: 2px;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            width: 1px;
+            height: 24px;
+            background: Theme.hairline;
+        }
+
+        for tab[i] in root.tabs : Rectangle {
+            width: tab-label.preferred-width + Theme.space-5;
+            height: 40px;
+            border-radius: Theme.radius-pill;
+            background: tab-area.has-hover ? Theme.wash : transparent;
+
+            tab-label := Text {
+                x: Theme.space-3;
+                height: parent.height;
+                text: tab.title;
+                color: i == root.current-index ? Theme.accent : Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-14;
+                font-weight: i == root.current-index ? Theme.weight-semibold : Theme.weight-regular;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                x: Theme.space-3;
+                y: parent.height - 6px;
+                width: parent.width - Theme.space-5;
+                height: 2px;
+                border-radius: Theme.radius-pill;
+                background: i == root.current-index ? Theme.accent : transparent;
+            }
+
+            tab-area := TouchArea {
+
+                clicked => {
+                    root.tab-activated(tab.id);
+                }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 1px;
+            background: transparent;
+        }
+
+        Rectangle {
+            width: 196px;
+            height: 36px;
+            border-radius: Theme.radius-pill;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: root.search-focused ? Theme.accent : Theme.hairline;
+
+            Text {
+                x: Theme.space-3;
+                width: parent.width - Theme.space-3 * 2;
+                height: parent.height;
+                text: "搜索  ·  Ctrl+F";
+                color: root.search-focused ? Theme.text : Theme.text-faint;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => {
+                    root.search();
+                }
+            }
+        }
+
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            border-radius: Theme.radius-pill;
+            background: Theme.surface-raised;
+            border-width: 1px;
+            border-color: Theme.hairline;
+
+            Text {
+                text: "N";
+                color: Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                font-weight: Theme.weight-semibold;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

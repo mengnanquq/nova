@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 详情页：背景压暗 + 海报 + 标题/元信息/简介/类型 + 播放按钮 + 多版本选择。
+
+import { Theme } from "theme.slint";
+import { DetailData } from "models.slint";
+import { FocusRing } from "focus_ring.slint";
+
+export component DetailPage inherits Rectangle {
+    in property <DetailData> data;
+    in-out property <int> focus-index: 0;
+
+    callback back();
+    callback play();
+    callback source-selected(string);
+
+    background: Theme.bg;
+
+    Image {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        source: root.data.backdrop;
+        image-fit: cover;
+        visible: root.data.backdrop.width > 0;
+    }
+
+    // 压暗背景：纯色半透明，保证文字对比度。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        background: Theme.scrim;
+    }
+
+    Flickable {
+        width: parent.width;
+        height: parent.height;
+        interactive: true;
+        content-width: self.width;
+        content-height: content.preferred-height;
+
+        content := VerticalLayout {
+            width: parent.width;
+            padding-left: Theme.gutter;
+            padding-right: Theme.gutter;
+            padding-top: Theme.space-6;
+            padding-bottom: Theme.space-8;
+            spacing: Theme.block-gap;
+
+            HorizontalLayout {
+                spacing: Theme.space-3;
+
+                Rectangle {
+                    width: back-label.preferred-width + Theme.space-5;
+                    height: 36px;
+                    border-radius: Theme.radius-pill;
+                    background: back-area.has-hover ? Theme.surface-raised : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.hairline;
+
+                    back-label := Text {
+                        x: Theme.space-3;
+                        height: parent.height;
+                        text: "←  返回";
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                    }
+
+                    back-area := TouchArea {
+
+                        clicked => {
+                            root.back();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 1px;
+                    background: transparent;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                alignment: stretch;
+                cross-axis-alignment: start;
+
+                // 海报：固定 2:3，占位与图片共用同一块尺寸。
+                poster := Rectangle {
+                    width: Theme.detail-poster-width;
+                    height: Theme.detail-poster-width * 1.5;
+                    clip: true;
+                    border-radius: Theme.radius-poster;
+                    border-width: 1px;
+                    border-color: Theme.hairline;
+                    background: Theme.surface;
+
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        background: root.data.poster.width > 0 ? transparent : Theme.surface-raised;
+                        border-radius: Theme.radius-poster;
+
+                        Text {
+                            text: root.data.initial;
+                            color: Theme.text-faint;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-48;
+                            font-weight: Theme.weight-bold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            visible: root.data.poster.width <= 0;
+                        }
+                    }
+
+                    Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.data.poster;
+                        image-fit: cover;
+                    }
+                }
+
+                Rectangle {
+                    width: root.width - Theme.gutter * 2 - Theme.detail-poster-width - Theme.space-8;
+                    VerticalLayout {
+                        spacing: Theme.space-4;
+
+                    if (root.data.badge != "") :
+                        Rectangle {
+                            width: badge-label.preferred-width + Theme.space-3;
+                            height: 22px;
+                            border-radius: Theme.radius-badge;
+                            background: Theme.badge-bg;
+                            border-width: 1px;
+                            border-color: Theme.hairline-strong;
+
+                            badge-label := Text {
+                                x: Theme.space-2;
+                                height: parent.height;
+                                text: root.data.badge;
+                                color: Theme.accent;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-12;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                    Text {
+                        text: root.data.title;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-34;
+                        font-weight: Theme.weight-bold;
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+
+                    Text {
+                        text: root.data.original-title;
+                        color: Theme.text-muted;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        visible: root.data.original-title != "";
+                        overflow: elide;
+                        wrap: no-wrap;
+                    }
+
+                    Text {
+                        text: root.data.meta-line;
+                        color: Theme.text-muted;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-12;
+                        visible: root.data.meta-line != "";
+                    }
+
+                    if (root.data.genres.length > 0) :
+                        FlexboxLayout {
+                            spacing: Theme.space-2;
+                            alignment: start;
+
+                            for genre in root.data.genres : Rectangle {
+                                width: genre-label.preferred-width + Theme.space-4;
+                                height: 26px;
+                                border-radius: Theme.radius-pill;
+                                background: Theme.surface-raised;
+                                border-width: 1px;
+                                border-color: Theme.hairline;
+
+                                genre-label := Text {
+                                    x: Theme.space-2;
+                                    height: parent.height;
+                                    text: genre;
+                                    color: Theme.text-muted;
+                                    font-family: Theme.font-family;
+                                    font-size: Theme.font-12;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                    Text {
+                        text: root.data.overview;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        width: parent.width > 680px ? 680px : parent.width;
+                        wrap: word-wrap;
+                        height: 66px;
+                        overflow: elide;
+                        visible: root.data.overview != "";
+                    }
+
+                    Rectangle {
+                        width: play-label.preferred-width + Theme.space-8;
+                        height: Theme.button-primary-height;
+                        border-radius: Theme.radius-pill;
+                        background: play-area.has-hover ? Theme.accent-hover : Theme.accent;
+
+                        play-label := Text {
+                            x: Theme.space-4;
+                            height: parent.height;
+                            text: "▶  " + root.data.play-label;
+                            color: Theme.accent-contrast;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            font-weight: Theme.weight-semibold;
+                            vertical-alignment: center;
+                        }
+
+                        play-area := TouchArea {
+
+                            clicked => {
+                                root.focus-index = 0;
+                                root.play();
+                            }
+                        }
+
+                        FocusRing {
+                            x: -Theme.focus-offset;
+                            y: -Theme.focus-offset;
+                            width: parent.width + Theme.focus-offset * 2;
+                            height: parent.height + Theme.focus-offset * 2;
+                            active: root.focus-index == 0;
+                            ring-radius: Theme.radius-pill + Theme.focus-offset;
+                        }
+                    }
+
+                    if (root.data.sources.length > 0) :
+                        VerticalLayout {
+                            width: parent.width > 560px ? 560px : parent.width;
+                            spacing: Theme.space-2;
+
+                            Text {
+                                text: "播放版本";
+                                color: Theme.text-muted;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-12;
+                                font-weight: Theme.weight-medium;
+                            }
+
+                            for source[i] in root.data.sources : Rectangle {
+                                width: 100%;
+                                height: 56px;
+                                border-radius: Theme.radius-panel;
+                                background: source.selected ? Theme.surface-raised : Theme.surface;
+                                border-width: 1px;
+                                border-color: source.selected ? Theme.hairline-strong : Theme.hairline;
+
+                                // 选中态只有一种指示：左侧 3px accent 竖条（不再叠实心圆）。
+                                Rectangle {
+                                    x: 0;
+                                    y: Theme.space-2;
+                                    width: 3px;
+                                    height: parent.height - Theme.space-4;
+                                    border-radius: Theme.radius-pill;
+                                    background: source.selected ? Theme.accent : transparent;
+                                }
+
+                                VerticalLayout {
+                                    x: Theme.space-4;
+                                    y: Theme.space-2;
+                                    width: parent.width - Theme.space-4 * 2;
+                                    height: parent.height - Theme.space-2 * 2;
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: source.title;
+                                        color: source.selected ? Theme.text : Theme.text-muted;
+                                        font-family: Theme.font-family;
+                                        font-size: Theme.font-14;
+                                        font-weight: Theme.weight-medium;
+                                        overflow: elide;
+                                        wrap: no-wrap;
+                                    }
+
+                                    Text {
+                                        text: source.subtitle;
+                                        color: Theme.text-faint;
+                                        font-family: Theme.font-family;
+                                        font-size: Theme.font-12;
+                                        overflow: elide;
+                                        wrap: no-wrap;
+                                        visible: source.subtitle != "";
+                                    }
+                                }
+
+                                TouchArea {
+                                    clicked => {
+                                        root.focus-index = i + 1;
+                                        root.source-selected(source.id);
+                                    }
+                                }
+
+                                FocusRing {
+                                    x: -Theme.focus-offset;
+                                    y: -Theme.focus-offset;
+                                    width: parent.width + Theme.focus-offset * 2;
+                                    height: parent.height + Theme.focus-offset * 2;
+                                    active: root.focus-index == i + 1;
+                                    ring-radius: Theme.radius-panel + Theme.focus-offset;
+                                }
+                            }
+                        }
+                }
+            }
+                }
+        }
+    }
+}

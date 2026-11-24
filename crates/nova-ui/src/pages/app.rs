@@ -1,0 +1,1337 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 应用绑定：把 Slint 回调接到 Rust，维护焦点索引与导航栈。
+//!
+//! 页面组件本身只负责摆放；键盘意图、路由、焦点移动都在这里与
+//! `viewmodel` 中完成，`.slint` 里不写业务判断。
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use slint::ComponentHandle;
+
+use crate::AppWindow;
+use crate::pages::{assets::ImageStore, detail, home, library, player};
+use crate::viewmodel::{
+    DetailView, HomeView, ImageKey, LibraryView, Navigator, PlayerView, Route, move_focus,
+};
+
+/// 页面编号。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Page {
+    /// 首页。
+    Home = 0,
+    /// 媒体库。
+    Library = 1,
+    /// 详情页。
+    Detail = 2,
+    /// 播放外壳。
+    Player = 3,
+}
+
+impl Page {
+    /// Slint 里的页面编号。
+    pub const fn index(self) -> i32 {
+        self as i32
+    }
+
+    /// 从 Slint 的页面编号还原；未知值按首页处理。
+    pub const fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::Library,
+            2 => Self::Detail,
+            3 => Self::Player,
+            _ => Self::Home,
+        }
+    }
+}
+
+/// Slint 的按键意图编号。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyCommand {
+    /// ← 行内左移。
+    Left,
+    /// → 行内右移。
+    Right,
+    /// ↑ 上移一行。
+    Up,
+    /// ↓ 下移一行。
+    Down,
+    /// Enter / Space：打开或播放。
+    Accept,
+    /// Esc / Backspace：返回。
+    Back,
+    /// Ctrl+F：聚焦搜索。
+    Search,
+}
+
+impl KeyCommand {
+    /// 把 `.slint` 里的意图编号转成命令；未知编号返回 `None`。
+    pub const fn from_intent(code: i32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Left),
+            2 => Some(Self::Right),
+            3 => Some(Self::Up),
+            4 => Some(Self::Down),
+            5 => Some(Self::Accept),
+            6 => Some(Self::Back),
+            7 => Some(Self::Search),
+            _ => None,
+        }
+    }
+}
+
+/// 播放页的按键意图（`app.slint` 只做键位 → 编号的映射）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlayerKey {
+    /// `Space` / `K`：播放暂停。
+    TogglePlay,
+    /// `←`：退 15 秒。
+    SeekBack15,
+    /// `→`：进 15 秒。
+    SeekForward15,
+    /// `Shift+←`：退 60 秒。
+    SeekBack60,
+    /// `Shift+→`：进 60 秒。
+    SeekForward60,
+    /// `↑`：音量 +5%。
+    VolumeUp,
+    /// `↓`：音量 -5%。
+    VolumeDown,
+    /// `M`：静音开关。
+    Mute,
+    /// `A`：音轨菜单。
+    AudioMenu,
+    /// `S`：字幕菜单。
+    SubtitleMenu,
+    /// `F`：全屏开关。
+    Fullscreen,
+    /// `Ctrl+D`：展开 / 收起完整诊断行。
+    ToggleEngineDetail,
+    /// `Esc` / `Backspace`：先提交进度再退出。
+    Exit,
+}
+
+impl PlayerKey {
+    /// 把 `.slint` 里的播放页意图编号转成命令；未知编号返回 `None`。
+    pub const fn from_intent(code: i32) -> Option<Self> {
+        match code {
+            1 => Some(Self::TogglePlay),
+            2 => Some(Self::SeekBack15),
+            3 => Some(Self::SeekForward15),
+            4 => Some(Self::SeekBack60),
+            5 => Some(Self::SeekForward60),
+            6 => Some(Self::VolumeUp),
+            7 => Some(Self::VolumeDown),
+            8 => Some(Self::Mute),
+            9 => Some(Self::AudioMenu),
+            10 => Some(Self::SubtitleMenu),
+            11 => Some(Self::Fullscreen),
+            12 => Some(Self::Exit),
+            13 => Some(Self::ToggleEngineDetail),
+            _ => None,
+        }
+    }
+}
+
+/// 倍速循环顺序。
+const RATE_STEPS: [f32; 5] = [1.0, 1.25, 1.5, 2.0, 0.75];
+
+type StrHandler = Rc<dyn Fn(&str)>;
+type VoidHandler = Rc<dyn Fn()>;
+type BoolHandler = Rc<dyn Fn(bool)>;
+type FloatHandler = Rc<dyn Fn(f32)>;
+type SeekHandler = Rc<dyn Fn(Duration)>;
+type TrackHandler = Rc<dyn Fn(u32)>;
+type SubtitleHandler = Rc<dyn Fn(Option<u32>)>;
+type SecondsHandler = Rc<dyn Fn(f64)>;
+type MarginHandler = Rc<dyn Fn(i64)>;
+
+#[derive(Default)]
+struct Callbacks {
+    open_detail: Option<StrHandler>,
+    play: Option<StrHandler>,
+    back: Option<VoidHandler>,
+    search: Option<VoidHandler>,
+    sort: Option<VoidHandler>,
+    tab: Option<StrHandler>,
+    source: Option<StrHandler>,
+    // 播放页
+    player_play_pause: Option<BoolHandler>,
+    player_seek: Option<SeekHandler>,
+    player_volume: Option<FloatHandler>,
+    player_muted: Option<BoolHandler>,
+    player_rate: Option<FloatHandler>,
+    player_audio_track: Option<TrackHandler>,
+    player_subtitle_track: Option<SubtitleHandler>,
+    player_retry: Option<VoidHandler>,
+    player_fullscreen: Option<BoolHandler>,
+    player_exit: Option<SeekHandler>,
+    player_subtitle_delay: Option<SecondsHandler>,
+    player_subtitle_external: Option<VoidHandler>,
+    player_subtitle_margin: Option<MarginHandler>,
+    connect_server: Option<VoidHandler>,
+}
+
+#[derive(Default)]
+struct FocusState {
+    home: usize,
+    library: usize,
+    detail: usize,
+}
+
+impl FocusState {
+    fn get(&self, page: Page) -> usize {
+        match page {
+            Page::Home => self.home,
+            Page::Library => self.library,
+            Page::Detail => self.detail,
+            Page::Player => 0,
+        }
+    }
+
+    fn set(&mut self, page: Page, index: usize) {
+        match page {
+            Page::Home => self.home = index,
+            Page::Library => self.library = index,
+            Page::Detail => self.detail = index,
+            Page::Player => {}
+        }
+    }
+}
+
+struct State {
+    nav: Navigator,
+    focus: FocusState,
+    home: HomeView,
+    library: LibraryView,
+    detail: DetailView,
+    player: PlayerView,
+    player_fullscreen: bool,
+    // 上一次推给引擎的字幕抬升量（`sub-margin-y`）：不变就不重复发。
+    subtitle_margin: Option<i64>,
+    // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
+    images: Rc<RefCell<ImageStore>>,
+    callbacks: Callbacks,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            nav: Navigator::new(Route::Home),
+            focus: FocusState::default(),
+            home: HomeView::new(),
+            library: LibraryView::default(),
+            detail: DetailView::default(),
+            player: PlayerView::default(),
+            player_fullscreen: false,
+            subtitle_margin: None,
+            images: Rc::new(RefCell::new(ImageStore::new())),
+            callbacks: Callbacks::default(),
+        }
+    }
+}
+
+/// 界面应用：拥有一个 `AppWindow`、导航栈、焦点与图片表。
+///
+pub struct App {
+    ui: AppWindow,
+    state: Rc<RefCell<State>>,
+    images: Rc<RefCell<ImageStore>>,
+}
+
+impl App {
+    /// 创建窗口并安装回调。
+    pub fn new() -> Result<Self, slint::PlatformError> {
+        let ui = AppWindow::new()?;
+        Ok(Self::new_with(ui))
+    }
+
+    /// 用已有窗口创建（测试用）。
+    pub fn new_with(ui: AppWindow) -> Self {
+        let images = Rc::new(RefCell::new(ImageStore::new()));
+        let state = Rc::new(RefCell::new(State::default()));
+        state.borrow_mut().images = images.clone();
+        wire(&ui, &state);
+        Self { ui, state, images }
+    }
+
+    /// 底层 Slint 窗口。
+    pub fn ui(&self) -> &AppWindow {
+        &self.ui
+    }
+
+    /// 当前页面。
+    pub fn page(&self) -> Page {
+        Page::from_index(self.ui.get_page())
+    }
+
+    /// 当前页面的焦点索引。
+    pub fn focus_index(&self) -> usize {
+        self.state.borrow().focus.get(self.page())
+    }
+
+    /// 导航栈快照。
+    pub fn navigator(&self) -> Navigator {
+        self.state.borrow().nav.clone()
+    }
+
+    /// 当前路由。
+    pub fn current_route(&self) -> Option<Route> {
+        self.state.borrow().nav.current().cloned()
+    }
+
+    /// 推入一张图片；调用方随后再 `set_*` 刷新页面。
+    pub fn set_image(&self, key: &ImageKey, image: slint::Image) {
+        self.images.borrow_mut().set(key.clone(), image);
+    }
+
+    /// 推入一张海报。
+    pub fn set_poster(&self, item_id: impl Into<String>, image: slint::Image) {
+        self.images.borrow_mut().set_poster(item_id, image);
+    }
+
+    /// 推入一张背景图。
+    pub fn set_backdrop(&self, item_id: impl Into<String>, image: slint::Image) {
+        self.images.borrow_mut().set_backdrop(item_id, image);
+    }
+
+    /// 设置首页视图并刷新界面。
+    pub fn set_home(&self, view: &HomeView) {
+        {
+            let images = self.images.borrow();
+            home::apply(&self.ui, view, &images);
+        }
+        let mut state = self.state.borrow_mut();
+        state.home = view.clone();
+        if state.focus.home >= view.card_count() {
+            state.focus.home = 0;
+        }
+        let focus = state.focus.home;
+        drop(state);
+        self.ui.set_home_focus(focus as i32);
+    }
+
+    /// 设置媒体库视图并刷新界面。
+    pub fn set_library(&self, view: &LibraryView) {
+        {
+            let images = self.images.borrow();
+            library::apply(&self.ui, view, &images);
+        }
+        let mut state = self.state.borrow_mut();
+        state.library = view.clone();
+        if state.focus.library >= view.cards.len() {
+            state.focus.library = 0;
+        }
+        let focus = state.focus.library;
+        drop(state);
+        self.ui.set_library_focus(focus as i32);
+    }
+
+    /// 设置详情页视图并刷新界面。换条目时把焦点收回播放按钮。
+    pub fn set_detail(&self, view: &DetailView) {
+        {
+            let images = self.images.borrow();
+            detail::apply(&self.ui, view, &images);
+        }
+        let reset_focus = {
+            let mut state = self.state.borrow_mut();
+            let changed = state.detail.item_id != view.item_id;
+            if changed {
+                state.focus.detail = 0;
+            }
+            state.detail = view.clone();
+            changed
+        };
+        if reset_focus {
+            self.ui.set_detail_focus(0);
+        }
+    }
+
+    /// 设置播放页视图并刷新界面。
+    pub fn set_player(&self, view: &PlayerView) {
+        self.state.borrow_mut().player = view.clone();
+        player_refresh(&self.ui, &self.state);
+    }
+
+    /// 当前播放页视图模型的快照。
+    pub fn player_view(&self) -> PlayerView {
+        self.state.borrow().player.clone()
+    }
+
+    /// 播放页当前是否全屏（`F` 切换，实际窗口动作交给上层回调）。
+    pub fn player_fullscreen(&self) -> bool {
+        self.state.borrow().player_fullscreen
+    }
+
+    /// 推进播放页的虚拟时间（控制层自动隐藏）。
+    ///
+    /// 真实窗口由 `player_overlay.slint` 的 `Timer` 每 250ms 调一次；
+    /// testing backend 不跑 Timer，所以测试直接调这个方法灌虚拟时间。
+    /// 返回控制层可见性是否变化（没变化时不重刷界面，避免无谓的属性写入）。
+    pub fn tick_player(&self, delta: Duration) -> bool {
+        player_tick(&self.ui, &self.state, delta)
+    }
+
+    /// 标记一次用户输入（任何键 / 鼠标移动）：立刻显示控制层并重置 3 秒计时。
+    pub fn player_note_input(&self) {
+        player_note_input(&self.ui, &self.state);
+    }
+
+    /// 拖动进度条开始：只显示控制层，不发 seek。
+    pub fn player_scrub_start(&self) {
+        player_scrub_start(&self.ui, &self.state);
+    }
+
+    /// 拖动中：只更新时间气泡文本，不动播放位置。
+    pub fn player_scrub_move(&self, ratio: f32) {
+        player_scrub_move(&self.ui, &self.state, ratio);
+    }
+
+    /// 松手：这里才真正提交 seek。
+    pub fn player_scrub_commit(&self, ratio: f32) {
+        player_scrub_commit(&self.ui, &self.state, ratio);
+    }
+
+    /// 处理一个播放页按键；返回是否消费了该键。
+    pub fn handle_player_key(&self, key: PlayerKey) -> bool {
+        handle_player_key(&self.ui, &self.state, key)
+    }
+
+    /// 打开详情：压栈、切页、通知上层填数据。
+    pub fn open_detail(&self, item_id: &str) -> bool {
+        open_detail(&self.ui, &self.state, item_id)
+    }
+
+    /// 开始播放：压栈、切到播放外壳、通知上层。
+    pub fn play(&self, item_id: &str) -> bool {
+        play(&self.ui, &self.state, item_id)
+    }
+
+    /// 直接切到某个页面（不改变导航栈；演示与测试用）。
+    pub fn show_page(&self, page: Page) {
+        self.ui.set_page(page.index());
+    }
+
+    /// 回到首页并把导航栈重置为根。
+    pub fn show_home(&self) {
+        self.state.borrow_mut().nav.reset(Route::Home);
+        self.ui.set_page(Page::Home.index());
+    }
+
+    /// 打开媒体库：刷新数据、压栈、切页。已经停在媒体库时不重复压栈。
+    pub fn open_library(&self, view: &LibraryView) -> bool {
+        self.set_library(view);
+        let mut state = self.state.borrow_mut();
+        if !matches!(state.nav.current(), Some(Route::Library { .. })) {
+            state.nav.push(Route::Library {
+                id: view.id.clone(),
+                title: view.title.clone(),
+            });
+        }
+        drop(state);
+        self.ui.set_page(Page::Library.index());
+        true
+    }
+
+    /// 返回上一级；栈空时返回 `false`。
+    pub fn go_back(&self) -> bool {
+        go_back(&self.ui, &self.state)
+    }
+
+    /// 处理一个按键命令；返回是否消费了该键。
+    pub fn handle_key(&self, command: KeyCommand) -> bool {
+        handle_key(&self.ui, &self.state, command)
+    }
+
+    /// 打开详情回调。
+    pub fn on_open_detail(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.open_detail = Some(Rc::new(handler));
+    }
+
+    /// 播放回调。
+    pub fn on_play(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.play = Some(Rc::new(handler));
+    }
+
+    /// 返回回调。
+    pub fn on_back(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.back = Some(Rc::new(handler));
+    }
+
+    /// 搜索回调。
+    pub fn on_search(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.search = Some(Rc::new(handler));
+    }
+
+    /// 排序条回调。
+    pub fn on_sort(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.sort = Some(Rc::new(handler));
+    }
+
+    /// 顶部媒体库标签回调。
+    pub fn on_tab_activated(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.tab = Some(Rc::new(handler));
+    }
+
+    /// 版本选择回调。
+    pub fn on_source_selected(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.source = Some(Rc::new(handler));
+    }
+
+    /// 播放 / 暂停回调（参数是切换后的播放状态）。
+    pub fn on_player_play_pause(&self, handler: impl Fn(bool) + 'static) {
+        self.state.borrow_mut().callbacks.player_play_pause = Some(Rc::new(handler));
+    }
+
+    /// seek 回调：参数是**目标位置**（已夹到 `0..=时长`）。
+    pub fn on_player_seek(&self, handler: impl Fn(Duration) + 'static) {
+        self.state.borrow_mut().callbacks.player_seek = Some(Rc::new(handler));
+    }
+
+    /// 音量变化回调（`0.0..=1.0`）。
+    pub fn on_player_volume(&self, handler: impl Fn(f32) + 'static) {
+        self.state.borrow_mut().callbacks.player_volume = Some(Rc::new(handler));
+    }
+
+    /// 静音状态变化回调。
+    pub fn on_player_muted(&self, handler: impl Fn(bool) + 'static) {
+        self.state.borrow_mut().callbacks.player_muted = Some(Rc::new(handler));
+    }
+
+    /// 倍速变化回调。
+    pub fn on_player_rate(&self, handler: impl Fn(f32) + 'static) {
+        self.state.borrow_mut().callbacks.player_rate = Some(Rc::new(handler));
+    }
+
+    /// 音轨选择回调（引擎侧切轨，不重启播放）。
+    pub fn on_player_audio_track(&self, handler: impl Fn(u32) + 'static) {
+        self.state.borrow_mut().callbacks.player_audio_track = Some(Rc::new(handler));
+    }
+
+    /// 字幕选择回调；`None` 表示关闭字幕。
+    pub fn on_player_subtitle_track(&self, handler: impl Fn(Option<u32>) + 'static) {
+        self.state.borrow_mut().callbacks.player_subtitle_track = Some(Rc::new(handler));
+    }
+
+    /// 错误卡"重试"回调。
+    pub fn on_player_retry(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.player_retry = Some(Rc::new(handler));
+    }
+
+    /// 全屏切换回调（真正动窗口的是上层）。
+    pub fn on_player_fullscreen(&self, handler: impl Fn(bool) + 'static) {
+        self.state.borrow_mut().callbacks.player_fullscreen = Some(Rc::new(handler));
+    }
+
+    /// 退出播放回调：**先**提交进度（参数是最终位置），再由界面返回上一页。
+    pub fn on_player_exit(&self, handler: impl Fn(Duration) + 'static) {
+        self.state.borrow_mut().callbacks.player_exit = Some(Rc::new(handler));
+    }
+
+    /// 字幕延迟步进回调（秒，**可负**：`-0.5` / `+0.5`）。
+    ///
+    /// 累加是引擎侧的事（mpv 的 `sub-delay` 可负），界面只发这一步。
+    pub fn on_player_subtitle_delay(&self, handler: impl Fn(f64) + 'static) {
+        self.state.borrow_mut().callbacks.player_subtitle_delay = Some(Rc::new(handler));
+    }
+
+    /// "加载外挂字幕…"回调：文件选择在上层（界面不碰文件系统）。
+    pub fn on_player_subtitle_external(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.player_subtitle_external = Some(Rc::new(handler));
+    }
+
+    /// 空状态的"连接服务器"回调（真正的连接流程在上层）。
+    pub fn on_connect_server(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.connect_server = Some(Rc::new(handler));
+    }
+
+    /// 字幕安全区回调：控制层可见时抬起 `y` px（mpv 的 `sub-margin-y`），隐藏时为 `0`。
+    ///
+    /// 只在数值真正变化时发（`blend-subtitles=video` 的字幕烧在视频层，控制层会盖住它）。
+    pub fn on_player_subtitle_margin(&self, handler: impl Fn(i64) + 'static) {
+        self.state.borrow_mut().callbacks.player_subtitle_margin = Some(Rc::new(handler));
+    }
+}
+
+fn page_of_route(route: Option<&Route>) -> Page {
+    match route {
+        Some(Route::Home) | None => Page::Home,
+        Some(Route::Library { .. }) => Page::Library,
+        Some(Route::Detail { .. }) => Page::Detail,
+        Some(Route::Player { .. }) => Page::Player,
+    }
+}
+
+fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_key_intent(move |code| {
+            if let Some(ui) = weak.upgrade() {
+                if let Some(command) = KeyCommand::from_intent(code) {
+                    handle_key(&ui, &state, command);
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_open_item(move |id| {
+            if let Some(ui) = weak.upgrade() {
+                open_detail(&ui, &state, id.as_str());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_play_item(move |id| {
+            if let Some(ui) = weak.upgrade() {
+                play(&ui, &state, id.as_str());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_hero_play(move || {
+            if let Some(ui) = weak.upgrade() {
+                let item_id = state
+                    .borrow()
+                    .home
+                    .hero
+                    .as_ref()
+                    .map(|hero| hero.item_id.clone());
+                if let Some(item_id) = item_id {
+                    play(&ui, &state, &item_id);
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_back(move || {
+            if let Some(ui) = weak.upgrade() {
+                go_back(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search(move || {
+            if let Some(ui) = weak.upgrade() {
+                focus_search(&ui, &state);
+            }
+        });
+    }
+    {
+        // 空状态的"连接服务器"：对话框 / 网络在上层，这里只把意图转出去。
+        let state = state.clone();
+        ui.on_connect_server(move || {
+            let handler = state.borrow().callbacks.connect_server.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_sort(move || {
+            let handler = state.borrow().callbacks.sort.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_tab_activated(move |id| {
+            let handler = {
+                let mut state = state.borrow_mut();
+                state.focus.library = 0;
+                state.callbacks.tab.clone()
+            };
+            if let Some(handler) = handler {
+                handler(id.as_str());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_source_selected(move |id| {
+            let handler = state.borrow().callbacks.source.clone();
+            if let Some(handler) = handler {
+                handler(id.as_str());
+            }
+        });
+    }
+    // ---- 播放页 ----
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_key(move |code| {
+            if let Some(ui) = weak.upgrade() {
+                if let Some(key) = PlayerKey::from_intent(code) {
+                    handle_player_key(&ui, &state, key);
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_back(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_exit(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_play_pause(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_play_pause(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_seek_relative(move |seconds| {
+            if let Some(ui) = weak.upgrade() {
+                player_seek_relative(&ui, &state, i64::from(seconds));
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_scrub_start(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_scrub_start(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_scrub_move(move |ratio| {
+            if let Some(ui) = weak.upgrade() {
+                player_scrub_move(&ui, &state, ratio);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_scrub_commit(move |ratio| {
+            if let Some(ui) = weak.upgrade() {
+                player_scrub_commit(&ui, &state, ratio);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_scrub_cancel(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_scrub_cancel(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_input(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_note_input(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_tick(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_tick(&ui, &state, player::TICK_INTERVAL);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_audio_toggle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_toggle_menu(&ui, &state, true);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_subtitle_toggle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_toggle_menu(&ui, &state, false);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_audio_selected(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                player_audio_selected(&ui, &state, index);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_subtitle_selected(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                player_subtitle_selected(&ui, &state, index);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_retry(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_retry(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_fullscreen_toggle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_toggle_fullscreen(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_rate_cycle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_cycle_rate(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_time_toggle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_toggle_time_mode(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_mute_toggle(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_toggle_mute(&ui, &state);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_subtitle_delay(move |seconds| {
+            if let Some(ui) = weak.upgrade() {
+                player_subtitle_delay(&ui, &state, f64::from(seconds));
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_subtitle_external(move || {
+            if let Some(ui) = weak.upgrade() {
+                player_subtitle_external(&ui, &state);
+            }
+        });
+    }
+}
+
+fn focus_rows(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> Vec<usize> {
+    let columns = ui.get_grid_columns().max(1) as usize;
+    let state = state.borrow();
+    match page {
+        Page::Home => home::focus_rows(&state.home, columns),
+        Page::Library => library::focus_rows(&state.library, columns),
+        Page::Detail => detail::focus_rows(&state.detail),
+        Page::Player => Vec::new(),
+    }
+}
+
+fn set_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, index: usize) {
+    state.borrow_mut().focus.set(page, index);
+    match page {
+        Page::Home => ui.set_home_focus(index as i32),
+        Page::Library => ui.set_library_focus(index as i32),
+        Page::Detail => ui.set_detail_focus(index as i32),
+        Page::Player => {}
+    }
+}
+
+fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -> bool {
+    let page = Page::from_index(ui.get_page());
+    match command {
+        // 播放页没有焦点环：Enter / Space 交给"播放/暂停"，不重新起播。
+        KeyCommand::Accept if page == Page::Player => {
+            player_play_pause(ui, state);
+            true
+        }
+        KeyCommand::Left => move_focus_by(ui, state, page, -1, 0),
+        KeyCommand::Right => move_focus_by(ui, state, page, 1, 0),
+        KeyCommand::Up => move_focus_by(ui, state, page, 0, -1),
+        KeyCommand::Down => move_focus_by(ui, state, page, 0, 1),
+        KeyCommand::Accept => activate(ui, state),
+        KeyCommand::Back => go_back(ui, state),
+        KeyCommand::Search => {
+            focus_search(ui, state);
+            true
+        }
+    }
+}
+
+fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32, dy: i32) -> bool {
+    if page == Page::Player {
+        return false;
+    }
+    let rows = focus_rows(ui, state, page);
+    if rows.is_empty() {
+        return false;
+    }
+    let current = state.borrow().focus.get(page);
+    let next = move_focus(&rows, current, dx, dy);
+    if next != current {
+        set_focus(ui, state, page, next);
+    }
+    true
+}
+
+fn activate(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    let page = Page::from_index(ui.get_page());
+    let item_id = {
+        let state = state.borrow();
+        let index = state.focus.get(page);
+        match page {
+            Page::Home => state.home.card_at(index).map(|card| card.item_id.clone()),
+            Page::Library => state
+                .library
+                .card_at(index)
+                .map(|card| card.item_id.clone()),
+            Page::Detail | Page::Player => None,
+        }
+    };
+    if let Some(item_id) = item_id {
+        return open_detail(ui, state, &item_id);
+    }
+    if matches!(page, Page::Detail | Page::Player) {
+        return play_current(ui, state);
+    }
+    false
+}
+
+fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
+    let handler = {
+        let mut state = state.borrow_mut();
+        state.nav.push(Route::Detail {
+            item_id: item_id.to_string(),
+        });
+        state.focus.detail = 0;
+        state.callbacks.open_detail.clone()
+    };
+    set_focus(ui, state, Page::Detail, 0);
+    ui.set_page(Page::Detail.index());
+    if let Some(handler) = handler {
+        handler(item_id);
+    }
+    true
+}
+
+fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    let item_id = {
+        let state = state.borrow();
+        match state.nav.current() {
+            Some(Route::Detail { item_id }) | Some(Route::Player { item_id }) => {
+                Some(item_id.clone())
+            }
+            _ => None,
+        }
+    };
+    match item_id {
+        Some(item_id) => play(ui, state, &item_id),
+        None => false,
+    }
+}
+
+fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
+    let handler = {
+        let mut state = state.borrow_mut();
+        let already_playing = matches!(state.nav.current(), Some(Route::Player { .. }));
+        if !already_playing {
+            state.nav.push(Route::Player {
+                item_id: item_id.to_string(),
+            });
+        }
+        state.callbacks.play.clone()
+    };
+    ui.set_page(Page::Player.index());
+    if let Some(handler) = handler {
+        handler(item_id);
+    }
+    true
+}
+
+fn go_back(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    let (page, handler) = {
+        let mut state = state.borrow_mut();
+        let route = match state.nav.back() {
+            Some(route) => route.clone(),
+            None => return false,
+        };
+        (page_of_route(Some(&route)), state.callbacks.back.clone())
+    };
+    ui.set_page(page.index());
+    if let Some(handler) = handler {
+        handler();
+    }
+    true
+}
+
+fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    ui.set_search_focused(true);
+    let handler = state.borrow().callbacks.search.clone();
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+// ---- 播放页：状态推进与按键行为 ----
+
+fn player_item_id(state: &State) -> String {
+    match state.nav.current() {
+        Some(Route::Player { item_id } | Route::Detail { item_id }) => item_id.clone(),
+        _ => String::new(),
+    }
+}
+
+fn player_refresh(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (view, item_id, images) = {
+        let state = state.borrow();
+        (
+            state.player.clone(),
+            player_item_id(&state),
+            state.images.clone(),
+        )
+    };
+    player::apply_for(ui, &view, &images.borrow(), &item_id);
+    player_push_subtitle_margin(ui, state, &view);
+}
+
+/// 把字幕抬升量推给引擎（`sub-margin-y`）：控制层可见时抬起，隐藏时归零。
+///
+/// 只在数值真正变化时发，所以 250ms 的 tick 不会刷屏。
+fn player_push_subtitle_margin(ui: &AppWindow, state: &Rc<RefCell<State>>, view: &PlayerView) {
+    let scale = ui.window().scale_factor();
+    let physical_height = f64::from(ui.window().size().height);
+    let height = if scale > 0.0 {
+        (physical_height / f64::from(scale)) as f32
+    } else {
+        physical_height as f32
+    };
+    let margin = view.subtitle_margin(height);
+    let handler = {
+        let mut state = state.borrow_mut();
+        if state.subtitle_margin == Some(margin) {
+            return;
+        }
+        state.subtitle_margin = Some(margin);
+        state.callbacks.player_subtitle_margin.clone()
+    };
+    if let Some(handler) = handler {
+        handler(margin);
+    }
+}
+
+fn player_tick(ui: &AppWindow, state: &Rc<RefCell<State>>, delta: Duration) -> bool {
+    let changed = state.borrow_mut().player.tick(delta);
+    if changed {
+        player_refresh(ui, state);
+    }
+    changed
+}
+
+fn player_note_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let changed = {
+        let mut state = state.borrow_mut();
+        let before = state.player.controls_visible;
+        state.player.note_input();
+        before != state.player.controls_visible
+    };
+    if changed {
+        player_refresh(ui, state);
+    }
+}
+
+fn player_play_pause(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (playing, handler) = {
+        let mut state = state.borrow_mut();
+        state.player.playing = !state.player.playing;
+        state.player.note_input();
+        (
+            state.player.playing,
+            state.callbacks.player_play_pause.clone(),
+        )
+    };
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(playing);
+    }
+}
+
+fn player_seek_to(ui: &AppWindow, state: &Rc<RefCell<State>>, target: Duration) {
+    {
+        let mut state = state.borrow_mut();
+        state.player.position = target;
+        state.player.note_input();
+        state.player.close_menus();
+    }
+    player::clear_scrub(ui);
+    player_refresh(ui, state);
+    let handler = state.borrow().callbacks.player_seek.clone();
+    if let Some(handler) = handler {
+        handler(target);
+    }
+}
+
+fn player_seek_relative(ui: &AppWindow, state: &Rc<RefCell<State>>, seconds: i64) {
+    let target = state.borrow().player.shift_position(seconds);
+    player_seek_to(ui, state, target);
+}
+
+fn player_scrub_start(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    player_note_input(ui, state);
+}
+
+fn player_scrub_move(ui: &AppWindow, state: &Rc<RefCell<State>>, ratio: f32) {
+    player_note_input(ui, state);
+    let view = state.borrow().player.clone();
+    player::apply_scrub(ui, &view, ratio);
+}
+
+fn player_scrub_commit(ui: &AppWindow, state: &Rc<RefCell<State>>, ratio: f32) {
+    let target = {
+        let state = state.borrow();
+        state
+            .player
+            .position_at_ratio(ratio)
+            .unwrap_or(state.player.position)
+    };
+    player_seek_to(ui, state, target);
+}
+
+fn player_scrub_cancel(ui: &AppWindow, _state: &Rc<RefCell<State>>) {
+    player::clear_scrub(ui);
+}
+
+fn player_volume_by(ui: &AppWindow, state: &Rc<RefCell<State>>, delta: f32) {
+    let (volume, handler) = {
+        let mut state = state.borrow_mut();
+        let volume = (state.player.volume + delta).clamp(0.0, 1.0);
+        state.player.volume = volume;
+        // 调音量视为解除静音：这是用户明确的意图，不然"按了没声音"更糟。
+        if delta > 0.0 {
+            state.player.muted = false;
+        }
+        // 数字文本只在调节时短时显示。
+        state.player.note_volume_change();
+        (volume, state.callbacks.player_volume.clone())
+    };
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(volume);
+    }
+}
+
+fn player_toggle_time_mode(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    state.borrow_mut().player.toggle_time_mode();
+    player_refresh(ui, state);
+}
+
+fn player_subtitle_delay(ui: &AppWindow, state: &Rc<RefCell<State>>, seconds: f64) {
+    player_note_input(ui, state);
+    let handler = state.borrow().callbacks.player_subtitle_delay.clone();
+    if let Some(handler) = handler {
+        handler(seconds);
+    }
+}
+
+fn player_subtitle_external(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    player_note_input(ui, state);
+    let handler = state.borrow().callbacks.player_subtitle_external.clone();
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+fn player_toggle_mute(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (muted, handler) = {
+        let mut state = state.borrow_mut();
+        state.player.muted = !state.player.muted;
+        // 静音 / 取消静音也算一次音量调节：数字文本短时显示。
+        state.player.note_volume_change();
+        (state.player.muted, state.callbacks.player_muted.clone())
+    };
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(muted);
+    }
+}
+
+fn player_toggle_menu(ui: &AppWindow, state: &Rc<RefCell<State>>, audio: bool) {
+    {
+        let mut state = state.borrow_mut();
+        if audio {
+            state.player.toggle_audio_menu();
+        } else {
+            state.player.toggle_subtitle_menu();
+        }
+    }
+    player_refresh(ui, state);
+}
+
+fn player_audio_selected(ui: &AppWindow, state: &Rc<RefCell<State>>, index: i32) {
+    if index < 0 {
+        return;
+    }
+    let Ok(index) = u32::try_from(index) else {
+        return;
+    };
+    let changed = state.borrow_mut().player.select_audio_track(index);
+    if !changed {
+        return;
+    }
+    player_refresh(ui, state);
+    let handler = state.borrow().callbacks.player_audio_track.clone();
+    if let Some(handler) = handler {
+        handler(index);
+    }
+}
+
+fn player_subtitle_selected(ui: &AppWindow, state: &Rc<RefCell<State>>, index: i32) {
+    let selection = if index < 0 {
+        None
+    } else {
+        match u32::try_from(index) {
+            Ok(index) => Some(index),
+            Err(_) => return,
+        }
+    };
+    let changed = state.borrow_mut().player.select_subtitle_track(selection);
+    if !changed {
+        return;
+    }
+    player_refresh(ui, state);
+    let handler = state.borrow().callbacks.player_subtitle_track.clone();
+    if let Some(handler) = handler {
+        handler(selection);
+    }
+}
+
+fn player_cycle_rate(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (rate, handler) = {
+        let mut state = state.borrow_mut();
+        let current = state.player.rate;
+        let next = RATE_STEPS
+            .iter()
+            .copied()
+            .find(|rate| *rate > current + 0.001)
+            .unwrap_or(RATE_STEPS[0]);
+        state.player.rate = next;
+        state.player.note_input();
+        (next, state.callbacks.player_rate.clone())
+    };
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(rate);
+    }
+}
+
+fn player_toggle_fullscreen(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (fullscreen, handler) = {
+        let mut state = state.borrow_mut();
+        state.player_fullscreen = !state.player_fullscreen;
+        state.player.note_input();
+        (
+            state.player_fullscreen,
+            state.callbacks.player_fullscreen.clone(),
+        )
+    };
+    ui.set_player_fullscreen(fullscreen);
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(fullscreen);
+    }
+}
+
+fn player_retry(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    player_note_input(ui, state);
+    let handler = state.borrow().callbacks.player_retry.clone();
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+/// `Esc`：先提交一次进度，再返回上一页（顺序是硬要求）。
+fn player_exit(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    let on_player = matches!(state.borrow().nav.current(), Some(Route::Player { .. }));
+    if !on_player {
+        return false;
+    }
+    let position = state.borrow().player.position;
+    let handler = state.borrow().callbacks.player_exit.clone();
+    if let Some(handler) = handler {
+        handler(position);
+    }
+    player::clear_scrub(ui);
+    go_back(ui, state)
+}
+
+fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey) -> bool {
+    match key {
+        PlayerKey::TogglePlay => player_play_pause(ui, state),
+        PlayerKey::SeekBack15 => player_seek_relative(ui, state, -15),
+        PlayerKey::SeekForward15 => player_seek_relative(ui, state, 15),
+        PlayerKey::SeekBack60 => player_seek_relative(ui, state, -60),
+        PlayerKey::SeekForward60 => player_seek_relative(ui, state, 60),
+        PlayerKey::VolumeUp => player_volume_by(ui, state, crate::viewmodel::VOLUME_STEP),
+        PlayerKey::VolumeDown => player_volume_by(ui, state, -crate::viewmodel::VOLUME_STEP),
+        PlayerKey::Mute => player_toggle_mute(ui, state),
+        PlayerKey::AudioMenu => player_toggle_menu(ui, state, true),
+        PlayerKey::SubtitleMenu => player_toggle_menu(ui, state, false),
+        PlayerKey::Fullscreen => player_toggle_fullscreen(ui, state),
+        PlayerKey::ToggleEngineDetail => player_toggle_engine_detail(ui, state),
+        PlayerKey::Exit => return player_exit(ui, state),
+    }
+    true
+}
+
+fn player_toggle_engine_detail(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    state.borrow_mut().player.toggle_engine_detail();
+    player_refresh(ui, state);
+}

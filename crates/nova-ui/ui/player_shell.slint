@@ -1,0 +1,180 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 播放页：视频画布占位 + 控制层（`player_overlay.slint`）。
+//!
+//! 画布本身永远是黑的（起播时不许黑闪），引擎接入后 mpv 把 SDR 8bit 帧渲染进来。
+//! HDR 片源只能在 mpv 侧色调映射到 SDR —— 界面文案写"色调映射"，不写"直通"。
+
+import { Theme } from "theme.slint";
+import { PlayerData } from "models.slint";
+import { PlayerOverlay } from "player_overlay.slint";
+
+export component PlayerShellPage inherits Rectangle {
+    in property <PlayerData> data;
+    // 拖动进度条时气泡里的时间文本（由 Rust 用视图模型格式化）。
+    in property <string> scrub-text: "";
+    in property <bool> fullscreen: false;
+
+    callback back();
+    callback play-pause();
+    callback seek-relative(int);
+    callback scrub-start();
+    callback scrub-move(float);
+    callback scrub-commit(float);
+    callback scrub-cancel();
+    callback input();
+    callback tick();
+    callback audio-toggle();
+    callback subtitle-toggle();
+    callback audio-selected(int);
+    callback subtitle-selected(int);
+    callback retry();
+    callback fullscreen-toggle();
+    callback rate-cycle();
+    callback time-toggle();
+    callback mute-toggle();
+    callback subtitle-delay(float);
+    callback subtitle-external();
+
+    background: Theme.player-bg;
+
+    // 视频画布：先铺黑底，起播时不会闪白。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: Theme.player-bg;
+
+        // 首帧到达前 / 缓冲时保留的画面（由上层推入的背景图）。
+        Image {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            source: root.data.frame;
+            visible: root.data.has-frame;
+            image-fit: contain;
+        }
+
+        VerticalLayout {
+            visible: !root.data.has-frame;
+            alignment: center;
+            spacing: Theme.space-3;
+
+            Text {
+                text: "视频画面";
+                color: Theme.text-faint;
+                font-family: Theme.font-family;
+                font-size: Theme.font-22;
+                font-weight: Theme.weight-semibold;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "引擎接入后由 mpv 渲染到这里";
+                color: Theme.text-faint;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "支持 HDR 片源的色调映射（纹理经 mpv 映射为 SDR 8bit）";
+                color: Theme.text-faint;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    PlayerOverlay {
+        width: 100%;
+        height: 100%;
+        data: root.data;
+        scrub-text: root.scrub-text;
+        fullscreen: root.fullscreen;
+
+        back => {
+            root.back();
+        }
+
+        play-pause => {
+            root.play-pause();
+        }
+
+        seek-relative(seconds) => {
+            root.seek-relative(seconds);
+        }
+
+        scrub-start => {
+            root.scrub-start();
+        }
+
+        scrub-move(ratio) => {
+            root.scrub-move(ratio);
+        }
+
+        scrub-commit(ratio) => {
+            root.scrub-commit(ratio);
+        }
+
+        scrub-cancel => {
+            root.scrub-cancel();
+        }
+
+        input => {
+            root.input();
+        }
+
+        tick => {
+            root.tick();
+        }
+
+        audio-toggle => {
+            root.audio-toggle();
+        }
+
+        subtitle-toggle => {
+            root.subtitle-toggle();
+        }
+
+        audio-selected(index) => {
+            root.audio-selected(index);
+        }
+
+        subtitle-selected(index) => {
+            root.subtitle-selected(index);
+        }
+
+        retry => {
+            root.retry();
+        }
+
+        fullscreen-toggle => {
+            root.fullscreen-toggle();
+        }
+
+        rate-cycle => {
+            root.rate-cycle();
+        }
+
+        time-toggle => {
+            root.time-toggle();
+        }
+
+        mute-toggle => {
+            root.mute-toggle();
+        }
+
+        subtitle-delay(seconds) => {
+            root.subtitle-delay(seconds);
+        }
+
+        subtitle-external => {
+            root.subtitle-external();
+        }
+    }
+}

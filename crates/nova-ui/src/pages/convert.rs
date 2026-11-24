@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 视图模型 → Slint 属性结构。只做字段搬运与格式化，不做业务判断。
+
+use crate::pages::assets::ImageStore;
+use crate::viewmodel::{
+    CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerView, SourceOption, TrackItem,
+};
+use crate::{
+    CardData, DetailData, HomeData, LibraryData, PlayerData, SourceData, TabData, TrackData,
+};
+
+fn image_or_empty(images: &ImageStore, key: &crate::viewmodel::ImageKey) -> slint::Image {
+    images.get(key)
+}
+
+fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
+    slint::ModelRc::new(slint::VecModel::from(items))
+}
+
+fn hero_image(card: &CardView, images: &ImageStore) -> slint::Image {
+    let backdrop = images.get(&crate::viewmodel::ImageKey::backdrop(card.item_id.clone()));
+    if backdrop.size().width > 0 {
+        backdrop
+    } else {
+        image_or_empty(images, &card.poster_key())
+    }
+}
+
+/// 单张卡片的 Slint 数据。
+pub fn card_data(card: &CardView, images: &ImageStore) -> CardData {
+    CardData {
+        id: card.item_id.clone().into(),
+        title: card.title.clone().into(),
+        subtitle: card.subtitle.clone().unwrap_or_default().into(),
+        badge: card.badge.clone().unwrap_or_default().into(),
+        progress: card.progress.unwrap_or(-1.0),
+        progress_text: card.progress_percent().into(),
+        initial: card.initial().into(),
+        image: image_or_empty(images, &card.poster_key()),
+    }
+}
+
+fn source_data(source: &SourceOption) -> SourceData {
+    SourceData {
+        id: source.source_id.clone().into(),
+        title: source.title.clone().into(),
+        subtitle: source.subtitle.clone().unwrap_or_default().into(),
+        selected: source.selected,
+    }
+}
+
+fn tab_data(tab: &LibraryTab) -> TabData {
+    TabData {
+        id: tab.id.clone().into(),
+        title: tab.title.clone().into(),
+    }
+}
+
+/// 首页数据。
+pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
+    let hero = view.hero.as_ref().map(|hero| CardData {
+        image: hero_image(hero, images),
+        ..card_data(hero, images)
+    });
+    let has_hero = hero.is_some();
+    HomeData {
+        hero: hero.unwrap_or_default(),
+        has_hero,
+        continue_watching: model(
+            view.continue_watching
+                .iter()
+                .map(|card| card_data(card, images))
+                .collect(),
+        ),
+        recently_added: model(
+            view.recently_added
+                .iter()
+                .map(|card| card_data(card, images))
+                .collect(),
+        ),
+        tabs: model(view.library_tabs.iter().map(tab_data).collect()),
+        current_tab: 0,
+        empty: view.is_empty(),
+    }
+}
+
+/// 媒体库数据。
+pub fn library_data(view: &LibraryView, images: &ImageStore) -> LibraryData {
+    LibraryData {
+        id: view.id.clone().into(),
+        title: view.title.clone().into(),
+        count_text: format!("{} 部", view.cards.len()).into(),
+        sort_label: view.sort_label.clone().into(),
+        tabs: model(view.library_tabs.iter().map(tab_data).collect()),
+        current_tab: view.current_tab as i32,
+        cards: model(
+            view.cards
+                .iter()
+                .map(|card| card_data(card, images))
+                .collect(),
+        ),
+        empty: view.cards.is_empty(),
+    }
+}
+
+/// 详情页数据。
+pub fn detail_data(view: &DetailView, images: &ImageStore) -> DetailData {
+    DetailData {
+        item_id: view.item_id.clone().into(),
+        title: view.title.clone().into(),
+        original_title: view.original_title.clone().unwrap_or_default().into(),
+        meta_line: view.meta_line.clone().into(),
+        overview: view.overview.clone().unwrap_or_default().into(),
+        genres: model::<slint::SharedString>(
+            view.genres
+                .iter()
+                .map(|genre| genre.as_str().into())
+                .collect(),
+        ),
+        play_label: view.play_label.clone().into(),
+        badge: view.badge.clone().unwrap_or_default().into(),
+        initial: CardView::new(view.item_id.clone(), view.title.clone())
+            .initial()
+            .into(),
+        poster: image_or_empty(images, &view.poster_key()),
+        backdrop: image_or_empty(images, &view.backdrop_key()),
+        sources: model(view.sources.iter().map(source_data).collect()),
+    }
+}
+
+fn track_data(track: &TrackItem) -> TrackData {
+    TrackData {
+        index: track.index as i32,
+        label: track.label.clone().into(),
+        detail: track.detail.clone().unwrap_or_default().into(),
+        selected: track.selected,
+        bitmap: track.is_bitmap_subtitle,
+    }
+}
+
+/// 播放页数据。
+///
+/// 进度 / 缓冲比例在这里就压成 `0.0..=1.0`：视图模型对"时长未知"返回 `None`，
+/// 界面拿到的是 `progress = 0` 且 `has-progress = false`，不会有 `NaN` 传到布局里。
+///
+/// `item_id` 用来取背景图（引擎首帧到达前铺底，避免黑底上只有控件）。
+pub fn player_data(view: &PlayerView, images: &ImageStore, item_id: &str) -> PlayerData {
+    let progress = view.progress_fraction();
+    let buffered = view.buffered_fraction();
+    let status_line = view.status_line();
+    let frame = image_or_empty(
+        images,
+        &crate::viewmodel::ImageKey::backdrop(item_id.to_owned()),
+    );
+    PlayerData {
+        item_id: "".into(),
+        title: view.title.clone().into(),
+        subtitle: view.subtitle.clone().unwrap_or_default().into(),
+        time_line: view.time_line().into(),
+        remaining_text: view.remaining_text().unwrap_or_default().into(),
+        time_text: view.time_text().into(),
+        progress: progress.unwrap_or(0.0),
+        buffered: buffered.unwrap_or(0.0),
+        has_progress: progress.is_some(),
+        playing: view.playing,
+        buffering: view.buffering,
+        volume: view.volume_fraction(),
+        volume_text: view.volume_text().into(),
+        volume_hint: view.volume_hint_visible(),
+        muted: view.muted,
+        rate_text: view.rate_text().into(),
+        audio_tracks: model(view.audio_tracks.iter().map(track_data).collect()),
+        subtitle_tracks: model(view.subtitle_tracks.iter().map(track_data).collect()),
+        subtitles_off: view.selected_subtitle_track().is_none(),
+        audio_menu_open: view.audio_menu_open,
+        subtitle_menu_open: view.subtitle_menu_open,
+        error: view.error.clone().unwrap_or_default().into(),
+        has_error: view.error.is_some(),
+        error_action: view.error_action.clone().unwrap_or_default().into(),
+        status_line: status_line.unwrap_or_default().into(),
+        has_status_line: status_line.is_some(),
+        status_warning: view.hwdec_notice.is_some(),
+        transport_mode: view.transport_mode().unwrap_or_default().into(),
+        engine_line: view.engine_line.clone().unwrap_or_default().into(),
+        show_engine_detail: view.show_engine_detail,
+        hwdec_notice: view.hwdec_notice.clone().unwrap_or_default().into(),
+        controls_visible: view.controls_visible,
+        has_frame: frame.size().width > 0,
+        frame,
+    }
+}

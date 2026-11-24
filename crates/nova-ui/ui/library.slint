@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 媒体库：标题 + 排序条外观 + 6 列（<1280 为 4 列）2:3 海报网格 + 滚动。
+
+import { Theme } from "theme.slint";
+import { LibraryData } from "models.slint";
+import { Navbar } from "navbar.slint";
+import { PosterCard } from "poster_card.slint";
+import { EmptyState } from "empty_state.slint";
+
+export component LibraryPage inherits Rectangle {
+    in property <LibraryData> data;
+    in-out property <int> focus-index: 0;
+    in property <bool> search-focused: false;
+
+    callback open-item(string);
+    callback tab-activated(string);
+    callback sort();
+    callback search();
+
+    background: Theme.bg;
+    property <length> card-width: root.width < Theme.library-breakpoint
+        ? (root.width - Theme.gutter * 2 - Theme.card-gap * 3) / 4
+        : (root.width - Theme.gutter * 2 - Theme.card-gap * 5) / 6;
+
+    VerticalLayout {
+        Navbar {
+            height: Theme.navbar-height;
+            tabs: root.data.tabs;
+            current-index: root.data.current-tab;
+            search-focused: root.search-focused;
+            tab-activated(id) => {
+                root.tab-activated(id);
+            }
+            search => {
+                root.search();
+            }
+        }
+
+        if (root.data.empty) :
+            EmptyState {
+                vertical-stretch: 1;
+                title: root.data.title + " 里还没有内容";
+                message: "同步完成后，海报会出现在这里。";
+                primary-label: "重新搜索";
+                primary => {
+                    root.search();
+                }
+            }
+        if (!root.data.empty) :
+            Flickable {
+                vertical-stretch: 1;
+                interactive: true;
+                content-width: self.width;
+                content-height: content.preferred-height;
+
+                content := VerticalLayout {
+                    width: parent.width;
+                    padding-left: Theme.gutter;
+                    padding-right: Theme.gutter;
+                    padding-top: Theme.space-6;
+                    padding-bottom: Theme.space-8;
+                    spacing: Theme.block-gap;
+
+                    HorizontalLayout {
+                        spacing: Theme.space-4;
+
+                        Text {
+                            text: root.data.title;
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-34;
+                            font-weight: Theme.weight-bold;
+                        }
+
+                        Text {
+                            text: root.data.count-text;
+                            color: Theme.text-faint;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 1px;
+                            background: transparent;
+                        }
+
+                        Rectangle {
+                            width: sort-label.preferred-width + Theme.space-5;
+                            height: 36px;
+                            border-radius: Theme.radius-pill;
+                            background: sort-area.has-hover ? Theme.surface-raised : Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.hairline;
+
+                            sort-label := Text {
+                                x: Theme.space-3;
+                                height: parent.height;
+                                text: root.data.sort-label + "  ⌄";
+                                color: Theme.text-muted;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-12;
+                                vertical-alignment: center;
+                            }
+
+                            sort-area := TouchArea {
+
+                                clicked => {
+                                    root.sort();
+                                }
+                            }
+                        }
+                    }
+
+                    FlexboxLayout {
+                        spacing: Theme.card-gap;
+                        for card[i] in root.data.cards : PosterCard {
+                            item-id: card.id;
+                            title: card.title;
+                            subtitle: card.subtitle;
+                            badge: card.badge;
+                            progress: card.progress;
+                            progress-text: card.progress-text;
+                            initial: card.initial;
+                            image: card.image;
+                            poster-width: root.card-width;
+                            focused: root.focus-index == i;
+
+                            clicked => {
+                                root.focus-index = i;
+                                root.open-item(card.id);
+                            }
+                        }
+                    }
+                }
+            }
+    }
+}

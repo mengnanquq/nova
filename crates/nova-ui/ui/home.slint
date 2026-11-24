@@ -1,0 +1,378 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 首页：导航 + hero + 继续观看横排（带进度条）+ 最近添加网格 + 空状态。
+//!
+//! 区块标题是"粘性"的：滚过区块顶部后贴住视口顶，直到该区块只剩标题 + 96px
+//! 才随区块一起划出，避免标题贴视口底被腰斩。
+
+import { Theme } from "theme.slint";
+import { HomeData } from "models.slint";
+import { Navbar } from "navbar.slint";
+import { PosterCard } from "poster_card.slint";
+import { EmptyState } from "empty_state.slint";
+
+export component HomePage inherits Rectangle {
+    in property <HomeData> data;
+    in-out property <int> focus-index: 0;
+    in property <bool> search-focused: false;
+
+    callback open-item(string);
+    callback hero-play();
+    callback tab-activated(string);
+    callback search();
+    // 空状态的"连接服务器"：真正的连接流程在上层（这里只发回调）。
+    callback connect-server();
+
+    background: Theme.bg;
+    property <length> card-width: root.width < Theme.library-breakpoint
+        ? (root.width - Theme.gutter * 2 - Theme.card-gap * 3) / 4
+        : (root.width - Theme.gutter * 2 - Theme.card-gap * 5) / 6;
+    property <int> continue-count: root.data.continue-watching.length;
+    property <int> recent-count: root.data.recently-added.length;
+
+    // ---- 粘性标题的几何 ----
+    // 区块顶在视口坐标系里的位置（content-y 往上滚时为负）。
+    property <length> continue-top: section-continue.y + flick.content-y;
+    property <length> recent-top: section-recent.y + flick.content-y;
+    // 贴住视口顶，直到该区块只剩"标题 + 96px"才跟着划出去。
+    property <length> continue-sticky-y: min(
+        0px,
+        root.continue-top + section-continue.height - self.sticky-keep
+    );
+    property <length> recent-sticky-y: min(
+        0px,
+        root.recent-top + section-recent.height - self.sticky-keep
+    );
+    property <length> sticky-keep: Theme.section-title-height + Theme.section-title-reveal;
+    property <bool> show-continue-sticky: root.continue-count > 0
+        && root.continue-top < 0px
+        && root.continue-top + section-continue.height > 0px;
+    property <bool> show-recent-sticky: root.recent-count > 0
+        && root.recent-top < 0px
+        && root.recent-top + section-recent.height > 0px;
+
+    VerticalLayout {
+        Navbar {
+            height: Theme.navbar-height;
+            tabs: root.data.tabs;
+            current-index: root.data.current-tab;
+            search-focused: root.search-focused;
+            tab-activated(id) => {
+                root.tab-activated(id);
+            }
+            search => {
+                root.search();
+            }
+        }
+
+        if (root.data.empty) :
+            EmptyState {
+                vertical-stretch: 1;
+                title: "媒体库还是空的";
+                message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
+                primary-label: "连接服务器";
+                secondary-label: "搜索本地缓存";
+                primary => {
+                    root.connect-server();
+                }
+                secondary => {
+                    root.search();
+                }
+            }
+        flick := Flickable {
+            visible: !root.data.empty;
+            vertical-stretch: 1;
+            interactive: true;
+            content-width: self.width;
+            content-height: content.preferred-height;
+
+                content := VerticalLayout {
+                    width: parent.width;
+                    padding-left: Theme.gutter;
+                    padding-right: Theme.gutter;
+                    padding-bottom: Theme.space-8;
+                    spacing: Theme.section-gap;
+
+                    // ---- Hero ----
+                    if (root.data.has-hero) :
+                        hero := Rectangle {
+                            height: Theme.hero-height;
+                            clip: true;
+                            border-radius: Theme.radius-panel;
+                            border-width: 1px;
+                            border-color: Theme.hairline;
+                            background: Theme.surface;
+
+                            Image {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.data.hero.image;
+                                image-fit: cover;
+                            }
+
+                            // 纯色半透明遮罩：保证压图文字可读，不用渐变。
+                            Rectangle {
+                                x: 0;
+                                y: 0;
+                                width: parent.width;
+                                height: parent.height;
+                                background: Theme.hero-scrim;
+                            }
+
+                            // badge 与海报卡一致：右上角。
+                            if (root.data.hero.badge != "") :
+                                Rectangle {
+                                    x: hero.width - self.width - Theme.space-6;
+                                    y: Theme.space-6;
+                                    width: hero-badge.preferred-width + Theme.space-3;
+                                    height: 24px;
+                                    border-radius: Theme.radius-badge;
+                                    background: Theme.badge-bg;
+                                    border-width: 1px;
+                                    border-color: Theme.hairline-strong;
+
+                                    hero-badge := Text {
+                                        x: Theme.space-2;
+                                        height: parent.height;
+                                        text: root.data.hero.badge;
+                                        color: Theme.accent;
+                                        font-family: Theme.font-family;
+                                        font-size: Theme.font-12;
+                                        font-weight: Theme.weight-semibold;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                            VerticalLayout {
+                                x: Theme.space-6;
+                                y: hero.height - self.height - Theme.space-6;
+                                width: hero.width - Theme.space-6 * 2;
+                                height: self.preferred-height;
+                                spacing: Theme.space-3;
+
+                                Text {
+                                    text: root.data.hero.title;
+                                    color: Theme.text;
+                                    font-family: Theme.font-family;
+                                    font-size: Theme.font-48;
+                                    font-weight: Theme.weight-bold;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                }
+
+                                Text {
+                                    text: root.data.hero.subtitle;
+                                    color: Theme.text-muted;
+                                    font-family: Theme.font-family;
+                                    font-size: Theme.font-14;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                    visible: root.data.hero.subtitle != "";
+                                }
+
+                                HorizontalLayout {
+                                    spacing: Theme.space-3;
+
+                                    Rectangle {
+                                        width: hero-play-label.preferred-width + Theme.space-6;
+                                        height: Theme.button-primary-height;
+                                        border-radius: Theme.radius-pill;
+                                        background: hero-play-area.has-hover ? Theme.accent-hover : Theme.accent;
+
+                                        hero-play-label := Text {
+                                            x: Theme.space-2;
+                                            height: parent.height;
+                                            text: "▶  播放";
+                                            color: Theme.accent-contrast;
+                                            font-family: Theme.font-family;
+                                            font-size: Theme.font-14;
+                                            font-weight: Theme.weight-semibold;
+                                            vertical-alignment: center;
+                                        }
+
+                                        hero-play-area := TouchArea {
+
+                                            clicked => {
+                                                root.hero-play();
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: hero-detail-label.preferred-width + Theme.space-6;
+                                        height: Theme.button-primary-height;
+                                        border-radius: Theme.radius-pill;
+                                        background: hero-detail-area.has-hover ? Theme.surface-raised : Theme.surface;
+                                        border-width: 1px;
+                                        border-color: Theme.hairline-strong;
+
+                                        hero-detail-label := Text {
+                                            x: Theme.space-2;
+                                            height: parent.height;
+                                            text: "详情";
+                                            color: Theme.text;
+                                            font-family: Theme.font-family;
+                                            font-size: Theme.font-14;
+                                            font-weight: Theme.weight-medium;
+                                            vertical-alignment: center;
+                                        }
+
+                                        hero-detail-area := TouchArea {
+
+                                            clicked => {
+                                                root.open-item(root.data.hero.id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                    // ---- 继续观看 ----
+                    // 用 `visible` 而不是 `if`：区块 id 始终存在，粘性标题才能读它的几何。
+                    section-continue := VerticalLayout {
+                        visible: root.continue-count > 0;
+                        spacing: Theme.space-4;
+
+                        HorizontalLayout {
+                            height: Theme.section-title-height;
+                            spacing: Theme.space-3;
+
+                            Text {
+                                text: "继续观看";
+                                color: Theme.text;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-22;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 1px;
+                                background: transparent;
+                            }
+                        }
+
+                        FlexboxLayout {
+                            spacing: Theme.card-gap;
+
+                            for card[i] in root.data.continue-watching : PosterCard {
+                                item-id: card.id;
+                                title: card.title;
+                                subtitle: card.subtitle;
+                                badge: card.badge;
+                                progress: card.progress;
+                                progress-text: card.progress-text;
+                                initial: card.initial;
+                                image: card.image;
+                                poster-width: root.card-width;
+                                focused: root.focus-index == i;
+
+                                clicked => {
+                                    root.focus-index = i;
+                                    root.open-item(card.id);
+                                }
+                            }
+                        }
+                    }
+
+                    // ---- 最近添加 ----
+                    section-recent := VerticalLayout {
+                        visible: root.recent-count > 0;
+                        spacing: Theme.space-4;
+
+                        HorizontalLayout {
+                            height: Theme.section-title-height;
+
+                            Text {
+                                text: "最近添加";
+                                color: Theme.text;
+                                font-family: Theme.font-family;
+                                font-size: Theme.font-22;
+                                font-weight: Theme.weight-semibold;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        FlexboxLayout {
+                            spacing: Theme.card-gap;
+
+                            for card[i] in root.data.recently-added : PosterCard {
+                                item-id: card.id;
+                                title: card.title;
+                                subtitle: card.subtitle;
+                                badge: card.badge;
+                                progress: card.progress;
+                                progress-text: card.progress-text;
+                                initial: card.initial;
+                                image: card.image;
+                                poster-width: root.card-width;
+                                focused: root.focus-index == root.continue-count + i;
+
+                                clicked => {
+                                    root.focus-index = root.continue-count + i;
+                                    root.open-item(card.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+    // ---- 粘性区块标题层 ----
+    // 贴在视口顶上；只在区块顶部已经滚过视口顶时出现（此时正文里的标题已被裁掉）。
+    Rectangle {
+        visible: !root.data.empty && (root.show-continue-sticky || root.show-recent-sticky);
+        x: 0;
+        y: Theme.navbar-height;
+        width: root.width;
+        height: flick.height;
+        background: transparent;
+        clip: true;
+
+        Rectangle {
+            visible: root.show-continue-sticky;
+            x: Theme.gutter;
+            y: root.continue-sticky-y;
+            width: parent.width - Theme.gutter * 2;
+            height: Theme.section-title-height;
+            background: Theme.bg;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "继续观看";
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-22;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            visible: root.show-recent-sticky;
+            x: Theme.gutter;
+            y: root.recent-sticky-y;
+            width: parent.width - Theme.gutter * 2;
+            height: Theme.section-title-height;
+            background: Theme.bg;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "最近添加";
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-22;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

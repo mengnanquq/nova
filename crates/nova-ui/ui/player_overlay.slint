@@ -1,0 +1,1004 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 播放控制层（对标 Infuse）。
+//!
+//! 布局自下而上：底部全宽渐变遮罩（标题 → 进度条 → 传输控件）、左上返回、
+//! 中央暂停图标、缓冲角标、错误卡、音轨 / 字幕弹出层。
+//!
+//! 这里**只**做摆放与指针/键位分派：进度、菜单开合、自动隐藏计时都在
+//! `viewmodel::PlayerView` 里（`PlayerData.controls-visible` 决定显隐）。
+//! `Timer` 只是把真实窗口的时间增量喂回视图模型（见 `pages::player::TICK_INTERVAL`）。
+
+import { Theme } from "theme.slint";
+import { PlayerData, TrackData } from "models.slint";
+
+// 播放三角：用 Path 画，不依赖字体里是否有 "▶" 字形。
+// Path 会缩放到元素尺寸，所以宽高必须显式给出（否则取父级尺寸，图形会被拉大）。
+component PlayGlyph inherits Path {
+    in property <color> tint: Theme.text;
+    width: 16px;
+    height: 18px;
+    commands: "M 0 0 L 16 9 L 0 18 Z";
+    fill: root.tint;
+}
+
+// 暂停双竖条。
+component PauseGlyph inherits Rectangle {
+    in property <color> tint: Theme.text;
+    width: 18px;
+    height: 20px;
+    background: transparent;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 6px;
+        height: parent.height;
+        border-radius: 1px;
+        background: root.tint;
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 0;
+        width: 6px;
+        height: parent.height;
+        border-radius: 1px;
+        background: root.tint;
+    }
+}
+
+// 喇叭图标：壳体填充 + 波纹 / 静音斜线描边。用 Path 画，不依赖字体里的字形。
+component VolumeGlyph inherits Rectangle {
+    in property <bool> muted: false;
+    in property <color> tint: Theme.text;
+
+    width: 20px;
+    height: 18px;
+    background: transparent;
+
+    // 喇叭壳体（bbox 9x18）。
+    Path {
+        x: 0;
+        y: 0;
+        width: 9px;
+        height: 18px;
+        fill: root.tint;
+        commands: "M 0 6 L 4 6 L 9 0 L 9 18 L 4 12 L 0 12 Z";
+    }
+
+    // 有声：一道向外扩散的弧（bbox 5x10）。
+    Path {
+        x: 10px;
+        y: 3px;
+        width: 5px;
+        height: 10px;
+        stroke: root.tint;
+        stroke-width: 2px;
+        fill: transparent;
+        commands: "M 0 1 Q 5 6 0 11";
+        visible: !root.muted;
+    }
+
+    // 静音：一道斜线（bbox 8x12）。
+    Path {
+        x: 10px;
+        y: 2px;
+        width: 8px;
+        height: 12px;
+        stroke: root.tint;
+        stroke-width: 2px;
+        fill: transparent;
+        commands: "M 0 0 L 8 12";
+        visible: root.muted;
+    }
+}
+
+// 音量按钮：点击静音 / 取消静音。数字文本不在按钮里面（只短时显示）。
+component VolumeButton inherits Rectangle {
+    in property <bool> muted: false;
+    callback clicked();
+
+    width: Theme.player-control-size;
+    height: Theme.player-control-size;
+    border-radius: Theme.radius-pill;
+    background: volume-area.has-hover ? Theme.player-menu-selected : transparent;
+
+    VolumeGlyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        muted: root.muted;
+        tint: root.muted ? Theme.text-faint : Theme.text;
+    }
+
+    volume-area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// 普通传输按钮（-15 / +15 / 音轨 / 字幕 / 倍速 / 全屏）。
+component TransportButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    callback clicked();
+
+    width: label-text.preferred-width + Theme.space-3 * 2;
+    height: Theme.player-control-size;
+    border-radius: Theme.radius-pill;
+    background: area.has-hover ? Theme.surface-raised : (root.active ? Theme.player-menu-selected : Theme.surface);
+    border-width: 1px;
+    border-color: root.active ? Theme.hairline-strong : Theme.hairline;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    label-text := Text {
+        text: root.label;
+        color: root.active ? Theme.accent : Theme.text;
+        font-family: Theme.font-family;
+        font-size: Theme.font-12;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: Theme.space-3;
+        width: parent.width - Theme.space-3 * 2;
+        height: parent.height;
+        overflow: elide;
+    }
+}
+
+// 播放 / 暂停主按钮。
+component PlayButton inherits Rectangle {
+    in property <bool> playing: true;
+    callback clicked();
+
+    width: Theme.player-play-size;
+    height: Theme.player-play-size;
+    border-radius: Theme.radius-pill;
+    background: area.has-hover ? Theme.accent-hover : Theme.accent;
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if !root.playing : PlayGlyph {
+        x: (parent.width - 16px) / 2 + 2px;
+        y: (parent.height - 18px) / 2;
+        tint: Theme.accent-contrast;
+    }
+
+    if root.playing : PauseGlyph {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        tint: Theme.accent-contrast;
+    }
+}
+
+// 音轨 / 字幕列表项。
+component TrackRow inherits Rectangle {
+    in property <TrackData> track;
+    in property <bool> selected: root.track.selected;
+    callback activated();
+
+    height: 52px;
+    border-radius: Theme.radius-poster;
+    background: area.has-hover ? Theme.surface-raised : (root.selected ? Theme.player-menu-selected : transparent);
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    // 选中标记用圆点，不依赖 "✓" 字形。
+    Rectangle {
+        x: Theme.space-3;
+        y: (parent.height - 8px) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: Theme.radius-pill;
+        background: root.selected ? Theme.accent : Theme.hairline-strong;
+    }
+
+    VerticalLayout {
+        x: Theme.space-5 + Theme.space-2;
+        y: Theme.space-2;
+        width: parent.width - Theme.space-5 - Theme.space-2 - Theme.space-3;
+        height: parent.height - Theme.space-2 * 2;
+        spacing: 2px;
+        alignment: center;
+
+        Text {
+            text: root.track.label;
+            color: root.selected ? Theme.accent : Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-14;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        Text {
+            // 图形字幕当场说明样式不可改，避免用户以为能调字体。
+            text: root.track.bitmap ? "引擎渲染，样式不可改" : root.track.detail;
+            color: Theme.text-muted;
+            font-family: Theme.font-family;
+            font-size: Theme.font-12;
+            overflow: elide;
+            visible: self.text != "";
+            vertical-alignment: center;
+        }
+    }
+}
+
+// "关闭字幕"行（字幕菜单顶部）。
+component OffRow inherits Rectangle {
+    in property <bool> selected;
+    callback activated();
+
+    height: 52px;
+    border-radius: Theme.radius-poster;
+    background: area.has-hover ? Theme.surface-raised : (root.selected ? Theme.player-menu-selected : transparent);
+
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    Rectangle {
+        x: Theme.space-3;
+        y: (parent.height - 8px) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: Theme.radius-pill;
+        background: root.selected ? Theme.accent : Theme.hairline-strong;
+    }
+
+    Text {
+        x: Theme.space-5 + Theme.space-2;
+        y: 0;
+        width: parent.width - Theme.space-5 - Theme.space-3;
+        height: parent.height;
+        text: "关闭";
+        color: root.selected ? Theme.accent : Theme.text;
+        font-family: Theme.font-family;
+        font-size: Theme.font-14;
+        vertical-alignment: center;
+    }
+}
+
+// 菜单里的动作行（字幕延迟 ±0.5s / 加载外挂字幕）：不是选中项，不画选中圆点。
+component ActionRow inherits Rectangle {
+    in property <string> label: "";
+    callback activated();
+
+    height: Theme.player-menu-row;
+    border-radius: Theme.radius-poster;
+    background: action-area.has-hover ? Theme.surface-raised : transparent;
+
+    action-area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+
+    Text {
+        x: Theme.space-5 + Theme.space-2;
+        y: 0;
+        width: parent.width - Theme.space-5 - Theme.space-3;
+        height: parent.height;
+        text: root.label;
+        color: Theme.text-muted;
+        font-family: Theme.font-family;
+        font-size: Theme.font-14;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// 弹出层外框。
+component TrackMenu inherits Rectangle {
+    in property <string> heading: "";
+    in property <[TrackData]> tracks;
+    in property <bool> show-close: false;
+    in property <bool> close-selected: false;
+    // 字幕菜单底部多三行动作（延迟 -0.5s / +0.5s / 外挂字幕）。
+    in property <bool> show-subtitle-actions: false;
+    callback item-selected(int);
+    callback close-activated();
+    callback delay-step(float);
+    callback external-subtitle();
+
+    property <int> row-count: root.tracks.length + (root.show-close ? 1 : 0);
+    property <length> actions-height: root.show-subtitle-actions
+        ? Theme.space-2 + 1px + Theme.player-menu-row * 3
+        : 0px;
+
+    width: Theme.player-menu-width;
+    height: Theme.space-4 + 24px + 52px * root.row-count + root.actions-height;
+    background: Theme.player-panel-solid;
+    border-radius: Theme.radius-panel;
+    border-width: 1px;
+    border-color: Theme.hairline-strong;
+
+    VerticalLayout {
+        x: Theme.space-2;
+        y: Theme.space-2;
+        width: parent.width - Theme.space-2 * 2;
+        height: parent.height - Theme.space-4;
+        spacing: 0;
+
+        Text {
+            height: 24px;
+            text: root.heading;
+            color: Theme.text-muted;
+            font-family: Theme.font-family;
+            font-size: Theme.font-12;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+        }
+
+        OffRow {
+            // 用 `visible` + 高度归零代替 `if` 条件元素：布局数学一致，
+            // 也不会在 software renderer 下让紧随其后的行留下合成接缝。
+            visible: root.show-close;
+            height: root.show-close ? 52px : 0px;
+            selected: root.close-selected;
+
+            activated => {
+                root.close-activated();
+            }
+        }
+
+        for item in root.tracks : TrackRow {
+            track: item;
+            activated => {
+                root.item-selected(item.index);
+            }
+        }
+
+        // ---- 字幕动作行 ----
+        if root.show-subtitle-actions : Rectangle {
+            height: 1px;
+            background: Theme.hairline;
+        }
+
+        if root.show-subtitle-actions : Rectangle {
+            height: Theme.space-2;
+            background: transparent;
+        }
+
+        if root.show-subtitle-actions : ActionRow {
+            label: "字幕延迟 −0.5s";
+            activated => {
+                root.delay-step(-0.5);
+            }
+        }
+
+        if root.show-subtitle-actions : ActionRow {
+            label: "字幕延迟 +0.5s";
+            activated => {
+                root.delay-step(0.5);
+            }
+        }
+
+        if root.show-subtitle-actions : ActionRow {
+            label: "加载外挂字幕…";
+            activated => {
+                root.external-subtitle();
+            }
+        }
+    }
+}
+
+// 进度条：轨道 / 已缓冲 / 已播 + 拖动气泡。拖动只更新气泡，松手才回调 commit。
+component PlayerProgress inherits Rectangle {
+    in property <float> played: 0;
+    in property <float> buffered: 0;
+    in property <bool> scrubbing: false;
+    in property <string> bubble: "";
+    callback bar-start();
+    callback bar-move(float);
+    callback bar-commit(float);
+    callback bar-cancel();
+
+    property <bool> dragging: false;
+    height: Theme.player-hit-height;
+    background: transparent;
+
+    property <float> buffered-ratio: max(root.buffered, root.played);
+    // 已缓冲的那一段占比（剩余部分才画轨道）。
+    property <float> buffered-part: clamp(root.buffered-ratio, 0, 1);
+
+    // 轨道只画在"未缓冲"的那一段：缓冲段**替换**轨道，而不是叠画在上面。
+    Rectangle {
+        x: parent.width * root.buffered-part;
+        y: (parent.height - Theme.player-bar-height) / 2;
+        width: parent.width - parent.width * root.buffered-part;
+        height: Theme.player-bar-height;
+        border-radius: Theme.radius-pill;
+        background: Theme.player-track;
+    }
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - Theme.player-bar-height) / 2;
+        width: parent.width * root.buffered-part;
+        height: Theme.player-bar-height;
+        border-radius: Theme.radius-pill;
+        background: Theme.player-buffered;
+    }
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - Theme.player-bar-height) / 2;
+        width: parent.width * clamp(root.played, 0, 1);
+        height: Theme.player-bar-height;
+        border-radius: Theme.radius-pill;
+        background: Theme.accent;
+    }
+
+    // 拖动时的圆点把手。
+    if root.scrubbing : Rectangle {
+        x: parent.width * clamp(root.played, 0, 1) - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: 12px;
+        height: 12px;
+        border-radius: Theme.radius-pill;
+        background: Theme.accent;
+    }
+
+    // 时间气泡：跟随把手，靠近两端时夹住不越界。
+    if root.scrubbing && root.bubble != "" : Rectangle {
+        x: clamp(
+            parent.width * clamp(root.played, 0, 1) - self.width / 2,
+            0,
+            parent.width - self.width
+        );
+        y: -self.height - Theme.space-2;
+        width: bubble-text.preferred-width + Theme.space-3 * 2;
+        height: 28px;
+        border-radius: Theme.radius-poster;
+        background: Theme.player-panel-solid;
+        border-width: 1px;
+        border-color: Theme.hairline-strong;
+
+        bubble-text := Text {
+            text: root.bubble;
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-12;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            x: Theme.space-3;
+            width: parent.width - Theme.space-3 * 2;
+            height: parent.height;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+
+        // 按下开始拖动，移动只更新气泡与把手（不发 seek），松手才提交。
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.dragging = true;
+                root.bar-start();
+                root.bar-move(clamp(self.mouse-x / self.width, 0, 1));
+            } else if (event.kind == PointerEventKind.move) {
+                if (root.dragging) {
+                    root.bar-move(clamp(self.mouse-x / self.width, 0, 1));
+                }
+            } else if (event.kind == PointerEventKind.up) {
+                if (root.dragging) {
+                    root.dragging = false;
+                    root.bar-commit(clamp(self.mouse-x / self.width, 0, 1));
+                }
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+                root.bar-cancel();
+            }
+        }
+    }
+}
+
+export component PlayerOverlay inherits Rectangle {
+    in property <PlayerData> data;
+    in property <string> scrub-text: "";
+    in property <bool> fullscreen: false;
+
+    callback back();
+    callback play-pause();
+    callback seek-relative(int);
+    callback scrub-start();
+    callback scrub-move(float);
+    callback scrub-commit(float);
+    callback scrub-cancel();
+    callback input();
+    callback tick();
+    callback audio-toggle();
+    callback subtitle-toggle();
+    callback audio-selected(int);
+    callback subtitle-selected(int);
+    callback retry();
+    callback fullscreen-toggle();
+    callback rate-cycle();
+    callback time-toggle();
+    callback mute-toggle();
+    callback subtitle-delay(float);
+    callback subtitle-external();
+
+    background: transparent;
+
+    property <bool> controls-visible: root.data.controls-visible;
+    property <bool> scrubbing: false;
+    property <float> drag-ratio: 0;
+    property <float> shown-ratio: root.scrubbing ? root.drag-ratio : root.data.progress;
+    property <bool> show-center-play: !root.data.playing && !root.data.buffering && !root.data.has-error;
+    // 传输行底边到进度条顶的距离由这几个量反推（菜单锤点也用它，不能侵入命中区）。
+    property <length> progress-top: Theme.player-controls-bottom + Theme.player-play-size
+        + Theme.space-4 + Theme.player-hit-height;
+
+    // 真实窗口：每 250ms 把时间增量交给视图模型（`pages::player::TICK_INTERVAL`）。
+    // testing backend 不跑 Timer，测试直接调 `App::tick_player`。
+    Timer {
+        interval: 250ms;
+        running: root.visible;
+        triggered => {
+            root.tick();
+        }
+    }
+
+    // 整屏输入层：任何移动/点击都唤醒控制层；隐藏时连光标都不显示。
+    TouchArea {
+        mouse-cursor: root.controls-visible ? MouseCursor.default : MouseCursor.none;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.move) {
+                root.input();
+            } else if (event.kind == PointerEventKind.down) {
+                root.input();
+            }
+        }
+
+        clicked => {
+            root.input();
+        }
+    }
+
+    // ---- 左上返回 ----
+    Rectangle {
+        visible: root.controls-visible;
+        x: Theme.gutter;
+        y: Theme.space-5;
+        width: 44px;
+        height: 44px;
+        border-radius: Theme.radius-pill;
+        background: back-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
+        border-width: 1px;
+        border-color: Theme.hairline;
+
+        back-text := Text {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            text: "←";
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-22;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+
+        back-area := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.back();
+            }
+        }
+    }
+
+    // ---- 缓冲角标（不随控制层隐藏）----
+    Rectangle {
+        visible: root.data.buffering;
+        x: root.width - self.width - Theme.gutter;
+        y: Theme.space-5;
+        width: buffering-text.preferred-width + Theme.space-4 * 2;
+        height: 36px;
+        border-radius: Theme.radius-pill;
+        background: Theme.player-panel-solid;
+        border-width: 1px;
+        border-color: Theme.hairline;
+
+        buffering-text := Text {
+            x: Theme.space-4;
+            width: parent.width - Theme.space-4 * 2;
+            height: parent.height;
+            text: "缓冲中…";
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-12;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    // ---- 中央大播放图标（暂停时，半透明，不挡字幕）----
+    if root.show-center-play && root.controls-visible : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: Theme.player-icon-size;
+        height: Theme.player-icon-size;
+        border-radius: Theme.radius-pill;
+        background: Theme.player-icon-bg;
+
+        PlayGlyph {
+            x: (parent.width - 16px) / 2 + 4px;
+            y: (parent.height - 18px) / 2;
+            tint: Theme.text;
+        }
+    }
+
+    // ---- 错误卡 ----
+    if root.data.has-error : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: Theme.player-error-width;
+        height: 184px;
+        border-radius: Theme.radius-panel;
+        background: Theme.player-panel-solid;
+        border-width: 1px;
+        border-color: Theme.danger;
+
+        VerticalLayout {
+            x: Theme.space-5;
+            y: Theme.space-4;
+            width: parent.width - Theme.space-5 * 2;
+            height: parent.height - Theme.space-4 - Theme.space-4;
+            spacing: Theme.space-3;
+
+            Text {
+                height: 24px;
+                text: "播放失败";
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-16;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+
+            Text {
+                height: 48px;
+                text: root.data.error;
+                color: Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-14;
+                wrap: word-wrap;
+                vertical-alignment: top;
+                overflow: elide;
+            }
+
+            Rectangle {
+                height: Theme.button-primary-height;
+                width: retry-text.preferred-width + Theme.space-6 * 2;
+                border-radius: Theme.radius-pill;
+                background: retry-area.has-hover ? Theme.accent-hover : Theme.accent;
+
+                retry-area := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.retry();
+                    }
+                }
+
+                retry-text := Text {
+                    x: Theme.space-6;
+                    width: parent.width - Theme.space-6 * 2;
+                    height: parent.height;
+                    text: root.data.error-action;
+                    color: Theme.accent-contrast;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    font-weight: Theme.weight-semibold;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ---- 底部遮罩 ----
+    // 两段式渐变：底部到 60% 高度是 0.85 的不透明平台，60% → 100% 才淡出。
+    Rectangle {
+        visible: root.controls-visible;
+        x: 0;
+        y: root.height - self.height;
+        width: 100%;
+        height: Theme.player-scrim-height;
+        background: @linear-gradient(0deg, Theme.player-scrim-bottom 0%, Theme.player-scrim-mid 60%, Theme.player-scrim-top 100%);
+
+        VerticalLayout {
+            x: Theme.gutter;
+            width: parent.width - Theme.gutter * 2;
+            height: parent.height - Theme.player-controls-bottom * 2;
+            y: Theme.player-controls-bottom;
+            // 内容全部贴底，多余空间留在遮罩顶部的淡出区（不会把控件撕成两坨）。
+            alignment: end;
+            spacing: 0;
+
+            // 第一行：标题 + 副标题 + 状态（诊断行默认收起）。
+            HorizontalLayout {
+                height: 34px;
+                spacing: Theme.space-3;
+                cross-axis-alignment: center;
+
+                Text {
+                    text: root.data.title;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-22;
+                    font-weight: Theme.weight-semibold;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.data.subtitle;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    visible: self.text != "";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                // 常驻的只有短标签：直连 / 转码。
+                Text {
+                    text: root.data.transport-mode;
+                    color: Theme.text-faint;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    visible: self.text != "";
+                }
+
+                // 硬解未生效：用户可行动的偏差，warning 色、完整文案。
+                Text {
+                    text: root.data.hwdec-notice;
+                    color: Theme.warning;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    visible: self.text != "";
+                }
+
+                // 完整诊断行只由 Ctrl+D 展开。
+                Text {
+                    text: root.data.engine-line;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    visible: root.data.show-engine-detail && self.text != "";
+                }
+            }
+
+            // 标题 → 进度条：固定 12px。
+            Rectangle {
+                height: Theme.space-3;
+                background: transparent;
+            }
+
+            // 第二行：进度条（28px 命中区）。
+            PlayerProgress {
+                height: Theme.player-hit-height;
+                played: root.shown-ratio;
+                buffered: max(root.data.buffered, root.shown-ratio);
+                scrubbing: root.scrubbing;
+                bubble: root.scrub-text;
+
+                bar-start => {
+                    root.scrubbing = true;
+                    root.scrub-start();
+                }
+
+                bar-move(ratio) => {
+                    root.drag-ratio = ratio;
+                    root.scrub-move(root.drag-ratio);
+                }
+
+                bar-commit(ratio) => {
+                    root.drag-ratio = ratio;
+                    root.scrub-commit(ratio);
+                    root.scrubbing = false;
+                }
+
+                bar-cancel => {
+                    root.scrubbing = false;
+                    root.scrub-cancel();
+                }
+            }
+
+            // 进度条 → 传输行：固定 16px。
+            Rectangle {
+                height: Theme.space-4;
+                background: transparent;
+            }
+
+            // 第三行：传输控件。
+            HorizontalLayout {
+                height: Theme.player-play-size;
+                spacing: Theme.space-3;
+                cross-axis-alignment: center;
+
+                PlayButton {
+                    playing: root.data.playing;
+                    clicked => {
+                        root.play-pause();
+                    }
+                }
+
+                TransportButton {
+                    label: "-15s";
+                    clicked => {
+                        root.seek-relative(-15);
+                    }
+                }
+
+                TransportButton {
+                    label: "+15s";
+                    clicked => {
+                        root.seek-relative(15);
+                    }
+                }
+
+                // 时间行：点击在"已播/总长"与"剩余"之间切换，不同时渲染两份。
+                Rectangle {
+                    width: time-label.preferred-width + Theme.space-4;
+                    height: Theme.player-control-size;
+                    border-radius: Theme.radius-poster;
+                    background: time-area.has-hover ? Theme.player-menu-selected : transparent;
+
+                    time-label := Text {
+                        x: Theme.space-2;
+                        y: 0;
+                        width: parent.width - Theme.space-4;
+                        height: parent.height;
+                        text: root.data.time-text;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+
+                    time-area := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.time-toggle();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+
+                // 音量：喇叭图标按钮（点击静音 / 取消），数字只在调节时短时出现。
+                HorizontalLayout {
+                    spacing: Theme.space-1;
+                    cross-axis-alignment: center;
+
+                    VolumeButton {
+                        muted: root.data.muted;
+                        clicked => {
+                            root.mute-toggle();
+                        }
+                    }
+
+                    Text {
+                        text: root.data.volume-text;
+                        color: Theme.text-muted;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-12;
+                        vertical-alignment: center;
+                        visible: root.data.volume-hint;
+                    }
+                }
+
+                TransportButton {
+                    label: "音轨";
+                    active: root.data.audio-menu-open;
+                    clicked => {
+                        root.audio-toggle();
+                    }
+                }
+
+                TransportButton {
+                    label: "字幕";
+                    active: root.data.subtitle-menu-open;
+                    clicked => {
+                        root.subtitle-toggle();
+                    }
+                }
+
+                TransportButton {
+                    label: root.data.rate-text;
+                    clicked => {
+                        root.rate-cycle();
+                    }
+                }
+
+                TransportButton {
+                    label: root.fullscreen ? "退出全屏" : "全屏";
+                    clicked => {
+                        root.fullscreen-toggle();
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 音轨弹出层 ----
+    // 锚点：进度条顶 − 16px − 菜单高（不侵入 28px 命中区，也不遮时间行）。
+    if root.data.audio-menu-open : TrackMenu {
+        x: root.width - self.width - Theme.gutter;
+        y: root.height - root.progress-top - Theme.space-4 - self.height;
+        heading: "音轨";
+        tracks: root.data.audio-tracks;
+
+        item-selected(index) => {
+            root.audio-selected(index);
+        }
+    }
+
+    // ---- 字幕弹出层（顶部是"关闭"，图形字幕标注样式不可改，底部是延迟 / 外挂字幕）----
+    if root.data.subtitle-menu-open : TrackMenu {
+        x: root.width - self.width - Theme.gutter;
+        y: root.height - root.progress-top - Theme.space-4 - self.height;
+        heading: "字幕";
+        tracks: root.data.subtitle-tracks;
+        show-close: true;
+        close-selected: root.data.subtitles-off;
+        show-subtitle-actions: true;
+
+        item-selected(index) => {
+            root.subtitle-selected(index);
+        }
+
+        close-activated => {
+            root.subtitle-selected(-1);
+        }
+
+        delay-step(seconds) => {
+            root.subtitle-delay(seconds);
+        }
+
+        external-subtitle => {
+            root.subtitle-external();
+        }
+    }
+}

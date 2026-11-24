@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! Slint 侧的数据形状。与 Rust 视图模型一一对应，由 `src/pages/convert.rs` 填充。
+
+export struct CardData {
+    id: string,
+    title: string,
+    subtitle: string,
+    badge: string,
+    progress: float, // < 0 表示没有进度
+    progress-text: string,
+    initial: string,
+    image: image,
+}
+
+export struct TabData {
+    id: string,
+    title: string,
+}
+
+export struct SourceData {
+    id: string,
+    title: string,
+    subtitle: string,
+    selected: bool,
+}
+
+export struct HomeData {
+    hero: CardData,
+    has-hero: bool,
+    continue-watching: [CardData],
+    recently-added: [CardData],
+    tabs: [TabData],
+    current-tab: int,
+    empty: bool,
+}
+
+export struct LibraryData {
+    id: string,
+    title: string,
+    count-text: string,
+    sort-label: string,
+    tabs: [TabData],
+    current-tab: int,
+    cards: [CardData],
+    empty: bool,
+}
+
+export struct DetailData {
+    item-id: string,
+    title: string,
+    original-title: string,
+    meta-line: string,
+    overview: string,
+    genres: [string],
+    play-label: string,
+    badge: string,
+    initial: string,
+    poster: image,
+    backdrop: image,
+    sources: [SourceData],
+}
+
+export struct TrackData {
+    index: int,
+    label: string,
+    detail: string,
+    selected: bool,
+    bitmap: bool,
+}
+
+export struct PlayerData {
+    item-id: string,
+    title: string,
+    subtitle: string,
+    // "12:34 / 2:18:00"
+    time-line: string,
+    // "-2:05:26"（Infuse 风格）；空字符串表示不显示
+    remaining-text: string,
+    // 实际渲染的那一行时间（已播/总长 或 剩余，二选一）
+    time-text: string,
+    progress: float,
+    buffered: float,
+    has-progress: bool,
+    playing: bool,
+    buffering: bool,
+    volume: float,
+    volume-text: string,
+    // 音量数字短时可见（正在调节 / 刚静音）
+    volume-hint: bool,
+    muted: bool,
+    rate-text: string,
+    audio-tracks: [TrackData],
+    subtitle-tracks: [TrackData],
+    // 当前没有选中字幕（字幕菜单里"关闭"打勾）
+    subtitles-off: bool,
+    audio-menu-open: bool,
+    subtitle-menu-open: bool,
+    error: string,
+    has-error: bool,
+    error-action: string,
+    // hwdec_notice 优先于 engine_line
+    status-line: string,
+    has-status-line: bool,
+    // 提示是"需要用户注意"（hwdec 未生效）还是普通诊断行
+    status-warning: bool,
+    // 常驻的短标签："直连" / "转码"（由诊断行的第一段得出，空串表示没有）
+    transport-mode: string,
+    // 完整诊断行：只在 show-engine-detail 打开时渲染
+    engine-line: string,
+    show-engine-detail: bool,
+    // 硬件解码未生效的完整提示（warning 色），空串表示正常
+    hwdec-notice: string,
+    controls-visible: bool,
+    // 当前画面（引擎首帧到达前的背景图 / 缓冲时保留的最后一帧）。
+    frame: image,
+    has-frame: bool,
+}
+

@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 空状态：与错误卡同一套面板样式（surface + hairline + 10 圆角）+ 语义图标 + 主/次按钮。
+//!
+//! 图标是胶片（Path 画的语义形状），不依赖字体里有没有某个字形。
+
+import { Theme } from "theme.slint";
+
+export component EmptyState inherits Rectangle {
+    in property <string> title: "这里还没有内容";
+    in property <string> message: "";
+    in property <string> primary-label: "";
+    in property <string> secondary-label: "";
+    callback primary();
+    callback secondary();
+
+    background: transparent;
+
+    // 面板：直接按中心定位（不靠 layout 的 alignment 做外层居中）。
+    panel := Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: min(root.width - Theme.gutter * 2, 560px);
+        height: body.preferred-height + Theme.space-6 * 2;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.hairline;
+        border-radius: Theme.radius-panel;
+
+        body := VerticalLayout {
+            x: Theme.space-6;
+            y: Theme.space-6;
+            width: parent.width - Theme.space-6 * 2;
+            height: self.preferred-height;
+            alignment: center;
+            spacing: Theme.space-3;
+
+            // 图标底座：圆形 surface-raised + 胶片。
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 64px;
+                    height: 64px;
+                    border-radius: Theme.radius-pill;
+                    background: Theme.surface-raised;
+                    border-width: 1px;
+                    border-color: Theme.hairline;
+
+                    Path {
+                        x: (parent.width - 40px) / 2;
+                        y: (parent.height - 28px) / 2;
+                        width: 40px;
+                        height: 28px;
+                        stroke: Theme.text-faint;
+                        stroke-width: 2px;
+                        fill: transparent;
+                        // 胶片：外框 + 两侧齿孔带 + 三格画面分隔。
+                        commands: "M 0 0 L 40 0 L 40 28 L 0 28 Z M 7 0 L 7 28 M 33 0 L 33 28 M 7 7 L 33 7 M 7 14 L 33 14 M 7 21 L 33 21";
+                    }
+                }
+            }
+
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-22;
+                    font-weight: Theme.weight-semibold;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.message;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                    visible: root.message != "";
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: Theme.space-3;
+
+                    // 主按钮：连接服务器（唯一带 accent 的动作）。
+                    Rectangle {
+                        height: Theme.button-primary-height;
+                        width: primary-label.preferred-width + Theme.space-6 * 2;
+                        border-radius: Theme.radius-pill;
+                        background: primary-area.has-hover ? Theme.accent-hover : Theme.accent;
+                        visible: root.primary-label != "";
+
+                        primary-label := Text {
+                            x: Theme.space-6;
+                            width: parent.width - Theme.space-6 * 2;
+                            height: parent.height;
+                            text: root.primary-label;
+                            color: Theme.accent-contrast;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            font-weight: Theme.weight-semibold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        primary-area := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.primary();
+                            }
+                        }
+                    }
+
+                    // 次级动作：中性底 + hairline。
+                    Rectangle {
+                        height: Theme.button-primary-height;
+                        width: secondary-label.preferred-width + Theme.space-6 * 2;
+                        border-radius: Theme.radius-pill;
+                        background: secondary-area.has-hover ? Theme.surface-raised : Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.hairline;
+                        visible: root.secondary-label != "";
+
+                        secondary-label := Text {
+                            x: Theme.space-6;
+                            width: parent.width - Theme.space-6 * 2;
+                            height: parent.height;
+                            text: root.secondary-label;
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            font-weight: Theme.weight-medium;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        secondary-area := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.secondary();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }

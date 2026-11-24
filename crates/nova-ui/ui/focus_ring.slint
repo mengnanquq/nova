@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 焦点环：与 hover（背景亮度变化）区分——只有获得焦点才出现 2px accent 描边。
+
+import { Theme } from "theme.slint";
+
+export component FocusRing inherits Rectangle {
+    in property <bool> active: false;
+    in property <length> ring-radius: Theme.radius-poster;
+
+    background: transparent;
+    border-width: Theme.focus-width;
+    border-color: Theme.accent;
+    border-radius: ring-radius;
+    opacity: active ? 1 : 0;
+    visible: self.opacity > 0.01;
+
+    animate opacity {
+        duration: Theme.motion;
+    }
+}
