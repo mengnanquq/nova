@@ -147,11 +147,10 @@ exec "$APPDIR/usr/bin/nova-desktop" "$@"
    无 GL 的环境只能跑 `--print-view` / `--snapshot`。
 3. 硬解走宿主驱动：VA-API 需要宿主装了 iHD/radeonsi 等驱动；NVIDIA 需要宿主 `libcuda`/`nvidia-vaapi`。
    我们只捆 `libva*` / `libvdpau*` / `libvpl` 这层 API，不捆驱动。没驱动时自动回落软解。
-4. **X11 路径有已知崩溃（应用侧，与打包无关）**：本机 Wayland 下窗口正常；
-   只给 `DISPLAY`（Xwayland）时启动会在 `mpv_render_context_create()` 里 SIGSEGV
-   （`nova_playback_mpv::engine::MpvEngine::attach_gl` 首次渲染）。
-   用**未打包的** `target/release/nova-desktop` 同样复现。`AppRun` 不强制后端，
-   winit 自己挑（Wayland 优先，回落到 X11）。
+4. **只支持 Wayland（X11 不在支持范围）**：项目决定不做 X11 后端。在只有 `DISPLAY` 的环境里
+   启动会在 `mpv_render_context_create()` 里 SIGSEGV（`MpvEngine::attach_gl` 首次渲染），
+   这是已知的、**不再修**的路径。若要强制 Wayland 后端，可设 `WAYLAND_DISPLAY`；
+   X11 会话用户请使用 Wayland 会话。
 5. 运行需要 FUSE；没有 FUSE 的环境（容器、精简系统）用：
 
    ```bash
@@ -170,5 +169,4 @@ exec "$APPDIR/usr/bin/nova-desktop" "$@"
 
 ## 待办
 
-- 修 X11/Xwayland 下 `mpv_render_context_create()` 崩溃（应用侧，优先）；
 - 引入老基线容器构建，把 glibc 下限压到 2.28~2.31 量级，否则跨发行版分发名不副实。
