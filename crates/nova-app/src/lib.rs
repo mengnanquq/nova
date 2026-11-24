@@ -97,13 +97,27 @@ pub fn run(argv: Vec<String>) -> Result<(), AppError> {
                             )
                         }),
                     };
-                    ui::run_window(local, runtime.handle().clone(), Some(start))
+                    ui::run_window(
+                        local,
+                        runtime.handle().clone(),
+                        Some(start),
+                        cli.screenshot
+                            .clone()
+                            .map(|path| (path, cli.screenshot_delay_ms)),
+                    )
                 }
                 Mode::PrintView => print::run_print_view(&local, &cli, &runtime),
                 Mode::Snapshot(path) => {
                     snapshot::run_snapshot(local, &cli, &path, &runtime).map(|_| ())
                 }
-                Mode::Window => ui::run_window(local, runtime.handle().clone(), None),
+                Mode::Window => ui::run_window(
+                    local,
+                    runtime.handle().clone(),
+                    None,
+                    cli.screenshot
+                        .clone()
+                        .map(|path| (path, cli.screenshot_delay_ms)),
+                ),
                 // 外层分支已经排除了 Help / Version；这里保留正常返回而不是 panic。
                 Mode::Help | Mode::Version => Ok(()),
             }

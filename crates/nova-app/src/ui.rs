@@ -158,6 +158,7 @@ pub fn run_window(
     local: Arc<Local>,
     runtime: Handle,
     start: Option<StartPlay>,
+    screenshot: Option<(std::path::PathBuf, u64)>,
 ) -> Result<(), AppError> {
     let ui = AppWindow::new()?;
     let app = Rc::new(App::new_with(ui));
@@ -236,7 +237,50 @@ pub fn run_window(
     // 窗口必须显式 show 才会被后端映射、才会开始出渲染回调（`run_event_loop` 只跑循环）。
     app.ui().show()?;
 
+    // 窗口自截（`--screenshot`）：等界面稳定后回读自己的 back buffer 写 PNG 再退出。
+    // 走 `glReadPixels`（与播放捕获同一条路径），只含 Nova 自己的窗口，
+    // 不需要截屏协议、不碰用户屏幕、也不抢焦点。
+    let screenshot_timer = if let Some((path, delay_ms)) = screenshot {
+        let timer = slint::Timer::default();
+        let weak = Rc::downgrade(&shell);
+        let delay = std::time::Duration::from_millis(delay_ms);
+        let mut waited = std::time::Duration::ZERO;
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(100),
+            move || {
+                waited += std::time::Duration::from_millis(100);
+                let Some(shell) = weak.upgrade() else {
+                    return;
+                };
+                if waited >= delay {
+                    shell.host.borrow_mut().request_capture();
+                    shell.app.ui().window().request_redraw();
+                }
+                if let Some((frame, error)) = shell.host.borrow_mut().take_shot() {
+                    match error {
+                        Some(error) => eprintln!("截图失败：{error}"),
+                        None => match player::gl::write_png(&path, &frame) {
+                            Ok(()) => println!(
+                                "screenshot: {}x{} -> {}",
+                                frame.width,
+                                frame.height,
+                                path.display()
+                            ),
+                            Err(error) => eprintln!("写 PNG 失败：{error}"),
+                        },
+                    }
+                    let _ = slint::quit_event_loop();
+                }
+            },
+        );
+        Some(timer)
+    } else {
+        None
+    };
+
     let result = slint::run_event_loop();
+    drop(screenshot_timer);
     // 窗口关掉之前先把会话收尾（进度落盘），再摘掉 thread-local 的 Shell。
     if let Some(shell) = SHELL.with(|slot| slot.borrow().clone()) {
         shell.stop_playback();

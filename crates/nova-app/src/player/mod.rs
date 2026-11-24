@@ -25,7 +25,7 @@
 //!   这样 Wayland 锁屏 / 窗口被遮挡导致合成器不发帧回调时画面仍然继续。
 
 mod capture;
-mod gl;
+pub(crate) mod gl;
 mod open;
 mod sink;
 mod view;
@@ -438,14 +438,14 @@ impl Host {
     }
 
     /// 请求一次回读（下一次 `AfterRendering` 执行）。
-    fn request_capture(&mut self) {
+    pub(crate) fn request_capture(&mut self) {
         if self.capture_requested || self.shot.is_some() {
             return;
         }
         self.capture_requested = true;
     }
 
-    fn take_shot(&mut self) -> Option<(gl::Frame, Option<String>)> {
+    pub(crate) fn take_shot(&mut self) -> Option<(gl::Frame, Option<String>)> {
         let error = self.shot_error.take();
         match self.shot.take() {
             Some(frame) => Some((frame, error)),
