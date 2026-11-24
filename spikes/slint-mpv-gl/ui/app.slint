@@ -1,0 +1,38 @@
+// Gate 1.5-A：一个撑满窗口的 Image（来源是 mpv 渲染进去的 GL 纹理）
+// + 一层半透明文字覆盖。覆盖层的作用是证明 Slint 自己的绘制没有被 mpv 的 GL 状态破坏，
+// 也证明两边真的合成在同一个窗口上（回读窗口 back buffer 时两层都在）。
+
+export component AppWindow inherits Window {
+    title: "slint-mpv-gl";
+    width: 960px;
+    height: 540px;
+    background: black;
+
+    // mpv 的 GL 纹理包装成的 Slint 图像；还没有视频尺寸时是空 Image。
+    in property <image> frame;
+    in property <string> overlay;
+
+    Image {
+        source: frame;
+        width: 100%;
+        height: 100%;
+        image-fit: contain;
+    }
+
+    Rectangle {
+        y: 0;
+        height: 24px;
+        width: 100%;
+        background: #90000000;
+        Text {
+            x: 8px;
+            width: parent.width - 16px;
+            height: parent.height;
+            text: overlay;
+            color: #ffffffff;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}

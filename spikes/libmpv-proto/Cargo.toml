@@ -1,0 +1,16 @@
+[package]
+name = "libmpv-proto"
+description = "libmpv software 渲染 API 原型：无显示环境下的解帧路径与每帧成本测量"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 只用 libmpv2-sys（bindgen 生成的原始绑定）：libmpv2 7.0.1 的 safe 封装里
+# RenderParamApiType 只有 OpenGl 一个变体，且 render() 硬编码 FBO/FlipY 参数，
+# 无法表达 software 渲染所需的 SW_* 参数（详见 src/sys.rs 顶部说明）。
+libmpv2-sys = "4.0.1"
+# 仅 dump 子命令用于写 PNG。
+png = "0.18"

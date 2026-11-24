@@ -1,0 +1,34 @@
+[package]
+name = "slint-mpv-gl"
+description = "Gate 1.5-A：Slint 窗口 + libmpv OpenGL render API 零拷贝真机验证"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "slint-mpv-gl"
+path = "src/main.rs"
+
+[dependencies]
+# 只要 femtovg（OpenGL）渲染器 + winit 后端；软件渲染器用不上。
+slint = { version = "1.19", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-femtovg",
+  "compat-1-2",
+] }
+# 只有 libmpv2-sys 暴露 render API 的 raw 绑定（OPENGL 的 INIT_PARAMS 在 safe 层不存在）。
+libmpv2-sys = "4.0.1"
+# 自己持有的 GL 资源（FBO/纹理/回读）不手写函数指针，用 glow；
+# 它的入口点由 Slint 的 get_proc_address 提供，不链接 libGL。
+glow = "0.18"
+# dlsym(RTLD_DEFAULT) 兜底（见 glproc.rs）；不是链接 libGL。
+libc = "0.2"
+png = "0.18"
+# IntSize（BorrowedOpenGLTextureBuilder 的参数类型）没有从 slint 根模块导出。
+i-slint-core = "1.19"
+
+[build-dependencies]
+slint-build = "1.19"
