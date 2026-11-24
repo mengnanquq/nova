@@ -1,0 +1,35 @@
+{
+  "User": {
+    "Name": "bob",
+    "ServerId": "11223344556677889900aabbccddeeff",
+    "Id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "LastLoginDate": "2026-02-02T08:30:00.0000000Z",
+    "LastActivityDate": "2026-02-06T19:02:11.0000000Z",
+    "Policy": {
+      "IsAdministrator": false,
+      "IsHidden": false,
+      "EnableAllFolders": true
+    }
+  },
+  "SessionInfo": {
+    "PlayState": {
+      "CanSeek": true,
+      "IsPaused": false,
+      "IsMuted": false,
+      "RepeatMode": "RepeatNone"
+    },
+    "PlayableMediaTypes": ["Video"],
+    "Id": "aa11bb22cc33dd44ee55ff6677889900",
+    "UserId": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "UserName": "bob",
+    "Client": "Nova",
+    "DeviceName": "Nova",
+    "DeviceId": "nova-device-2",
+    "ApplicationVersion": "0.1.0",
+    "IsActive": true
+  },
+  "AccessToken": "d4c3b2a1908f7e6d5c4b3a29180f7e6d",
+  "ServerId": "11223344556677889900aabbccddeeff"
+}

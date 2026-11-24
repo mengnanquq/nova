@@ -1,0 +1,29 @@
+{
+  "Name": "第一集 试播",
+  "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+  "Id": "9a8b7c6d5e4f4a3b2c1d0e9f8a7b6c5d",
+  "IndexNumber": 1,
+  "ParentIndexNumber": 1,
+  "Type": "Episode",
+  "ParentId": "5a4b3c2d1e0f4a3b2c1d0e9f8a7b6c5d",
+  "SeriesId": "5a4b3c2d1e0f4a3b2c1d0e9f8a7b6c5d",
+  "SeasonId": "4d3c2b1a0f9e4d3c2b1a0f9e8d7c6b5a",
+  "SeriesName": "海滨旅馆",
+  "SeasonName": "第一季",
+  "Overview": "开业第一天，旅馆迎来了第一位客人。",
+  "IsFolder": false,
+  "MediaType": "Video",
+  "ImageTags": {
+    "Primary": "2b3c4d5e6f708192a3b4c5d6e7f80910"
+  },
+  "BackdropImageTags": [],
+  "ParentBackdropItemId": "5a4b3c2d1e0f4a3b2c1d0e9f8a7b6c5d",
+  "ParentBackdropImageTags": ["9f8e7d6c5b4a39281706f5e4d3c2b1a0"],
+  "UserData": {
+    "PlaybackPositionTicks": 7540000000,
+    "PlayCount": 2,
+    "IsFavorite": true,
+    "Played": false,
+    "LastPlayedDate": "2026-02-03T20:10:44.0000000Z"
+  }
+}

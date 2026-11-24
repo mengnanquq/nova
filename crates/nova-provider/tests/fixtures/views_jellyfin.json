@@ -1,0 +1,48 @@
+{
+  "Items": [
+    {
+      "Name": "电影",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "DateCreated": "2026-01-11T09:10:00.0000000Z",
+      "IsFolder": true,
+      "Type": "CollectionFolder",
+      "CollectionType": "movies",
+      "ImageTags": { "Primary": "aa11bb22cc33dd44ee55ff6677889900" },
+      "BackdropImageTags": [],
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 0,
+        "IsFavorite": false,
+        "Played": false
+      }
+    },
+    {
+      "Name": "剧集",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "b2c3d4e5f60718293a4b5c6d7e8f9012",
+      "DateCreated": "2026-01-11T09:10:00.0000000Z",
+      "IsFolder": true,
+      "Type": "CollectionFolder",
+      "CollectionType": "tvshows",
+      "ImageTags": { "Primary": "bb22cc33dd44ee55ff6677889900aa11" },
+      "BackdropImageTags": [],
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 0,
+        "IsFavorite": false,
+        "Played": false
+      }
+    },
+    {
+      "Name": "音乐",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "c3d4e5f60718293a4b5c6d7e8f901234",
+      "IsFolder": true,
+      "Type": "CollectionFolder",
+      "CollectionType": "music"
+    }
+  ],
+  "TotalRecordCount": 3,
+  "StartIndex": 0
+}

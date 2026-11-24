@@ -1,0 +1,119 @@
+{
+  "Name": "银翼杀手 2049",
+  "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+  "Id": "3b6f1d2c8a9e4f5b8c7d1e2f3a4b5c6d",
+  "DateCreated": "2026-01-11T09:12:33.0000000Z",
+  "Container": "mkv",
+  "PremiereDate": "2017-10-06T00:00:00.0000000Z",
+  "OfficialRating": "R",
+  "CommunityRating": 8.1,
+  "RunTimeTicks": 98160000000,
+  "ProductionYear": 2017,
+  "IsFolder": false,
+  "Type": "Movie",
+  "ParentId": "f1e2d3c4b5a69788796a5b4c3d2e1f00",
+  "Genres": ["剧情", "科幻"],
+  "SortName": "Blade Runner 2049",
+  "OriginalTitle": "Blade Runner 2049",
+  "Overview": "复制人 K 在追查一桩旧案时，发现了一个足以改变人类与复制人关系的事实。",
+  "MediaType": "Video",
+  "ImageTags": {
+    "Primary": "d41d8cd98f00b204e9800998ecf8427e",
+    "Thumb": "1a2b3c4d5e6f708192a3b4c5d6e7f809"
+  },
+  "BackdropImageTags": ["0f1e2d3c4b5a69788796a5b4c3d2e1f0"],
+  "UserData": {
+    "PlaybackPositionTicks": 0,
+    "PlayCount": 1,
+    "IsFavorite": false,
+    "Played": true,
+    "LastPlayedDate": "2026-01-20T22:41:05.0000000Z"
+  },
+  "MediaSources": [
+    {
+      "Protocol": "File",
+      "Id": "7d8e9f0a1b2c3d4e5f60718293a4b5c6",
+      "Path": "/media/movies/Blade Runner 2049 (2017)/Blade.Runner.2049.2017.2160p.mkv",
+      "Type": "Default",
+      "Container": "mkv",
+      "Size": 32212254720,
+      "Name": "Blade.Runner.2049.2017.2160p.mkv",
+      "IsRemote": false,
+      "RunTimeTicks": 98160000000,
+      "Bitrate": 26000000,
+      "MediaStreams": [
+        {
+          "Type": "Video",
+          "Index": 0,
+          "Codec": "hevc",
+          "Profile": "Main 10",
+          "Width": 3840,
+          "Height": 2160,
+          "BitDepth": 10,
+          "BitRate": 25000000,
+          "RealFrameRate": 23.976,
+          "AverageFrameRate": 23.976,
+          "IsInterlaced": false,
+          "IsDefault": true,
+          "VideoRange": "HDR",
+          "VideoRangeType": "DOVIWithHDR10",
+          "ColorSpace": "bt2020nc",
+          "ColorTransfer": "smpte2084",
+          "ColorPrimaries": "bt2020",
+          "PixelFormat": "yuv420p10le"
+        },
+        {
+          "Type": "Audio",
+          "Index": 1,
+          "Codec": "truehd",
+          "Language": "eng",
+          "Title": "English - Dolby TrueHD with Atmos - 7.1",
+          "DisplayTitle": "English - Dolby TrueHD with Atmos - 7.1 (Default)",
+          "IsDefault": true,
+          "Channels": 8,
+          "ChannelLayout": "7.1",
+          "SampleRate": 48000,
+          "BitRate": 4500000,
+          "Profile": "Dolby TrueHD with Dolby Atmos"
+        },
+        {
+          "Type": "Audio",
+          "Index": 2,
+          "Codec": "aac",
+          "Language": "chi",
+          "Title": "国语 DD2.0",
+          "DisplayTitle": "国语 DD2.0",
+          "IsDefault": false,
+          "Channels": 2,
+          "ChannelLayout": "stereo",
+          "SampleRate": 48000,
+          "BitRate": 192000
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 3,
+          "Codec": "PGSSUB",
+          "Language": "zho",
+          "Title": "简体中文",
+          "DisplayTitle": "简体中文 (PGS)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 4,
+          "Codec": "subrip",
+          "Language": "eng",
+          "Title": "English SDH",
+          "DisplayTitle": "English SDH (SRT)",
+          "IsDefault": false,
+          "IsForced": false,
+          "IsExternal": true,
+          "DeliveryUrl": "/Videos/3b6f1d2c8a9e4f5b8c7d1e2f3a4b5c6d/7d8e9f0a1b2c3d4e5f60718293a4b5c6/Subtitles/4/Stream.subrip",
+          "DeliveryMethod": "External"
+        }
+      ]
+    }
+  ]
+}

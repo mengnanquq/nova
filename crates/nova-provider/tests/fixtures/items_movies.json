@@ -1,0 +1,66 @@
+{
+  "Items": [
+    {
+      "Name": "银翼杀手 2049",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "3b6f1d2c8a9e4f5b8c7d1e2f3a4b5c6d",
+      "RunTimeTicks": 98160000000,
+      "ProductionYear": 2017,
+      "Type": "Movie",
+      "ParentId": "f1e2d3c4b5a69788796a5b4c3d2e1f00",
+      "Genres": ["剧情", "科幻"],
+      "SortName": "Blade Runner 2049",
+      "OriginalTitle": "Blade Runner 2049",
+      "ImageTags": { "Primary": "d41d8cd98f00b204e9800998ecf8427e" },
+      "BackdropImageTags": ["0f1e2d3c4b5a69788796a5b4c3d2e1f0"],
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 1,
+        "IsFavorite": false,
+        "Played": true
+      }
+    },
+    {
+      "Name": "沙丘",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
+      "RunTimeTicks": 93000000000,
+      "ProductionYear": 2021,
+      "Type": "Movie",
+      "Genres": ["科幻", "冒险"],
+      "SortName": "Dune",
+      "ImageTags": { "Primary": "5f6e7d8c9b0a19283746f5e4d3c2b1a0" },
+      "UserData": {
+        "PlaybackPositionTicks": 36000000000,
+        "PlayCount": 0,
+        "IsFavorite": true,
+        "Played": false
+      }
+    },
+    {
+      "Name": "降临",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6",
+      "RunTimeTicks": 69600000000,
+      "ProductionYear": 2016,
+      "Type": "Movie",
+      "Genres": ["科幻", "剧情"],
+      "SortName": "Arrival",
+      "UserData": {
+        "PlaybackPositionTicks": 0,
+        "PlayCount": 0,
+        "IsFavorite": false,
+        "Played": false
+      }
+    },
+    {
+      "Name": "漫威合辑",
+      "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+      "Id": "0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d",
+      "Type": "BoxSet",
+      "IsFolder": true
+    }
+  ],
+  "TotalRecordCount": 4,
+  "StartIndex": 0
+}

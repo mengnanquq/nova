@@ -1,0 +1,47 @@
+{
+  "User": {
+    "Name": "alice",
+    "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90",
+    "Id": "9c8b7a6d5e4f4a3b2c1d0e9f8a7b6c5d",
+    "HasPassword": true,
+    "HasConfiguredPassword": true,
+    "HasConfiguredEasyPassword": false,
+    "EnableAutoLogin": false,
+    "LastLoginDate": "2026-02-01T12:00:00.0000000Z",
+    "LastActivityDate": "2026-02-05T21:14:11.0000000Z",
+    "Policy": {
+      "IsAdministrator": true,
+      "IsHidden": false,
+      "EnableAllFolders": true,
+      "AuthenticationProviderId": "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
+      "PasswordResetProviderId": "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider"
+    },
+    "Configuration": {
+      "PlayDefaultAudioTrack": true,
+      "SubtitleLanguagePreference": "chi",
+      "DisplayMissingEpisodes": false
+    }
+  },
+  "SessionInfo": {
+    "PlayState": {
+      "CanSeek": true,
+      "IsPaused": false,
+      "IsMuted": false,
+      "RepeatMode": "RepeatNone"
+    },
+    "PlayableMediaTypes": ["Video"],
+    "Id": "c3f1e2d4a5b6c7d8e9f0a1b2c3d4e5f6",
+    "UserId": "9c8b7a6d5e4f4a3b2c1d0e9f8a7b6c5d",
+    "UserName": "alice",
+    "Client": "Nova",
+    "LastActivityDate": "2026-02-05T21:14:11.0000000Z",
+    "DeviceName": "Nova",
+    "DeviceId": "nova-device-1",
+    "ApplicationVersion": "0.1.0",
+    "IsActive": true,
+    "SupportsMediaControl": true,
+    "SupportsRemoteControl": true
+  },
+  "AccessToken": "8f3a1c9d7e5b2a46c0d9e8f7a6b5c4d3",
+  "ServerId": "6f0c5a1e4b7d4b6f9a2c3d8e1f5b7a90"
+}
