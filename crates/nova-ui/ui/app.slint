@@ -12,6 +12,7 @@ import { LibraryPage } from "library.slint";
 import { DetailPage } from "detail.slint";
 import { PlayerShellPage } from "player_shell.slint";
 import { Banner } from "components/banner.slint";
+import { AddServerDialog } from "components/add_server.slint";
 
 export component AppWindow inherits Window {
     width: 1280px;
@@ -40,6 +41,21 @@ export component AppWindow inherits Window {
     in property <string> banner-text: "";
     // 空字符串表示没有动作按钮。
     in property <string> banner-action-label: "";
+    // “添加服务器”对话框：覆盖层，不参与下层布局。
+    // 0 = 空闲，1 = 连接中（禁用重复提交）。
+    in-out property <bool> add-server-open: false;
+    in property <int> add-server-state: 0;
+    in-out property <string> add-server-address: "";
+    in-out property <string> add-server-user: "";
+    in-out property <string> add-server-password: "";
+    // 地址的内联提示（空串 = 无提示）。
+    in property <string> add-server-hint: "";
+    in property <bool> add-server-plaintext: false;
+    // 错误区：主文案 + 可选补充说明。
+    in property <string> add-server-error: "";
+    in property <string> add-server-error-detail: "";
+    // 钥匙环退化等提示。
+    in property <string> add-server-note: "";
     // 拖动进度条时的气泡文本（Rust 侧用视图模型格式化）。
     in-out property <string> player-scrub-text: "";
     in-out property <bool> player-fullscreen: false;
@@ -56,6 +72,9 @@ export component AppWindow inherits Window {
     callback search-clear();
     callback banner-action();
     callback connect-server();
+    callback add-server-close();
+    callback add-server-submit();
+    callback add-server-address-edited(string);
     callback sort();
     callback tab-activated(string);
     callback source-selected(string);
@@ -146,8 +165,26 @@ export component AppWindow inherits Window {
                     return accept;
                 }
             }
+            // 对话框打开时：Esc 关闭，其余按键不透给被遮罩的首页。
+            if (root.add-server-open) {
+                if (event.text == Key.Escape) {
+                    root.add-server-close();
+                    return accept;
+                }
+                // Enter / Space / 方向键都吞掉，避免误触首页焦点或播放。
+                if (event.text == Key.Return || event.text == Key.Space
+                    || event.text == Key.LeftArrow || event.text == Key.RightArrow
+                    || event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                    return accept;
+                }
+            }
             if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
                 root.key-intent(7);
+                return accept;
+            }
+            // Ctrl+N：打开“添加服务器”对话框（与首页空态按钮、横幅动作同一路径）。
+            if (event.modifiers.control && (event.text == "n" || event.text == "N")) {
+                root.key-intent(8);
                 return accept;
             }
             if (event.text == Key.LeftArrow) {
@@ -382,6 +419,11 @@ export component AppWindow inherits Window {
         }
     }
 
+    /// 把焦点交给对话框的地址输入框（打开对话框时由 Rust 侧调到这里）。
+    public function focus-add-server-address() {
+        add-server.focus-input();
+    }
+
     /// 把焦点交给当前页的搜索输入框（Ctrl+F 由 Rust 侧调到这里）。
     public function focus-search-input() {
         if (root.page == 0) {
@@ -389,6 +431,31 @@ export component AppWindow inherits Window {
         }
         if (root.page == 1) {
             lib-page.focus-input();
+        }
+    }
+
+    // “添加服务器”对话框：绝对定位覆盖层（不进布局器，关闭后零残留）。
+    add-server := AddServerDialog {
+        open: root.add-server-open;
+        state: root.add-server-state;
+        address <=> root.add-server-address;
+        user <=> root.add-server-user;
+        password <=> root.add-server-password;
+        address-hint: root.add-server-hint;
+        plaintext-warning: root.add-server-plaintext;
+        error-text: root.add-server-error;
+        error-detail: root.add-server-error-detail;
+        note-text: root.add-server-note;
+        close => {
+            // 焦点还给全局键盘处理（与搜索框退出聚焦同一路径）。
+            keyboard.focus();
+            root.add-server-close();
+        }
+        submit => {
+            root.add-server-submit();
+        }
+        address-edited(text) => {
+            root.add-server-address-edited(text);
         }
     }
 }

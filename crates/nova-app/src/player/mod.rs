@@ -664,7 +664,7 @@ impl Player {
         self.dirty = true;
         self.subtitle_margin = 0;
 
-        let Some(server) = self.local.server_id().cloned() else {
+        let Some(server) = self.local.server_id() else {
             self.fail("还没有连接服务器：先在终端运行 `nova login`");
             return;
         };

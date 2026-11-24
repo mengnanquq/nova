@@ -8,6 +8,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 地址解析与规范化（与 nova-provider 的 `parse_base_url` 用同一个 url crate）。
+url = { workspace = true }
 # 只要 winit（Wayland/X11）+ femtovg（OpenGL）渲染器。
 slint = { version = "1.19", default-features = false, features = [
     "std",

@@ -50,6 +50,7 @@
 #![warn(missing_docs)]
 
 pub mod args;
+pub mod connect;
 pub mod env;
 pub mod error;
 pub mod images;

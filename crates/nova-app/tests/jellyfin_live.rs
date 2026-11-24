@@ -75,10 +75,7 @@ async fn refresh_persists_items_and_images() {
         credentials: CredentialMode::Memory,
     };
     let local = Local::open(&environment, None).expect("打开状态目录");
-    let provider = local
-        .provider
-        .clone()
-        .expect("即便没令牌也应构造出 provider");
+    let provider = local.provider().expect("即便没令牌也应构造出 provider");
     provider
         .authenticate(&live.user, &SecretString::new(live.password))
         .await

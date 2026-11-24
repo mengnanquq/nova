@@ -45,7 +45,7 @@ pub async fn refresh(local: Arc<Local>, status: Status) -> RefreshReport {
             item_count: local_item_count(&local).await,
         };
     }
-    let Some(provider) = local.provider.clone() else {
+    let Some(provider) = local.provider() else {
         return RefreshReport {
             status: Status::RefreshFailed {
                 message: "没有可用的服务端会话".to_owned(),
@@ -126,7 +126,7 @@ async fn cache_items(local: &Arc<Local>, items: Vec<nova_core::MediaItem>) -> Re
 
 /// 本地缓存条目数（放到阻塞池里查，失败按 0 处理）。
 pub async fn local_item_count(local: &Arc<Local>) -> u64 {
-    let Some(server) = local.server.clone() else {
+    let Some(server) = local.server() else {
         return 0;
     };
     let db = Arc::clone(&local.db);

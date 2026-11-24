@@ -3,6 +3,7 @@
 
 //! 界面绑定层：每个页面的视图模型到 Slint 属性的薄封装，外加应用级回调接线。
 
+pub mod add_server;
 pub mod app;
 pub mod assets;
 pub mod banner;

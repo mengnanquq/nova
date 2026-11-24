@@ -48,9 +48,12 @@ pub struct Local {
     /// 用户偏好（启动时读一次）。
     pub preferences: UserPreferences,
     /// 选中的服务器；没有服务器时为 `None`。
-    pub server: Option<StoredServer>,
+    ///
+    /// 加锁是为了支持应用内登录：`adopt_server` 通过 `&self` 热替换会话，
+    /// 与只读的视图构建互不竞争。
+    pub server: Mutex<Option<StoredServer>>,
     /// 当前会话的 provider；未登录/地址不合规时为 `None`。
-    pub provider: Option<Arc<Provider>>,
+    pub provider: Mutex<Option<Arc<Provider>>>,
     status: Mutex<Status>,
     libraries: Mutex<Vec<Library>>,
 }
@@ -129,11 +132,21 @@ impl Local {
             credentials_persistent: credentials.persistent,
             credential_note: credentials.note,
             preferences,
-            server,
-            provider,
+            server: Mutex::new(server),
+            provider: Mutex::new(provider),
             status: Mutex::new(status),
             libraries: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 当前选中的服务器快照（应用内登录可热替换）。
+    pub fn server(&self) -> Option<StoredServer> {
+        lock(&self.server).clone()
+    }
+
+    /// 当前会话的 provider（应用内登录可热替换）。
+    pub fn provider(&self) -> Option<Arc<Provider>> {
+        lock(&self.provider).clone()
     }
 
     /// 当前连接状态。
@@ -168,7 +181,7 @@ impl Local {
                 .map(|library| LibraryTab::new(library.id.as_str(), library.name.clone()))
                 .collect();
         }
-        match &self.server {
+        match self.server() {
             Some(server) if self.db.item_count(&server.info.id).unwrap_or(0) > 0 => {
                 vec![LibraryTab::new("", "全部")]
             }
@@ -180,7 +193,7 @@ impl Local {
     pub fn home(&self, search: Option<&str>) -> Result<HomeView, AppError> {
         let status = self.status();
         let tabs = self.tabs();
-        match &self.server {
+        match self.server() {
             Some(server) => Ok(views::home_view(
                 &self.db,
                 &server.info.id,
@@ -208,7 +221,7 @@ impl Local {
                 };
                 LibraryTab::new(library_id, title)
             });
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return Ok(LibraryView {
                 id: tab.id.clone(),
                 title: tab.title.clone(),
@@ -227,7 +240,7 @@ impl Local {
 
     /// 用缓存构建详情页。
     pub fn detail(&self, item_id: &str) -> Result<Option<DetailView>, AppError> {
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return Ok(None);
         };
         Ok(views::detail_view(&self.db, &server.info.id, item_id)?)
@@ -235,7 +248,7 @@ impl Local {
 
     /// 用缓存构建播放外壳。
     pub fn player(&self, item_id: &str) -> Result<Option<PlayerShellView>, AppError> {
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return Ok(None);
         };
         Ok(views::player_view(&self.db, &server.info.id, item_id)?)
@@ -243,7 +256,7 @@ impl Local {
 
     /// 界面图片键 → 具体请求（条目没有这张图时返回 `None`）。
     pub fn image_spec(&self, key: &ImageKey) -> Option<ImageSpec> {
-        let server = self.server.as_ref()?;
+        let server = self.server()?;
         let item = match self.db.item(
             &server.info.id,
             &nova_core::ItemId::new(key.item_id.clone()),
@@ -260,7 +273,7 @@ impl Local {
 
     /// 写条目缓存（幂等批量）。
     pub fn cache_items(&self, items: &[MediaItem]) -> Result<(), AppError> {
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return Ok(());
         };
         self.db
@@ -274,7 +287,7 @@ impl Local {
         item: &MediaItem,
         sources: &[MediaSource],
     ) -> Result<(), AppError> {
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return Ok(());
         };
         self.db.upsert_items(
@@ -328,14 +341,44 @@ impl Local {
         Ok(())
     }
 
-    /// 标记会话过期并写回 SQLite，让下次启动直接显示"登录已过期"。
+    /// 应用内登录成功后接管新会话：写 SQLite、替换 provider 与选中服务器。
+    ///
+    /// 与 CLI 的 `persist_info` 同规则：数据库是主记录；`created_at` 已存在时保持
+    /// 不变。成功后状态置为 [`Status::Connected`]，媒体库列表清空（等刷新重建）。
+    pub fn adopt_server(
+        &self,
+        provider: Provider,
+        info: &nova_core::ServerInfo,
+    ) -> Result<(), AppError> {
+        let now = nova_storage::unix_now();
+        // 先读旧行拿 created_at（upsert 不改它），再写新信息。
+        let created_at = self
+            .db
+            .server(&info.id)?
+            .map(|stored| stored.created_at)
+            .unwrap_or(now);
+        self.db.upsert_server(info, now)?;
+        *lock(&self.server) = Some(nova_storage::StoredServer {
+            info: info.clone(),
+            created_at,
+            last_seen_at: now,
+        });
+        *lock(&self.provider) = Some(Arc::new(provider));
+        self.set_libraries(Vec::new());
+        self.set_status(Status::Connected {
+            server: info.name.clone(),
+            base_url: info.base_url.clone(),
+        });
+        Ok(())
+    }
+
+    /// 标记会话过期并写回 SQLite，让下次启动直接显示“登录已过期”。
     pub fn mark_expired(&self) {
-        let Some(server) = &self.server else {
+        let Some(server) = self.server() else {
             return;
         };
         let user_name = self
-            .provider
-            .as_ref()
+            .provider()
             .and_then(|provider| provider.server_info().auth.user_name().map(str::to_owned))
             .or_else(|| server.info.auth.user_name().map(str::to_owned))
             .unwrap_or_default();
@@ -354,19 +397,13 @@ impl Local {
 
     /// 以 trait object 形式取 provider（图片下载适配器只需要 `MediaProvider`）。
     pub fn provider_dyn(&self) -> Option<Arc<dyn MediaProvider>> {
-        match self.provider.as_ref() {
-            Some(provider) => {
-                let cloned: Arc<Provider> = Arc::clone(provider);
-                let dynamic: Arc<dyn MediaProvider> = cloned;
-                Some(dynamic)
-            }
-            None => None,
-        }
+        self.provider()
+            .map(|provider| provider as Arc<dyn MediaProvider>)
     }
 
     /// 服务器标识（测试与诊断用）。
-    pub fn server_id(&self) -> Option<&ServerId> {
-        self.server.as_ref().map(|server| &server.info.id)
+    pub fn server_id(&self) -> Option<ServerId> {
+        self.server().map(|server| server.info.id)
     }
 
     /// 数据目录里的数据库路径。
@@ -506,7 +543,7 @@ mod tests {
         };
         let local = Local::open(&env, None).expect("空目录应能启动");
         assert!(matches!(local.status(), Status::NoServer));
-        assert!(local.server.is_none());
+        assert!(local.server().is_none());
         assert!(local.tabs().is_empty());
         // 状态不再占用 hero 位：首页是空态，状态由顶部横幅表达。
         let home = local.home(None).expect("构建首页");

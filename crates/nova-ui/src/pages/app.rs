@@ -13,10 +13,10 @@ use std::time::Duration;
 use slint::ComponentHandle;
 
 use crate::AppWindow;
-use crate::pages::{assets::ImageStore, banner, detail, home, library, player};
+use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player};
 use crate::viewmodel::{
-    BannerData, DetailView, HomeView, ImageKey, LibraryView, Navigator, PlayerView, Route,
-    move_focus,
+    AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
+    Navigator, PlayerView, Route, move_focus,
 };
 
 /// 页面编号。
@@ -66,6 +66,8 @@ pub enum KeyCommand {
     Back,
     /// Ctrl+F：聚焦搜索。
     Search,
+    /// Ctrl+N：打开“添加服务器”对话框。
+    ConnectServer,
 }
 
 impl KeyCommand {
@@ -79,6 +81,7 @@ impl KeyCommand {
             5 => Some(Self::Accept),
             6 => Some(Self::Back),
             7 => Some(Self::Search),
+            8 => Some(Self::ConnectServer),
             _ => None,
         }
     }
@@ -141,6 +144,7 @@ impl PlayerKey {
 const RATE_STEPS: [f32; 5] = [1.0, 1.25, 1.5, 2.0, 0.75];
 
 type StrHandler = Rc<dyn Fn(&str)>;
+type SubmitHandler = Rc<dyn Fn(&str, &str, &str)>;
 type VoidHandler = Rc<dyn Fn()>;
 type BoolHandler = Rc<dyn Fn(bool)>;
 type FloatHandler = Rc<dyn Fn(f32)>;
@@ -178,6 +182,9 @@ struct Callbacks {
     player_subtitle_external: Option<VoidHandler>,
     player_subtitle_margin: Option<MarginHandler>,
     connect_server: Option<VoidHandler>,
+    // 添加服务器：参数是（地址，用户名，密码明文）——密码只在这一次函数调用里存在。
+    add_server_submit: Option<SubmitHandler>,
+    add_server_close: Option<VoidHandler>,
 }
 
 #[derive(Default)]
@@ -221,6 +228,7 @@ struct State {
     subtitle_margin: Option<i64>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
+    add_server: AddServerView,
     callbacks: Callbacks,
 }
 
@@ -237,6 +245,7 @@ impl Default for State {
             banner: None,
             subtitle_margin: None,
             images: Rc::new(RefCell::new(ImageStore::new())),
+            add_server: AddServerView::new(),
             callbacks: Callbacks::default(),
         }
     }
@@ -592,9 +601,87 @@ impl App {
         self.state.borrow_mut().callbacks.player_subtitle_external = Some(Rc::new(handler));
     }
 
-    /// 空状态的"连接服务器"回调（真正的连接流程在上层）。
+    /// 空状态的“连接服务器”回调（真正的连接流程在上层）。
     pub fn on_connect_server(&self, handler: impl Fn() + 'static) {
         self.state.borrow_mut().callbacks.connect_server = Some(Rc::new(handler));
+    }
+
+    /// 提交“添加服务器”：参数是（地址，用户名，密码）。
+    ///
+    /// 密码只在这里作为字符串出现一次；上层应立刻包进 `SecretString`。
+    pub fn on_add_server_submit(&self, handler: impl Fn(&str, &str, &str) + 'static) {
+        self.state.borrow_mut().callbacks.add_server_submit = Some(Rc::new(handler));
+    }
+
+    /// 对话框被取消（取消按钮 / Esc / 遮罩点击）。
+    pub fn on_add_server_close(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.add_server_close = Some(Rc::new(handler));
+    }
+
+    /// 对话框当前是否打开。
+    pub fn add_server_open(&self) -> bool {
+        self.ui.get_add_server_open()
+    }
+
+    /// 打开“添加服务器”对话框（可选预填最近使用的地址与用户名）。
+    ///
+    /// 纯界面操作：不阻塞、不发网络请求。
+    pub fn open_add_server(&self, address: &str, user: &str) {
+        let view = self
+            .state
+            .borrow()
+            .add_server
+            .clone()
+            .open_with(address, user);
+        add_server::apply(&self.ui, &view);
+        self.state.borrow_mut().add_server = view;
+        self.ui.invoke_focus_add_server_address();
+    }
+
+    /// 关闭对话框：清空密码（用完即弃），复位状态机与错误。
+    pub fn close_add_server(&self) {
+        let view = self.state.borrow().add_server.clone().close();
+        add_server::apply(&self.ui, &view);
+        self.state.borrow_mut().add_server = view;
+        // 密码只存在于输入框属性里，关框即清。
+        self.ui.set_add_server_password("".into());
+    }
+
+    /// 表单下方的常驻提示（如“密钥环不可用，本次会话有效”）。
+    pub fn set_add_server_note(&self, note: &str) {
+        let mut view = self.state.borrow().add_server.clone();
+        view.note = (!note.is_empty()).then(|| note.to_owned());
+        add_server::apply(&self.ui, &view);
+        self.state.borrow_mut().add_server = view;
+    }
+
+    /// 进入“连接中”：禁用重复提交。
+    pub fn begin_add_server_connecting(&self) {
+        let view = self.state.borrow().add_server.clone().begin_connecting();
+        add_server::apply(&self.ui, &view);
+        self.state.borrow_mut().add_server = view;
+    }
+
+    /// 连接失败：回到空闲并把错误展示在错误区。
+    pub fn set_add_server_error(&self, error: AddServerError) {
+        let view = self.state.borrow().add_server.clone().fail(error);
+        add_server::apply(&self.ui, &view);
+        self.state.borrow_mut().add_server = view;
+    }
+
+    /// 当前输入的地址（测试与上层读取用）。
+    pub fn add_server_address(&self) -> String {
+        self.ui.get_add_server_address().to_string()
+    }
+
+    /// 当前输入的用户名。
+    pub fn add_server_user(&self) -> String {
+        self.ui.get_add_server_user().to_string()
+    }
+
+    /// 当前输入的密码（仅提交瞬间读取；测试里也只断言“清空后为空”）。
+    pub fn add_server_password(&self) -> String {
+        self.ui.get_add_server_password().to_string()
     }
 
     /// 字幕安全区回调：控制层可见时抬起 `y` px（mpv 的 `sub-margin-y`），隐藏时为 `0`。
@@ -728,13 +815,69 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         });
     }
     {
-        // 空状态的"连接服务器"：对话框 / 网络在上层，这里只把意图转出去。
+        // 空状态的“连接服务器”：对话框 / 网络在上层，这里只把意图转出去。
         let state = state.clone();
         ui.on_connect_server(move || {
             let handler = state.borrow().callbacks.connect_server.clone();
             if let Some(handler) = handler {
                 handler();
             }
+        });
+    }
+    {
+        // 取消（取消按钮 / Esc / 遮罩点击）：先复位界面状态，再通知上层。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_server_close(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let view = state.borrow().add_server.clone().close();
+            add_server::apply(&ui, &view);
+            state.borrow_mut().add_server = view;
+            ui.set_add_server_password("".into());
+            let handler = state.borrow().callbacks.add_server_close.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+        });
+    }
+    {
+        // 提交：把三个字段原样转给上层；门控（连接中 / 地址不合规）在这里拦住。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_server_submit(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let (open, can_submit) = {
+                let view = state.borrow().add_server.clone();
+                (view.open, view.can_submit())
+            };
+            if !open || !can_submit {
+                return;
+            }
+            let handler = state.borrow().callbacks.add_server_submit.clone();
+            if let Some(handler) = handler {
+                let address = ui.get_add_server_address().to_string();
+                let user = ui.get_add_server_user().to_string();
+                let password = ui.get_add_server_password().to_string();
+                handler(&address, &user, &password);
+            }
+        });
+    }
+    {
+        // 地址实时校验：输入即更新内联提示与 http 警示条。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_server_address_edited(move |text| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut view = state.borrow().add_server.clone();
+            view.address = text.to_string();
+            state.borrow_mut().add_server = view.clone();
+            add_server::apply_derived(&ui, &view);
         });
     }
     {
@@ -984,6 +1127,10 @@ fn set_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, index: usiz
 }
 
 fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -> bool {
+    // 对话框打开时：键盘不透给被遮罩的首页（Esc 已由 .slint 直接关框）。
+    if ui.get_add_server_open() {
+        return true;
+    }
     let page = Page::from_index(ui.get_page());
     match command {
         // 播放页没有焦点环：Enter / Space 交给"播放/暂停"，不重新起播。
@@ -999,6 +1146,14 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
         KeyCommand::Back => go_back(ui, state),
         KeyCommand::Search => {
             focus_search(ui, state);
+            true
+        }
+        // Ctrl+N：与空态按钮、横幅动作同一回调（打开对话框的决策在上层）。
+        KeyCommand::ConnectServer => {
+            let handler = state.borrow().callbacks.connect_server.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
             true
         }
     }

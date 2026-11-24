@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! “添加服务器”对话框：覆盖层 + 半透明遮罩 + 居中面板。
+//!
+//! 只做摆放与焦点：地址校验、错误分类都在 Rust 视图模型里，这里通过属性接收。
+//! 关闭后覆盖层整体隐藏，不给下层布局预留任何空间。
+
+import { Theme } from "../theme.slint";
+
+export component AddServerDialog inherits Rectangle {
+    in property <bool> open: false;
+    // 0 = 空闲（可编辑可提交），1 = 连接中（禁用重复提交）。
+    in property <int> state: 0;
+    in-out property <string> address;
+    in-out property <string> user;
+    in-out property <string> password;
+    // 地址的内联提示（空串 = 无提示，地址合法）。
+    in property <string> address-hint: "";
+    // 明文 HTTP 警示条。
+    in property <bool> plaintext-warning: false;
+    // 错误区：主文案 + 可选的已脱敏补充说明。
+    in property <string> error-text: "";
+    in property <string> error-detail: "";
+    // 钥匙环退化等提示。
+    in property <string> note-text: "";
+
+    callback close();
+    callback submit();
+    callback address-edited(string);
+
+    // 提交门控：连接中、地址为空或带内联提示时禁用。
+    property <bool> submit-disabled: root.state == 1
+        || root.address == ""
+        || root.address-hint != "";
+
+    /// 把焦点交给地址输入框（打开对话框时由上层调到这里）。
+    public function focus-input() {
+        address-input.focus();
+    }
+
+    x: 0;
+    y: 0;
+    width: 100%;
+    height: 100%;
+    visible: root.open;
+
+    // 半透明遮罩：压住下层内容但保持可见；点击遮罩 = 取消。
+    TouchArea {
+        clicked => {
+            root.close();
+        }
+    }
+
+    panel := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 440px;
+        height: body.preferred-height + Theme.space-6 * 2;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.hairline;
+        border-radius: Theme.radius-panel;
+
+        // 面板自身拦住鼠标事件，不透给遮罩。
+        TouchArea { }
+
+        body := VerticalLayout {
+            x: Theme.space-6;
+            y: Theme.space-6;
+            width: parent.width - Theme.space-6 * 2;
+            height: self.preferred-height;
+            spacing: Theme.space-4;
+
+            Text {
+                text: "连接服务器";
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-22;
+                font-weight: Theme.weight-semibold;
+            }
+
+            // ---- 服务器地址 ----
+            VerticalLayout {
+                spacing: Theme.space-1;
+
+                Text {
+                    text: "服务器地址";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                }
+
+                Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-panel;
+                    background: Theme.surface-raised;
+                    border-width: 1px;
+                    border-color: address-input.has-focus ? Theme.accent : Theme.hairline;
+
+                    address-input := TextInput {
+                        x: Theme.space-3;
+                        width: parent.width - Theme.space-3 * 2;
+                        height: parent.height;
+                        text <=> root.address;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                        single-line: true;
+
+                        edited => {
+                            root.address-edited(self.text);
+                        }
+                        accepted => {
+                            // Enter = 提交（门控在 Rust 侧统一做）。
+                            root.submit();
+                        }
+                        key-pressed(event) => {
+                            // Esc 不进文本框：直接取消对话框。
+                            if (event.text == Key.Escape) {
+                                root.close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                }
+
+                if (root.address-hint != "") : Text {
+                    text: root.address-hint;
+                    color: Theme.danger;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    wrap: word-wrap;
+                }
+            }
+
+            // ---- 用户名 ----
+            VerticalLayout {
+                spacing: Theme.space-1;
+
+                Text {
+                    text: "用户名";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                }
+
+                Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-panel;
+                    background: Theme.surface-raised;
+                    border-width: 1px;
+                    border-color: user-input.has-focus ? Theme.accent : Theme.hairline;
+
+                    user-input := TextInput {
+                        x: Theme.space-3;
+                        width: parent.width - Theme.space-3 * 2;
+                        height: parent.height;
+                        text <=> root.user;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                        single-line: true;
+
+                        accepted => {
+                            root.submit();
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                }
+            }
+
+            // ---- 密码（password 输入模式）----
+            VerticalLayout {
+                spacing: Theme.space-1;
+
+                Text {
+                    text: "密码";
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                }
+
+                Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-panel;
+                    background: Theme.surface-raised;
+                    border-width: 1px;
+                    border-color: password-input.has-focus ? Theme.accent : Theme.hairline;
+
+                    password-input := TextInput {
+                        x: Theme.space-3;
+                        width: parent.width - Theme.space-3 * 2;
+                        height: parent.height;
+                        text <=> root.password;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                        single-line: true;
+                        input-type: InputType.password;
+
+                        accepted => {
+                            root.submit();
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.close();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                }
+            }
+
+            // ---- 明文 HTTP 警示条：不阻止提交 ----
+            if (root.plaintext-warning) : Rectangle {
+                height: warning-text.preferred-height + Theme.space-2 * 2;
+                border-radius: Theme.radius-panel;
+                background: Theme.warning;
+
+                warning-text := Text {
+                    x: Theme.space-3;
+                    width: parent.width - Theme.space-3 * 2;
+                    y: (parent.height - self.preferred-height) / 2;
+                    text: "当前地址使用明文 HTTP，密码将未加密传输；局域网自建可信时可以继续。";
+                    color: Theme.accent-contrast;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    font-weight: Theme.weight-semibold;
+                    wrap: word-wrap;
+                }
+            }
+
+            // ---- 错误区：在表单下方，永远占同一块区域 ----
+            if (root.error-text != "") : Rectangle {
+                height: error-body.preferred-height + Theme.space-2 * 2;
+                border-radius: Theme.radius-panel;
+                background: Theme.danger;
+
+                error-body := VerticalLayout {
+                    x: Theme.space-3;
+                    width: parent.width - Theme.space-3 * 2;
+                    y: (parent.height - self.preferred-height) / 2;
+                    spacing: Theme.space-1;
+
+                    Text {
+                        text: root.error-text;
+                        color: Theme.accent-contrast;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        font-weight: Theme.weight-semibold;
+                        wrap: word-wrap;
+                    }
+
+                    if (root.error-detail != "") : Text {
+                        text: root.error-detail;
+                        color: Theme.accent-contrast;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-12;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // ---- 钥匙环退化等提示 ----
+            if (root.note-text != "") : Text {
+                text: root.note-text;
+                color: Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                height: 1px;
+                background: transparent;
+            }
+
+            // ---- 动作行：取消 + 连接 ----
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                alignment: center;
+
+                Rectangle {
+                    height: Theme.button-primary-height;
+                    width: cancel-label.preferred-width + Theme.space-6 * 2;
+                    border-radius: Theme.radius-pill;
+                    background: cancel-area.has-hover ? Theme.surface-raised : Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.hairline;
+
+                    cancel-label := Text {
+                        x: Theme.space-6;
+                        width: parent.width - Theme.space-6 * 2;
+                        height: parent.height;
+                        text: "取消";
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        font-weight: Theme.weight-semibold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    cancel-area := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.close();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: Theme.button-primary-height;
+                    width: connect-label.preferred-width + Theme.space-6 * 2;
+                    border-radius: Theme.radius-pill;
+                    // 禁用时半透明；连接中固定显示“连接中…”。
+                    opacity: root.submit-disabled ? 0.5 : 1.0;
+                    background: connect-area.has-hover && !root.submit-disabled
+                        ? Theme.accent-hover
+                        : Theme.accent;
+
+                    connect-label := Text {
+                        x: Theme.space-6;
+                        width: parent.width - Theme.space-6 * 2;
+                        height: parent.height;
+                        text: root.state == 1 ? "连接中…" : "连接";
+                        color: Theme.accent-contrast;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        font-weight: Theme.weight-semibold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    connect-area := TouchArea {
+                        enabled: !root.submit-disabled;
+                        mouse-cursor: root.submit-disabled ? default : pointer;
+                        clicked => {
+                            root.submit();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

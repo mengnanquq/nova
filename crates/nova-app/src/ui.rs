@@ -28,12 +28,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use nova_core::ItemId;
 use nova_images::DecodedImage;
 use nova_provider::MediaProvider;
+use nova_secrets::SecretString;
 use nova_ui::{
-    App, AppWindow, DetailView, HomeView, ImageKey, LibraryView, PlayerShellView, Route,
+    AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
+    LibraryView, PlayerShellView, Route,
 };
 use slint::ComponentHandle;
 use tokio::runtime::Handle;
 
+use crate::connect::{ConnectedServer, connect};
 use crate::error::AppError;
 use crate::images::{ImageService, ProviderFetcher, image_from_decoded};
 use crate::local::Local;
@@ -64,6 +67,8 @@ enum UiMessage {
     },
     /// 播放链路的异步结果（取直链等）。
     Playback(Message),
+    /// 应用内“添加服务器”的结果。
+    AddServer(Box<Result<ConnectedServer, AddServerError>>),
 }
 
 /// 刷新结果。
@@ -92,6 +97,8 @@ struct Shell {
     state: RefCell<UiState>,
     /// 与渲染 notifier 共享的 mpv 引擎状态（所有 GL 调用都在主线程）。
     host: Rc<RefCell<player::Host>>,
+    /// 图片下载器（登录成功后切换 provider 用；与 `images` 里的 fetcher 同一个）。
+    fetcher: Arc<ProviderFetcher>,
     /// 播放页控制器；只在播放页打开时存在。
     player: RefCell<Option<Player>>,
     /// 播放心跳（8ms）：事件泵、会话 tick、帧 watchdog。
@@ -161,9 +168,10 @@ pub fn run_window(
     app.set_banner(status.banner_data());
 
     let online: Option<Arc<dyn MediaProvider>> = local.provider_dyn();
+    let fetcher = Arc::new(ProviderFetcher::new(online));
     let images = Arc::new(ImageService::new(
         Arc::clone(&local.image_cache),
-        Arc::new(ProviderFetcher::new(online)),
+        fetcher.clone(),
     ));
     let channel = Arc::new(UiChannel::new(app.ui().as_weak()));
 
@@ -183,6 +191,7 @@ pub fn run_window(
         local: Arc::clone(&local),
         runtime: runtime.clone(),
         images,
+        fetcher,
         channel,
         state: RefCell::new(UiState {
             status,
@@ -436,6 +445,106 @@ impl Shell {
         }
     }
 
+    /// 最近使用记忆：最近登录的一台服务器的地址与用户名（对话框预填用）。
+    ///
+    /// 只读 SQLite 里的 servers 表；**密码从不存储**，所以没有密码可预填。
+    fn recent_server(&self) -> (String, String) {
+        let recent = match self.local.db.servers() {
+            Ok(servers) => servers
+                .into_iter()
+                .max_by_key(|server| server.created_at)
+                .map(|server| {
+                    (
+                        server.info.base_url,
+                        server.info.auth.user_name().unwrap_or_default().to_owned(),
+                    )
+                }),
+            Err(error) => {
+                tracing::warn!(%error, "读取最近服务器失败，按空表单打开");
+                None
+            }
+        };
+        recent.unwrap_or_default()
+    }
+
+    /// 打开“添加服务器”对话框：预填最近使用，附上钥匙环退化说明（如有）。
+    fn open_add_server(&self) {
+        if self.app.add_server_open() {
+            return;
+        }
+        let (address, user) = self.recent_server();
+        self.app
+            .set_add_server_note(self.local.credential_note.as_deref().unwrap_or(""));
+        self.app.open_add_server(&address, &user);
+    }
+
+    /// 提交：后台连接，界面立即回到“连接中”（不阻塞 UI 线程）。
+    ///
+    /// 密码在这里被包进 `SecretString` 并移入后台任务；之后不再出现在任何
+    /// 本地变量、日志或数据库里。
+    fn submit_add_server(self: &Rc<Self>, address: &str, user: &str, password: &str) {
+        // 门控：连接中不受理重复提交（按钮本身也已被禁用）。
+        if self.app.ui().get_add_server_state() == 1 {
+            return;
+        }
+        let password = SecretString::new(password.to_owned());
+        self.app.begin_add_server_connecting();
+        let local = Arc::clone(&self.local);
+        let channel = Arc::clone(&self.channel);
+        let runtime = self.runtime.clone();
+        let address = address.to_owned();
+        let user = user.to_owned();
+        runtime.spawn(async move {
+            let outcome = connect(Arc::clone(&local), &address, &user, password).await;
+            if let Err(error) = &outcome {
+                // `error.message()` 是四类静态文案；detail 已由 provider 脱敏。
+                tracing::warn!(message = error.message(), "应用内连接服务器失败");
+            }
+            channel.post(UiMessage::AddServer(Box::new(outcome)));
+        });
+    }
+
+    /// 连接结果回到主线程：成功 → 关对话框、重建首页、后台刷新；失败 → 错误区。
+    fn apply_add_server(self: &Rc<Self>, outcome: Result<ConnectedServer, AddServerError>) {
+        match outcome {
+            Ok(connected) => {
+                self.app.close_add_server();
+                let status = self.local.status();
+                match self.local.home(None) {
+                    Ok(home) => {
+                        let keys = home.image_keys();
+                        self.app.set_home(&home);
+                        self.app.set_banner(status.banner_data());
+                        {
+                            let mut state = self.state.borrow_mut();
+                            state.status = status;
+                            state.home = home;
+                            state.library = None;
+                        }
+                        self.request_images(keys);
+                    }
+                    Err(error) => tracing::warn!(%error, "登录成功但重建首页失败"),
+                }
+                // 钥匙环不可用：明确告知“本次会话有效”，不要静默。
+                if !self.local.credentials_persistent {
+                    self.app.set_banner(Some(BannerData::new(
+                        format!(
+                            "已连接 {}：系统密钥环不可用，本次会话有效，重启后需重新登录",
+                            connected.info.name
+                        ),
+                        BannerLevel::Warning,
+                    )));
+                }
+                // 图片下载器切到新会话，然后后台刷新。
+                self.fetcher.set_provider(self.local.provider_dyn());
+                self.spawn_refresh();
+            }
+            Err(error) => {
+                self.app.set_add_server_error(error);
+            }
+        }
+    }
+
     fn apply_refresh(&self, payload: Refreshed) {
         let Refreshed {
             status,
@@ -516,7 +625,7 @@ impl Shell {
 
     /// 详情页按需联网：`item()` + `sources()` 写回缓存后重建详情视图。
     fn spawn_detail(&self, item_id: String) {
-        let Some(provider) = self.local.provider.clone() else {
+        let Some(provider) = self.local.provider() else {
             return;
         };
         let local = Arc::clone(&self.local);
@@ -670,14 +779,48 @@ fn install_callbacks(shell: &Rc<Shell>) {
         });
     }
     {
-        // 横幅动作按钮：阶段 3 只记录意图；真正的重新登录 / 重试流程在阶段 4+ 接入。
+        // 横幅动作按钮：“重试”→ 重新刷新；“重新登录”（或其它）→ 打开添加服务器对话框。
         let weak = Rc::downgrade(shell);
         shell.app.on_banner_action(move || {
             if let Some(shell) = weak.upgrade() {
-                if let Some(banner) = shell.app.banner() {
-                    tracing::info!(text = banner.text, "横幅动作触发");
+                let action = shell
+                    .app
+                    .banner()
+                    .and_then(|banner| banner.action_label)
+                    .unwrap_or_default();
+                if action == "重试" {
+                    tracing::info!("横幅动作：重新刷新");
+                    shell.spawn_refresh();
+                } else {
+                    tracing::info!(action, "横幅动作：打开添加服务器对话框");
+                    shell.open_add_server();
                 }
             }
+        });
+    }
+    {
+        // 空态“连接服务器”/ Ctrl+N：打开对话框（纯界面操作，不阻塞）。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_connect_server(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.open_add_server();
+            }
+        });
+    }
+    {
+        // 提交：把表单交给后台连接流程；密码立即包进 SecretString。
+        let weak = Rc::downgrade(shell);
+        shell
+            .app
+            .on_add_server_submit(move |address, user, password| {
+                if let Some(shell) = weak.upgrade() {
+                    shell.submit_add_server(address, user, password);
+                }
+            });
+    }
+    {
+        shell.app.on_add_server_close(|| {
+            tracing::debug!("添加服务器对话框已取消");
         });
     }
     {
@@ -839,6 +982,7 @@ fn apply_message(message: UiMessage) {
         UiMessage::Detail(detail) => shell.apply_detail(*detail),
         UiMessage::Image { key, decoded } => shell.apply_image(key, &decoded),
         UiMessage::Playback(message) => shell.apply_playback(message),
+        UiMessage::AddServer(outcome) => shell.apply_add_server(*outcome),
     }
 }
 

@@ -143,18 +143,27 @@ impl ImageSpec {
 
 /// 下载适配器：把合成 URL 还原成 provider 请求。
 pub struct ProviderFetcher {
-    provider: Option<Arc<dyn MediaProvider>>,
+    provider: Mutex<Option<Arc<dyn MediaProvider>>>,
 }
 
 impl ProviderFetcher {
     /// 用当前会话的 provider 构造；离线时传 `None`（只会命中磁盘缓存）。
     pub fn new(provider: Option<Arc<dyn MediaProvider>>) -> Self {
-        Self { provider }
+        Self {
+            provider: Mutex::new(provider),
+        }
+    }
+
+    /// 换会话后更新 provider（应用内登录成功时调用；`None` = 离线）。
+    ///
+    /// 下一次图片请求就生效；已失败/已开始的请求不受影响。
+    pub fn set_provider(&self, provider: Option<Arc<dyn MediaProvider>>) {
+        *lock(&self.provider) = provider;
     }
 
     async fn download(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let endpoint = nova_images::endpoint_of(url);
-        let Some(provider) = self.provider.as_ref() else {
+        let Some(provider) = lock(&self.provider).clone() else {
             tracing::debug!(endpoint, "离线：图片未命中磁盘缓存，保留占位");
             // `FetchError` 没有"未配置 provider"变体，返回空响应体让缓存层报
             // `EmptyBody`；上层随后把它记成"不重试的失败"。
@@ -206,7 +215,7 @@ impl std::fmt::Debug for ProviderFetcher {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProviderFetcher")
-            .field("online", &self.provider.is_some())
+            .field("online", &lock(&self.provider).is_some())
             .finish()
     }
 }

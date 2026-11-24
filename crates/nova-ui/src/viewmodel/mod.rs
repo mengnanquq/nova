@@ -5,6 +5,7 @@
 //!
 //! 上层把 `nova-core` 的媒体模型压成这些结构，界面只读它们。
 
+pub mod add_server;
 pub mod banner;
 pub mod card;
 pub mod detail;
@@ -16,6 +17,10 @@ pub mod library;
 pub mod nav;
 pub mod player;
 
+pub use add_server::{
+    AddServerError, AddServerErrorKind, AddServerState, AddServerView, AddressError,
+    is_plaintext_address, validate_address,
+};
 pub use banner::{BannerData, BannerLevel};
 pub use card::CardView;
 pub use detail::{DetailView, SourceOption};
