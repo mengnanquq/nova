@@ -6,3 +6,8 @@
 spikes/playback-proto/out/
 .dev/
 .codegraph/
+
+# AppImage 打包产物与中间目录（只提交 packaging/appimage/ 下的脚本与资源）
+/dist/
+/squashfs-root/
+/packaging/appimage/AppDir/

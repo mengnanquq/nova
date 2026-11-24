@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nova 品牌图标：深色圆角方块 + 琥珀色 "N"。
+     全部用几何图形绘制，不依赖任何字体（避免 <text> 在部分工具链/渲染器上不出字）。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"
+     role="img" aria-label="Nova">
+  <title>Nova</title>
+
+  <!-- 背景：深色圆角方块 #0A0B0D -->
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0A0B0D"/>
+  <!-- 细边框，让图标在纯黑桌面上仍有轮廓 -->
+  <rect x="1" y="1" width="254" height="254" rx="55" ry="55"
+        fill="none" stroke="#1C1F24" stroke-width="2"/>
+
+  <!-- "N" 字形：琥珀色 #E9A03C。左竖 + 斜干 + 右竖，单条 path，没有文字元素 -->
+  <path d="M 76 190 V 66 H 100 L 160 158 V 66 H 184 V 190 H 160 L 100 98 V 190 Z"
+        fill="#E9A03C" fill-rule="nonzero"/>
+
+  <!-- 轻微高光，增加层次（不影响识别） -->
+  <path d="M 76 66 H 100 L 160 158 V 176 L 100 84 H 76 Z" fill="#F4B65E" opacity="0.35"/>
+</svg>

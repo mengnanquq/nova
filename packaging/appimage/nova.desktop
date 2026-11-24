@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nova
+Comment=开源跨平台桌面媒体中心
+Exec=nova-desktop
+Icon=nova
+Categories=AudioVideo;Video;Player;
+Terminal=false
+StartupWMClass=Nova
