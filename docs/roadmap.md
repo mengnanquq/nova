@@ -61,13 +61,13 @@
 
 ### 阶段 2 遗留债（记录在案，不阻塞阶段 3）
 
-1. **列表响应不带 `ParentId`**（Jellyfin 12.4 实测），所以 `MediaItem.parent_id` 在列表路径恒为 `None`，
-   缓存无法按媒体库直接检索。最省事的修法：list 请求已知 `parent`，映射时用它回填。
+1. ~~列表响应不带 `ParentId`~~ **已修**：递归列表按类型回填（电影/剧集是库的直接子项才回填，
+   季/集的父项各不相同，不能统一写），`children()` 全量回填。
 2. **`Limit` 数的是服务端原始记录**：库里混着 `Folder` 时，`--limit 5` 可能只得到 3 条可播放条目。
    需要能表达"只要可播放类型"的查询参数。
 3. **无法只发 `Stopped`**：用户中途退出且没有最后一次进度时，`PlaybackProgress` 表达不了"结束会话"。
-4. `public_info()` 返回完整 `ServerInfo`（`auth=Unauthorized`、`user_id=None`），
-   容易被误用来覆盖本地记录；应改为窄结构体 `PublicServerInfo`。
+4. ~~`public_info()` 返回完整 `ServerInfo`~~ **已修**：改为窄结构体 `PublicServerInfo`，
+   另给 `public_info_as_server_info()` 只合并 name/kind/version，不碰会话字段。
 5. `Library` 没有被缓存（`nova-library` 落地时一起做）。
 6. `nova-core` 的 `Page<T>` / `SortBy` / `Library` 仍在 provider 里，等 `nova-library` 一起上移。
 7. `ServerInfo.version` 现在能填了（`authenticate()` 会拉一次 `/System/Info/Public`），
