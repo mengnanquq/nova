@@ -101,6 +101,12 @@ export global Theme {
 
     // ---- 字号 / 字重（48/34/22/16/14/12）----
     in property <string> font-family: "Inter, Noto Sans CJK SC, PingFang SC, DejaVu Sans";
+    /// 等宽字体：**只用于会跳动的数字**（时间码、时长、码率、体积）。
+    ///
+    /// 为什么不做成全局字体：等宽会把中文标题拉宽、只剩两档字重，层级会塌
+    /// （详见 docs/ui-netflix-1to1.md 的"客观限制"）。但 `12:34 / 2:18:00` 这类
+    /// 数字用等宽不会左右跳动，是真正受益的地方。
+    in property <string> font-mono: "Noto Sans Mono, JetBrains Mono, DejaVu Sans Mono, monospace";
     in property <int> weight-regular: 400;
     in property <int> weight-medium: 500;
     in property <int> weight-semibold: 600;

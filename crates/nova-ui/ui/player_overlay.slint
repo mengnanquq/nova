@@ -888,7 +888,8 @@ export component PlayerOverlay inherits Rectangle {
                         height: parent.height;
                         text: root.data.time-text;
                         color: Theme.text;
-                        font-family: Theme.font-family;
+                        // 时间码用等宽：秒数跳动时不会左右抖。
+                        font-family: Theme.font-mono;
                         font-size: Theme.font-14;
                         vertical-alignment: center;
                         horizontal-alignment: left;
