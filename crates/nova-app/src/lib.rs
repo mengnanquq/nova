@@ -51,6 +51,7 @@
 
 pub mod args;
 pub mod connect;
+mod debug;
 pub mod env;
 pub mod error;
 pub mod images;
@@ -104,6 +105,7 @@ pub fn run(argv: Vec<String>) -> Result<(), AppError> {
                         cli.screenshot
                             .clone()
                             .map(|path| (path, cli.screenshot_delay_ms)),
+                        cli.debug_socket.clone(),
                     )
                 }
                 Mode::PrintView => print::run_print_view(&local, &cli, &runtime),
@@ -117,6 +119,7 @@ pub fn run(argv: Vec<String>) -> Result<(), AppError> {
                     cli.screenshot
                         .clone()
                         .map(|path| (path, cli.screenshot_delay_ms)),
+                    cli.debug_socket.clone(),
                 ),
                 // 外层分支已经排除了 Help / Version；这里保留正常返回而不是 panic。
                 Mode::Help | Mode::Version => Ok(()),

@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 放大覆盖层卡片：行/网格里被聚焦或悬停的卡片按 zoom-factor 放大，
+//! 下方浮出标题 / 元信息 / 迷你进度条。
+//!
+//! 它是**独立覆盖层**，不参与行布局：行内基础卡片尺寸恒定，放大只改这张
+//! 后绘制的覆盖卡（后绘制的兄弟元素优先，能盖住相邻卡片），所以布局零跳动。
+
+import { Theme } from "theme.slint";
+import { CardData } from "models.slint";
+
+export component CardZoom inherits Rectangle {
+    in property <CardData> card;
+    // 基础卡尺寸（放大前的行内尺寸）。
+    in property <length> base-width: 260px;
+    in property <length> base-height: 390px;
+    // 缩放系数：1.0（未放大）→ 1.08。由父级的状态动画驱动。
+    in property <float> zoom-factor: 1.0;
+    callback clicked();
+
+    width: root.base-width * root.zoom-factor;
+    height: image-height + Theme.space-2 + 20px + 2px + 16px + Theme.space-2 + 3px;
+    background: transparent;
+
+    property <length> image-height: root.base-height * root.zoom-factor;
+    // 圆角 4 → 6 随放大走。
+    property <length> image-radius: root.zoom-factor > 1.04 ? Theme.radius-panel : Theme.radius-poster;
+
+    image := Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: image-height;
+        clip: true;
+        border-radius: image-radius;
+        background: Theme.surface;
+
+        // 占位底色 + 首字母（图片为空时才可见）。
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: root.card.image.width > 0 ? transparent : Theme.surface-raised;
+            border-radius: image-radius;
+
+            Text {
+                text: root.card.initial;
+                color: Theme.text-faint;
+                font-family: Theme.font-family;
+                font-size: Theme.font-34;
+                font-weight: Theme.weight-bold;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                visible: root.card.image.width <= 0;
+            }
+        }
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.card.image;
+            image-fit: cover;
+        }
+
+        // 迷你进度条：3px accent，贴卡片底部内侧，左右各 8px。
+        if (root.card.progress >= 0) :
+            Rectangle {
+                x: Theme.space-2;
+                y: image-height - self.height - Theme.space-2;
+                width: parent.width - Theme.space-2 * 2;
+                height: 3px;
+                border-radius: 1.5px;
+                background: Theme.player-track;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    height: parent.height;
+                    width: parent.width * clamp(root.card.progress, 0, 1);
+                    border-radius: 1.5px;
+                    background: Theme.accent;
+                }
+            }
+    }
+
+    // 放大后浮出的信息（显式高度，不依赖字体测量）。
+    zoom-title := Text {
+        x: 0;
+        y: image-height + Theme.space-2;
+        width: parent.width;
+        height: 20px;
+        text: root.card.title;
+        color: Theme.text;
+        font-family: Theme.font-family;
+        font-size: Theme.font-14;
+        font-weight: Theme.weight-bold;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+
+    zoom-meta := Text {
+        x: 0;
+        y: zoom-title.y + zoom-title.height + 2px;
+        width: parent.width;
+        height: 16px;
+        text: root.card.subtitle;
+        color: Theme.text-muted;
+        font-family: Theme.font-family;
+        font-size: Theme.font-12;
+        overflow: elide;
+        wrap: no-wrap;
+        visible: root.card.subtitle != "";
+    }
+
+    zoom-area := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}

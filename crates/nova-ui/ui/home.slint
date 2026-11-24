@@ -1,16 +1,161 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 首页：导航 + hero + 继续观看横排（带进度条）+ 最近添加网格 + 空状态。
+//! 首页（Netflix 风格）：透明顶栏浮在 billboard 上 + 横向大行。
 //!
-//! 区块标题是"粘性"的：滚过区块顶部后贴住视口顶，直到该区块只剩标题 + 96px
-//! 才随区块一起划出，避免标题贴视口底被腰斩。
+//! billboard 88vh（最大 720px）：全宽 backdrop、底部+左侧双渐变、
+//! 标题 / 元信息 / 3 行简介 / 双按钮 / 右下徽标。
+//! 行：标题 22px + "查看全部 ›" + 横向 Flickable；卡片放大用独立覆盖层
+//! （`CardZoom`），行内基础卡片尺寸恒定，布局零跳动。
 
 import { Theme } from "theme.slint";
-import { HomeData } from "models.slint";
+import { CardData, HomeData } from "models.slint";
 import { Navbar } from "navbar.slint";
 import { PosterCard } from "poster_card.slint";
+import { CardZoom } from "card_zoom.slint";
 import { EmptyState } from "empty_state.slint";
+
+// 一行卡片：标题 + 横向滚动 + 放大覆盖层。
+//
+// focused-index 是键盘焦点在本行内的局部索引（-1 表示焦点不在本行）；
+// 悬停（hot）优先于键盘焦点，同一时刻只放大一张卡。
+component CardRow inherits Rectangle {
+    in property <string> title;
+    in property <[CardData]> cards;
+    in property <length> card-width: 260px;
+    in property <length> card-height: 390px;
+    in property <int> focused-index: -1;
+    callback open-item(string);
+
+    property <int> hot: -1;
+    property <int> zoom-index: root.hot >= 0 ? root.hot : root.focused-index;
+    property <length> gap: Theme.card-gap;
+    // 放大后浮出的信息区高度（标题 + 元信息 + 进度条 + 边距）。
+    property <length> zoom-info: 76px;
+    property <float> zoom-factor: 1.0;
+
+    states [
+        zoomed when root.zoom-index >= 0 : {
+            zoom-factor: 1.08;
+            in {
+                animate zoom-factor {
+                    duration: 120ms;
+                    delay: 80ms;
+                    easing: ease-out;
+                }
+            }
+            out {
+                animate zoom-factor {
+                    duration: 120ms;
+                    easing: ease-out;
+                }
+            }
+        }
+    ]
+
+    height: Theme.section-title-height + Theme.space-3 + root.card-height + root.zoom-info;
+
+    // 行标题 + 查看全部。
+    HorizontalLayout {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Theme.section-title-height;
+        spacing: Theme.space-3;
+
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-22;
+            font-weight: Theme.weight-bold;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 1px;
+            background: transparent;
+        }
+
+        Rectangle {
+            width: more-label.preferred-width;
+            height: parent.height;
+            background: transparent;
+
+            more-label := Text {
+                width: parent.width;
+                height: parent.height;
+                text: "查看全部 ›";
+                color: more-area.has-hover ? Theme.text : Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-14;
+                vertical-alignment: center;
+            }
+
+            more-area := TouchArea {
+                clicked => {
+                    // 行内第一张卡就是"查看全部"的落点。
+                    if (root.cards.length > 0) {
+                        root.open-item(root.cards[0].id);
+                    }
+                }
+            }
+        }
+    }
+
+    // 横向滚动的基础卡片（尺寸恒定）。
+    flick := Flickable {
+        x: 0;
+        y: Theme.section-title-height + Theme.space-3;
+        width: parent.width;
+        height: root.card-height;
+        interactive: true;
+        content-width: row.preferred-width;
+        content-height: root.card-height;
+
+        row := HorizontalLayout {
+            spacing: root.gap;
+            height: root.card-height;
+
+            for card[i] in root.cards : PosterCard {
+                card: card;
+                card-width: root.card-width;
+                card-height: root.card-height;
+                clicked => {
+                    root.open-item(card.id);
+                }
+                hover-changed(has) => {
+                    if (has) {
+                        root.hot = i;
+                    } else if (root.hot == i) {
+                        root.hot = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    // 放大覆盖层：按 zoom-index 画一张放大的卡（后绘制 → 盖住相邻卡片）。
+    if (root.zoom-index >= 0 && root.zoom-index < root.cards.length) :
+        CardZoom {
+            property <length> zw: root.card-width * root.zoom-factor;
+            property <length> zh: root.card-height * root.zoom-factor;
+            // 基础卡中心（视口坐标）= idx*(w+gap) + w/2 - 滚动偏移；放大卡与它同心。
+            property <length> center-x: root.zoom-index * (root.card-width + root.gap)
+                + root.card-width / 2 - flick.content-x;
+            x: clamp(center-x - zw / 2, 0px, parent.width - zw);
+            y: Theme.section-title-height + Theme.space-3 + root.card-height / 2 - zh / 2;
+            width: zw;
+            card: root.cards[root.zoom-index];
+            base-width: root.card-width;
+            base-height: root.card-height;
+            zoom-factor: root.zoom-factor;
+            clicked => {
+                root.open-item(root.cards[root.zoom-index].id);
+            }
+        }
+}
 
 export component HomePage inherits Rectangle {
     in property <HomeData> data;
@@ -30,373 +175,351 @@ export component HomePage inherits Rectangle {
     // 空状态的“连接服务器”：真正的连接流程在上层（这里只发回调）。
     callback connect-server();
 
-    /// 把焦点交给搜索输入框（Ctrl+F / 点击胶囊时由上层调到这里）。
+    /// 把焦点交给搜索输入框（Ctrl+F / 点击搜索图标时由上层调到这里）。
     public function focus-input() {
         nav.focus-input();
     }
 
+    /// 直接设置首页纵向滚动偏移（testing 快照 / 键盘导航用，不经过滚轮动画）。
+    public function scroll-to-offset(y: length) {
+        flick.content-y = y;
+    }
+
     background: Theme.bg;
-    property <length> card-width: root.width < Theme.library-breakpoint
-        ? (root.width - Theme.gutter * 2 - Theme.card-gap * 3) / 4
-        : (root.width - Theme.gutter * 2 - Theme.card-gap * 5) / 6;
+
+    // billboard 占视口高度的比例（0.88 = 88vh）；testing 快照可调小以拍到行区。
+    in property <float> billboard-ratio: 0.88;
+
+    // 当前纵向滚动偏移（测试 / 调试用）。
+    out property <length> scroll-y: flick.content-y;
+
+    // 内容总高度：显式计算（不用 preferred-height —— 无头渲染器布局中途
+    // 会把未决的 preferred 读成 0，Flickable 会把 content-y 钳回 0）。
+    property <length> continue-row-h: Theme.section-title-height + Theme.space-3
+        + landscape-h + 76px;
+    property <length> recent-row-h: Theme.section-title-height + Theme.space-3
+        + portrait-h + 76px;
+    property <int> visible-blocks: (root.data.has-hero ? 1 : 0)
+        + (root.continue-count > 0 ? 1 : 0) + (root.recent-count > 0 ? 1 : 0);
+    property <length> content-total: (root.data.has-hero ? billboard-height : 0px)
+        + (root.continue-count > 0 ? continue-row-h : 0px)
+        + (root.recent-count > 0 ? recent-row-h : 0px)
+        + (root.visible-blocks > 0 ? (root.visible-blocks - 1) * Theme.section-gap : 0px)
+        + Theme.space-8;
+    out property <length> content-h: flick.content-height;
+
+    // Billboard：88vh、最大 720px。
+    property <length> billboard-height: min(self.height * root.billboard-ratio, Theme.billboard-max);
+    // 行卡片尺寸：继续观看 16:9（320px），最近添加 2:3（260px）。
+    property <length> landscape-w: 320px;
+    property <length> landscape-h: 180px;
+    property <length> portrait-w: 260px;
+    property <length> portrait-h: 390px;
     property <int> continue-count: root.data.continue-watching.length;
     property <int> recent-count: root.data.recently-added.length;
+    // 键盘焦点落到行内的局部索引（焦点不在该行时为 -1）。
+    property <int> continue-focus: root.focus-index < root.continue-count
+        ? root.focus-index : -1;
+    property <int> recent-focus: root.focus-index >= root.continue-count
+        ? root.focus-index - root.continue-count : -1;
 
-    // ---- 粘性标题的几何 ----
-    // 区块顶在视口坐标系里的位置（content-y 往上滚时为负）。
-    property <length> continue-top: section-continue.y + flick.content-y;
-    property <length> recent-top: section-recent.y + flick.content-y;
-    // 贴住视口顶，直到该区块只剩"标题 + 96px"才跟着划出去。
-    property <length> continue-sticky-y: min(
-        0px,
-        root.continue-top + section-continue.height - self.sticky-keep
-    );
-    property <length> recent-sticky-y: min(
-        0px,
-        root.recent-top + section-recent.height - self.sticky-keep
-    );
-    property <length> sticky-keep: Theme.section-title-height + Theme.section-title-reveal;
-    property <bool> show-continue-sticky: root.continue-count > 0
-        && root.continue-top < 0px
-        && root.continue-top + section-continue.height > 0px;
-    property <bool> show-recent-sticky: root.recent-count > 0
-        && root.recent-top < 0px
-        && root.recent-top + section-recent.height > 0px;
-
-    VerticalLayout {
-        nav := Navbar {
-            height: Theme.navbar-height;
-            tabs: root.data.tabs;
-            current-index: root.data.current-tab;
-            search-focused: root.search-focused;
-            search-text <=> root.search-text;
-            tab-activated(id) => {
-                root.tab-activated(id);
+    if (root.data.empty) :
+        EmptyState {
+            width: parent.width;
+            height: parent.height;
+            title: "媒体库还是空的";
+            message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
+            primary-label: "连接服务器";
+            secondary-label: "搜索本地缓存";
+            primary => {
+                root.connect-server();
             }
-            search => {
+            secondary => {
                 root.search();
-            }
-            search-changed(text) => {
-                root.search-changed(text);
-            }
-            search-submit => {
-                root.search-submit();
-            }
-            search-clear => {
-                root.search-clear();
-            }
-            search-escape => {
-                root.search-escape();
             }
         }
 
-        if (root.data.empty) :
-            EmptyState {
-                vertical-stretch: 1;
-                title: "媒体库还是空的";
-                message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
-                primary-label: "连接服务器";
-                secondary-label: "搜索本地缓存";
-                primary => {
-                    root.connect-server();
-                }
-                secondary => {
-                    root.search();
-                }
-            }
-        flick := Flickable {
-            visible: !root.data.empty;
-            vertical-stretch: 1;
-            interactive: true;
-            content-width: self.width;
-            content-height: content.preferred-height;
+    flick := Flickable {
+        visible: !root.data.empty;
+        width: parent.width;
+        height: parent.height;
+        interactive: true;
+        content-width: self.width;
+        content-height: root.content-total;
 
-                content := VerticalLayout {
+        content := VerticalLayout {
+            width: parent.width;
+            height: root.content-total;
+            spacing: Theme.section-gap;
+            padding-bottom: Theme.space-8;
+
+            // ---- Billboard ----
+            if (root.data.has-hero) :
+                hero := Rectangle {
                     width: parent.width;
-                    padding-left: Theme.gutter;
-                    padding-right: Theme.gutter;
-                    padding-bottom: Theme.space-8;
-                    spacing: Theme.section-gap;
+                    height: root.billboard-height;
+                    clip: true;
 
-                    // ---- Hero ----
-                    if (root.data.has-hero) :
-                        hero := Rectangle {
-                            height: Theme.hero-height;
-                            clip: true;
-                            border-radius: Theme.radius-panel;
-                            border-width: 1px;
-                            border-color: Theme.hairline;
-                            background: Theme.surface;
+                    Image {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.data.hero.image;
+                        image-fit: cover;
+                    }
 
-                            Image {
-                                x: 0;
-                                y: 0;
-                                width: parent.width;
-                                height: parent.height;
-                                source: root.data.hero.image;
-                                image-fit: cover;
-                            }
+                    // 底部渐变（#00000000 → #000000E6）。
+                    Rectangle {
+                        x: 0;
+                        y: parent.height * 0.4;
+                        width: parent.width;
+                        height: parent.height * 0.6;
+                        background: @linear-gradient(180deg, #00000000 0%, Theme.scrim 100%);
+                    }
 
-                            // 纯色半透明遮罩：保证压图文字可读，不用渐变。
+                    // 左侧横向渐变，保证文字可读。
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        background: @linear-gradient(90deg, Theme.scrim 0%, #00000000 65%);
+                    }
+
+                    // 文案块：左留白 60px，底边锚在 78% 高度（垂直居下 22%）。
+                    // 用固定高度容器 + alignment: end，不依赖 preferred-height 反推。
+                    Rectangle {
+                        x: Theme.billboard-left;
+                        width: parent.width - Theme.billboard-left - Theme.gutter;
+                        // 有简介：标题 58 + 元信息 20 + 简介 78 + 按钮 44 + 间距；无简介收紧。
+                        height: root.data.hero.overview != "" ? 240px : 160px;
+                        y: parent.height * 0.78 - self.height;
+                        background: transparent;
+
+                        VerticalLayout {
+                            width: parent.width;
+                            height: parent.height;
+                            alignment: end;
+                            spacing: Theme.space-3;
+
+                        Text {
+                            text: root.data.hero.title;
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-48;
+                            font-weight: Theme.weight-bold;
+                            height: 58px;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+
+                        Text {
+                            text: root.data.hero.subtitle;
+                            color: Theme.text-muted;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            height: 20px;
+                            overflow: elide;
+                            wrap: no-wrap;
+                            visible: root.data.hero.subtitle != "";
+                        }
+
+                        Text {
+                            text: root.data.hero.overview;
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-16;
+                            width: 560px;
+                            height: 78px;
+                            wrap: word-wrap;
+                            overflow: elide;
+                            visible: root.data.hero.overview != "";
+                        }
+
+                            HorizontalLayout {
+                                spacing: Theme.space-3;
+
+                            // ▶ 播放：白底黑字。
                             Rectangle {
-                                x: 0;
-                                y: 0;
-                                width: parent.width;
-                                height: parent.height;
-                                background: Theme.hero-scrim;
+                                width: Theme.play-button-width;
+                                height: Theme.button-primary-height;
+                                border-radius: Theme.radius-badge;
+                                background: Theme.btn-primary-bg;
+
+                                Rectangle {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: Theme.wash;
+                                    visible: hero-play-area.has-hover;
+                                }
+
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "▶  播放";
+                                    color: Theme.btn-primary-fg;
+                                    font-family: Theme.font-family;
+                                    font-size: Theme.font-14;
+                                    font-weight: Theme.weight-semibold;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                hero-play-area := TouchArea {
+                                    clicked => {
+                                        root.hero-play();
+                                    }
+                                }
                             }
 
-                            // badge 与海报卡一致：右上角。
-                            if (root.data.hero.badge != "") :
-                                Rectangle {
-                                    x: hero.width - self.width - Theme.space-6;
-                                    y: Theme.space-6;
-                                    width: hero-badge.preferred-width + Theme.space-3;
-                                    height: 24px;
-                                    border-radius: Theme.radius-badge;
-                                    background: Theme.badge-bg;
-                                    border-width: 1px;
-                                    border-color: Theme.hairline-strong;
+                            // ⓘ 更多信息：半透明白底。
+                            Rectangle {
+                                width: Theme.info-button-width;
+                                height: Theme.button-primary-height;
+                                border-radius: Theme.radius-badge;
+                                background: Theme.btn-secondary-bg;
 
-                                    hero-badge := Text {
-                                        x: Theme.space-2;
+                                Rectangle {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: Theme.wash;
+                                    visible: hero-info-area.has-hover;
+                                }
+
+                                HorizontalLayout {
+                                    x: Theme.space-3;
+                                    width: parent.width - Theme.space-3 * 2;
+                                    height: parent.height;
+                                    spacing: Theme.space-2;
+                                    cross-axis-alignment: center;
+
+                                    // ⓘ 图标：描边圆 + i，避免字体缺字形。
+                                    Rectangle {
+                                        width: 16px;
+                                        height: 16px;
+                                        border-radius: Theme.radius-pill;
+                                        border-width: 1.5px;
+                                        border-color: Theme.text;
+
+                                        Text {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text: "i";
+                                            color: Theme.text;
+                                            font-family: Theme.font-family;
+                                            font-size: 10px;
+                                            font-weight: Theme.weight-bold;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    Text {
                                         height: parent.height;
-                                        text: root.data.hero.badge;
-                                        color: Theme.accent;
+                                        text: "更多信息";
+                                        color: Theme.text;
                                         font-family: Theme.font-family;
-                                        font-size: Theme.font-12;
+                                        font-size: Theme.font-14;
                                         font-weight: Theme.weight-semibold;
                                         vertical-alignment: center;
                                     }
                                 }
 
-                            VerticalLayout {
-                                x: Theme.space-6;
-                                y: hero.height - self.height - Theme.space-6;
-                                width: hero.width - Theme.space-6 * 2;
-                                height: self.preferred-height;
-                                spacing: Theme.space-3;
-
-                                Text {
-                                    text: root.data.hero.title;
-                                    color: Theme.text;
-                                    font-family: Theme.font-family;
-                                    font-size: Theme.font-48;
-                                    font-weight: Theme.weight-bold;
-                                    overflow: elide;
-                                    wrap: no-wrap;
-                                }
-
-                                Text {
-                                    text: root.data.hero.subtitle;
-                                    color: Theme.text-muted;
-                                    font-family: Theme.font-family;
-                                    font-size: Theme.font-14;
-                                    overflow: elide;
-                                    wrap: no-wrap;
-                                    visible: root.data.hero.subtitle != "";
-                                }
-
-                                HorizontalLayout {
-                                    spacing: Theme.space-3;
-
-                                    Rectangle {
-                                        width: hero-play-label.preferred-width + Theme.space-6;
-                                        height: Theme.button-primary-height;
-                                        border-radius: Theme.radius-pill;
-                                        background: hero-play-area.has-hover ? Theme.accent-hover : Theme.accent;
-
-                                        hero-play-label := Text {
-                                            x: Theme.space-2;
-                                            height: parent.height;
-                                            text: "▶  播放";
-                                            color: Theme.accent-contrast;
-                                            font-family: Theme.font-family;
-                                            font-size: Theme.font-14;
-                                            font-weight: Theme.weight-semibold;
-                                            vertical-alignment: center;
-                                        }
-
-                                        hero-play-area := TouchArea {
-
-                                            clicked => {
-                                                root.hero-play();
-                                            }
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        width: hero-detail-label.preferred-width + Theme.space-6;
-                                        height: Theme.button-primary-height;
-                                        border-radius: Theme.radius-pill;
-                                        background: hero-detail-area.has-hover ? Theme.surface-raised : Theme.surface;
-                                        border-width: 1px;
-                                        border-color: Theme.hairline-strong;
-
-                                        hero-detail-label := Text {
-                                            x: Theme.space-2;
-                                            height: parent.height;
-                                            text: "详情";
-                                            color: Theme.text;
-                                            font-family: Theme.font-family;
-                                            font-size: Theme.font-14;
-                                            font-weight: Theme.weight-medium;
-                                            vertical-alignment: center;
-                                        }
-
-                                        hero-detail-area := TouchArea {
-
-                                            clicked => {
-                                                root.open-item(root.data.hero.id);
-                                            }
-                                        }
+                                hero-info-area := TouchArea {
+                                    clicked => {
+                                        root.open-item(root.data.hero.id);
                                     }
                                 }
                             }
-                        }
-
-                    // ---- 继续观看 ----
-                    // 用 `visible` 而不是 `if`：区块 id 始终存在，粘性标题才能读它的几何。
-                    section-continue := VerticalLayout {
-                        visible: root.continue-count > 0;
-                        spacing: Theme.space-4;
-
-                        HorizontalLayout {
-                            height: Theme.section-title-height;
-                            spacing: Theme.space-3;
-
-                            Text {
-                                text: "继续观看";
-                                color: Theme.text;
-                                font-family: Theme.font-family;
-                                font-size: Theme.font-22;
-                                font-weight: Theme.weight-semibold;
-                                vertical-alignment: center;
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 1px;
-                                background: transparent;
-                            }
-                        }
-
-                        FlexboxLayout {
-                            spacing: Theme.card-gap;
-
-                            for card[i] in root.data.continue-watching : PosterCard {
-                                item-id: card.id;
-                                title: card.title;
-                                subtitle: card.subtitle;
-                                badge: card.badge;
-                                progress: card.progress;
-                                progress-text: card.progress-text;
-                                initial: card.initial;
-                                image: card.image;
-                                poster-width: root.card-width;
-                                focused: root.focus-index == i;
-
-                                clicked => {
-                                    root.focus-index = i;
-                                    root.open-item(card.id);
-                                }
                             }
                         }
                     }
 
-                    // ---- 最近添加 ----
-                    section-recent := VerticalLayout {
-                        visible: root.recent-count > 0;
-                        spacing: Theme.space-4;
+                    // 右下角徽标：描边胶囊（4K / HDR）。
+                    if (root.data.hero.badge != "") :
+                        Rectangle {
+                            x: parent.width - self.width - Theme.billboard-left;
+                            y: parent.height * 0.78;
+                            width: hero-badge.preferred-width + Theme.space-3;
+                            height: 24px;
+                            border-radius: Theme.radius-badge;
+                            border-width: 1px;
+                            border-color: Theme.text-muted;
+                            background: transparent;
 
-                        HorizontalLayout {
-                            height: Theme.section-title-height;
-
-                            Text {
-                                text: "最近添加";
+                            hero-badge := Text {
+                                x: Theme.space-2;
+                                height: parent.height;
+                                text: root.data.hero.badge;
                                 color: Theme.text;
                                 font-family: Theme.font-family;
-                                font-size: Theme.font-22;
-                                font-weight: Theme.weight-semibold;
+                                font-size: Theme.font-12;
                                 vertical-alignment: center;
                             }
                         }
+                }
 
-                        FlexboxLayout {
-                            spacing: Theme.card-gap;
-
-                            for card[i] in root.data.recently-added : PosterCard {
-                                item-id: card.id;
-                                title: card.title;
-                                subtitle: card.subtitle;
-                                badge: card.badge;
-                                progress: card.progress;
-                                progress-text: card.progress-text;
-                                initial: card.initial;
-                                image: card.image;
-                                poster-width: root.card-width;
-                                focused: root.focus-index == root.continue-count + i;
-
-                                clicked => {
-                                    root.focus-index = root.continue-count + i;
-                                    root.open-item(card.id);
-                                }
-                            }
-                        }
+            // ---- 继续观看（16:9 横版缩略图）----
+            if (root.continue-count > 0) :
+                CardRow {
+                    width: parent.width;
+                    title: "继续观看";
+                    cards: root.data.continue-watching;
+                    card-width: root.landscape-w;
+                    card-height: root.landscape-h;
+                    focused-index: root.continue-focus;
+                    open-item(id) => {
+                        root.open-item(id);
                     }
                 }
-            }
+
+            // ---- 最近添加（2:3 竖版海报）----
+            if (root.recent-count > 0) :
+                CardRow {
+                    width: parent.width;
+                    title: "最近添加";
+                    cards: root.data.recently-added;
+                    card-width: root.portrait-w;
+                    card-height: root.portrait-h;
+                    focused-index: root.recent-focus;
+                    open-item(id) => {
+                        root.open-item(id);
+                    }
+                }
+        }
     }
 
-    // ---- 粘性区块标题层 ----
-    // 贴在视口顶上；只在区块顶部已经滚过视口顶时出现（此时正文里的标题已被裁掉）。
-    Rectangle {
-        visible: !root.data.empty && (root.show-continue-sticky || root.show-recent-sticky);
+    // 顶栏最后绘制：透明浮在 billboard 上；滚动 40px 后变实底。
+    nav := Navbar {
         x: 0;
-        y: Theme.navbar-height;
-        width: root.width;
-        height: flick.height;
-        background: transparent;
-        clip: true;
-
-        Rectangle {
-            visible: root.show-continue-sticky;
-            x: Theme.gutter;
-            y: root.continue-sticky-y;
-            width: parent.width - Theme.gutter * 2;
-            height: Theme.section-title-height;
-            background: Theme.bg;
-
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: "继续观看";
-                color: Theme.text;
-                font-family: Theme.font-family;
-                font-size: Theme.font-22;
-                font-weight: Theme.weight-semibold;
-                vertical-alignment: center;
-            }
+        y: 0;
+        width: parent.width;
+        height: Theme.navbar-height;
+        tabs: root.data.tabs;
+        current-index: root.data.current-tab;
+        scrolled: !root.data.empty && flick.content-y < -40px;
+        search-focused: root.search-focused;
+        search-text <=> root.search-text;
+        tab-activated(id) => {
+            root.tab-activated(id);
         }
-
-        Rectangle {
-            visible: root.show-recent-sticky;
-            x: Theme.gutter;
-            y: root.recent-sticky-y;
-            width: parent.width - Theme.gutter * 2;
-            height: Theme.section-title-height;
-            background: Theme.bg;
-
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: "最近添加";
-                color: Theme.text;
-                font-family: Theme.font-family;
-                font-size: Theme.font-22;
-                font-weight: Theme.weight-semibold;
-                vertical-alignment: center;
-            }
+        search => {
+            root.search();
+        }
+        search-changed(text) => {
+            root.search-changed(text);
+        }
+        search-submit => {
+            root.search-submit();
+        }
+        search-clear => {
+            root.search-clear();
+        }
+        search-escape => {
+            root.search-escape();
         }
     }
 }

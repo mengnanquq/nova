@@ -59,7 +59,9 @@ export component AppWindow inherits Window {
     // 拖动进度条时的气泡文本（Rust 侧用视图模型格式化）。
     in-out property <string> player-scrub-text: "";
     in-out property <bool> player-fullscreen: false;
-    out property <int> grid-columns: self.width < Theme.library-breakpoint ? 4 : 6;
+    out property <int> grid-columns: self.width < Theme.library-breakpoint ? 6 : 7;
+    // testing 快照用：压缩首页 billboard，让行区进入首屏。
+    in-out property <float> billboard-ratio: 0.88;
 
     // 回调只把事件送出去，业务判断留在 Rust。
     callback open-item(string);
@@ -243,6 +245,7 @@ export component AppWindow inherits Window {
                 height: parent.height;
                 visible: root.page == 0;
                 data: root.home;
+                billboard-ratio: root.billboard-ratio;
                 focus-index <=> root.home-focus;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
@@ -433,6 +436,14 @@ export component AppWindow inherits Window {
             lib-page.focus-input();
         }
     }
+
+    /// 直接设置首页纵向滚动偏移（testing 快照用，不经过滚轮动画）。
+    public function scroll-home-to(y: length) {
+        home-page.scroll-to-offset(y);
+    }
+
+    out property <length> home-scroll-y: home-page.scroll-y;
+    out property <length> home-content-h: home-page.content-h;
 
     // “添加服务器”对话框：绝对定位覆盖层（不进布局器，关闭后零残留）。
     add-server := AddServerDialog {

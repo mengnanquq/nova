@@ -32,6 +32,7 @@ nova-desktop — Nova 桌面应用（SQLite 缓存 + provider + 图片缓存 + S
   --capture <path.png>                  --play 的捕获模式（退出码 0 通过 / 3 不通过）
   --screenshot <path.png>               窗口自截：回读自己的 back buffer 写 PNG 后退出
   --screenshot-delay <ms>               自截前等多久（默认 1500；要看刷新后的标签就给 8000）
+  --debug-socket <path>                 本地调试通道（Unix socket，行分隔 JSON；见 docs/debugging.md）
   --seconds <n>                         捕获前播放多少秒（默认 5）
   --server <id>                         本机有多台服务器时指定一台
   --search <text>                        只用本地缓存过滤标题（不联网）
@@ -134,6 +135,8 @@ pub struct Cli {
     pub screenshot: Option<PathBuf>,
     /// `--screenshot-delay <ms>`：等待多久再截（等首帧/数据加载）。
     pub screenshot_delay_ms: u64,
+    /// `--debug-socket <path>`：本地调试通道（行分隔 JSON，见 `debug.rs`）。
+    pub debug_socket: Option<PathBuf>,
 }
 
 impl Cli {
@@ -154,6 +157,7 @@ impl Cli {
             max_first_frame: 1.5,
             screenshot: None,
             screenshot_delay_ms: 1500,
+            debug_socket: None,
         };
         let mut snapshot: Option<PathBuf> = None;
         let mut print_view = false;
@@ -209,6 +213,11 @@ impl Cli {
                 }
                 "--capture" => {
                     cli.capture = Some(PathBuf::from(next_value(argv, index, "--capture")?));
+                    index += 1;
+                }
+                "--debug-socket" => {
+                    cli.debug_socket =
+                        Some(PathBuf::from(next_value(argv, index, "--debug-socket")?));
                     index += 1;
                 }
                 "--screenshot" => {

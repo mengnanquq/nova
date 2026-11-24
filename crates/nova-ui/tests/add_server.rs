@@ -90,7 +90,7 @@ fn connect_button_and_ctrl_n_open_the_dialog() {
             *opened.borrow_mut() += 1;
         });
     }
-    click(&app, 570.0, 424.0);
+    click(&app, 554.0, 472.0);
     assert_eq!(*opened.borrow(), 1, "点击空态按钮应触发 connect-server");
 
     // Ctrl+N（全局加速键）：真实键盘事件经 .slint 映射为 intent 8，

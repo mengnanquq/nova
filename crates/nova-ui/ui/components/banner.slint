@@ -39,8 +39,8 @@ export component Banner inherits Rectangle {
 
         Text {
             text: root.text;
-            // warning / danger 用深色文字保证对比度；info 是面板底，正常文字色。
-            color: root.level == 0 ? Theme.text : Theme.accent-contrast;
+            // warning / danger 用深色文字保证对比度（橙 / 红底）；info 是面板底，正常文字色。
+            color: root.level == 0 ? Theme.text : Theme.btn-primary-fg;
             font-family: Theme.font-family;
             font-size: Theme.font-14;
             font-weight: root.level == 0 ? Theme.weight-regular : Theme.weight-semibold;
@@ -54,7 +54,7 @@ export component Banner inherits Rectangle {
             width: banner-action-text.preferred-width + Theme.space-3 * 2;
             height: 32px;
             border-radius: Theme.radius-badge;
-            background: root.level == 0 ? Theme.surface : Theme.accent-contrast;
+            background: root.level == 0 ? Theme.surface : Theme.btn-primary-bg;
             border-width: root.level == 0 ? 1px : 0px;
             border-color: Theme.hairline-strong;
 
@@ -62,8 +62,8 @@ export component Banner inherits Rectangle {
                 x: Theme.space-3;
                 height: parent.height;
                 text: root.action-label;
-                // info 态：surface 底 + 正常文字；warning / danger 态：深色底 + 主文字色。
-                color: Theme.text;
+                // info 态：surface 底 + 正常文字；warning / danger 态：白底黑字。
+                color: root.level == 0 ? Theme.text : Theme.btn-primary-fg;
                 font-family: Theme.font-family;
                 font-size: Theme.font-12;
                 font-weight: Theme.weight-semibold;

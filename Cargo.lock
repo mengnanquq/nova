@@ -3389,6 +3389,7 @@ dependencies = [
  "nova-storage",
  "nova-ui",
  "png 0.18.1",
+ "serde_json",
  "slint",
  "tempfile",
  "thiserror 2.0.21",

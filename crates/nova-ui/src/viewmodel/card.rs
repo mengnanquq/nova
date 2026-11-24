@@ -19,6 +19,8 @@ pub struct CardView {
     pub progress: Option<f32>,
     /// 角标：`"4K"` / `"HDR"` / `"S01E05"`。
     pub badge: Option<String>,
+    /// 简介：只有首页 billboard 用到（最多 3 行）。
+    pub overview: Option<String>,
 }
 
 impl CardView {
@@ -46,6 +48,12 @@ impl CardView {
     /// 设置角标。
     pub fn with_badge(mut self, badge: impl Into<String>) -> Self {
         self.badge = Some(badge.into());
+        self
+    }
+
+    /// 设置简介（billboard 用）。
+    pub fn with_overview(mut self, overview: impl Into<String>) -> Self {
+        self.overview = Some(overview.into());
         self
     }
 

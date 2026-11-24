@@ -88,7 +88,7 @@ struct UiState {
 }
 
 /// 主线程上的装配体。
-struct Shell {
+pub(crate) struct Shell {
     app: Rc<App>,
     local: Arc<Local>,
     runtime: Handle,
@@ -97,6 +97,8 @@ struct Shell {
     state: RefCell<UiState>,
     /// 与渲染 notifier 共享的 mpv 引擎状态（所有 GL 调用都在主线程）。
     host: Rc<RefCell<player::Host>>,
+    /// 调试通道请求的自截：等到回读结果就写到这个路径。
+    pending_shot: RefCell<Option<std::path::PathBuf>>,
     /// 图片下载器（登录成功后切换 provider 用；与 `images` 里的 fetcher 同一个）。
     fetcher: Arc<ProviderFetcher>,
     /// 播放页控制器；只在播放页打开时存在。
@@ -159,6 +161,7 @@ pub fn run_window(
     runtime: Handle,
     start: Option<StartPlay>,
     screenshot: Option<(std::path::PathBuf, u64)>,
+    debug_socket: Option<std::path::PathBuf>,
 ) -> Result<(), AppError> {
     let ui = AppWindow::new()?;
     let app = Rc::new(App::new_with(ui));
@@ -202,6 +205,7 @@ pub fn run_window(
             player: None,
         }),
         host,
+        pending_shot: RefCell::new(None),
         player: RefCell::new(None),
         timer: slint::Timer::default(),
         pending_capture: RefCell::new(None),
@@ -236,6 +240,54 @@ pub fn run_window(
 
     // 窗口必须显式 show 才会被后端映射、才会开始出渲染回调（`run_event_loop` 只跑循环）。
     app.ui().show()?;
+
+    // 调试通道：socket 线程只负责收发，命令排队到 UI 线程执行（50ms 轮询）。
+    let debug_timer = if let Some(path) = debug_socket {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<crate::debug::Job>();
+        crate::debug::serve(path, job_tx);
+        let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
+        let weak = Rc::downgrade(&shell);
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(50),
+            move || {
+                let Some(shell) = weak.upgrade() else {
+                    return;
+                };
+                // 命令：逐条在 UI 线程执行，回信给调试线程。
+                let jobs: Vec<crate::debug::Job> = match job_rx.lock() {
+                    Ok(receiver) => receiver.try_iter().collect(),
+                    Err(poisoned) => poisoned.into_inner().try_iter().collect(),
+                };
+                for (command, reply) in jobs {
+                    let _ = reply.send(shell.debug_execute(command));
+                }
+                // 自截：等回读结果到了再写盘。
+                let pending = shell.pending_shot.borrow().clone();
+                if let Some(path) = pending
+                    && let Some((frame, error)) = shell.host.borrow_mut().take_shot()
+                {
+                    *shell.pending_shot.borrow_mut() = None;
+                    match error {
+                        Some(error) => tracing::warn!(%error, "调试自截失败"),
+                        None => match player::gl::write_png(&path, &frame) {
+                            Ok(()) => tracing::info!(
+                                path = %path.display(),
+                                width = frame.width,
+                                height = frame.height,
+                                "调试自截已保存"
+                            ),
+                            Err(error) => tracing::warn!(%error, "调试自截写盘失败"),
+                        },
+                    }
+                }
+            },
+        );
+        Some(timer)
+    } else {
+        None
+    };
 
     // 窗口自截（`--screenshot`）：等界面稳定后回读自己的 back buffer 写 PNG 再退出。
     // 走 `glReadPixels`（与播放捕获同一条路径），只含 Nova 自己的窗口，
@@ -281,6 +333,7 @@ pub fn run_window(
 
     let result = slint::run_event_loop();
     drop(screenshot_timer);
+    drop(debug_timer);
     // 窗口关掉之前先把会话收尾（进度落盘），再摘掉 thread-local 的 Shell。
     if let Some(shell) = SHELL.with(|slot| slot.borrow().clone()) {
         shell.stop_playback();
@@ -425,6 +478,95 @@ impl Shell {
     }
 
     /// 把图片键交给后台装载；到达后在主线程 `set_image`。
+    /// 调试通道的命令执行入口（在 UI 线程上被调用）。
+    pub(crate) fn debug_execute(&self, command: crate::debug::Command) -> serde_json::Value {
+        let shell = self;
+        use crate::debug::Command as Cmd;
+        match command {
+            Cmd::View => {
+                let state = shell.state.borrow();
+                let route = shell.app.current_route();
+                serde_json::json!({
+                    "ok": true,
+                    "route": format!("{route:?}"),
+                    "status": format!("{:?}", state.status),
+                    "home": {
+                        "hero": state.home.hero.as_ref().map(|card| card.title.clone()),
+                        "recent": state.home.recently_added.len(),
+                        "continue": state.home.continue_watching.len(),
+                        "tabs": state.home.library_tabs.iter().map(|tab| tab.title.clone()).collect::<Vec<_>>(),
+                    },
+                    "library": state.library.as_ref().map(|view| serde_json::json!({
+                        "title": view.title,
+                        "count": view.cards.len(),
+                        "current_tab": view.current_tab,
+                    })),
+                    "detail": state.detail.as_ref().map(|view| view.title.clone()),
+                })
+            }
+            Cmd::Route { value, item } => match value.as_str() {
+                "home" => {
+                    shell.activate_tab(crate::local::HOME_TAB_ID);
+                    serde_json::json!({ "ok": true, "route": "home" })
+                }
+                "library" => {
+                    let tab = shell
+                        .state
+                        .borrow()
+                        .home
+                        .library_tabs
+                        .iter()
+                        .find(|tab| tab.id != crate::local::HOME_TAB_ID)
+                        .map(|tab| tab.id.clone());
+                    match tab {
+                        Some(id) => {
+                            shell.activate_tab(&id);
+                            serde_json::json!({ "ok": true, "route": "library", "library": id })
+                        }
+                        None => serde_json::json!({ "ok": false, "error": "没有可用的媒体库标签" }),
+                    }
+                }
+                "detail" | "player" => match item {
+                    Some(item) if value == "detail" => {
+                        // 走界面的导航入口：它会 push 路由并回调 `open_detail` 加载数据。
+                        // 只调 `open_detail` 只准备数据、不切页（实测截图仍停在首页）。
+                        shell.app.open_detail(&item);
+                        serde_json::json!({ "ok": true, "route": "detail", "item": item })
+                    }
+                    Some(_) => serde_json::json!({
+                        "ok": false,
+                        "error": "player 路由请用 `--play <id>` 启动（需要整套播放会话）",
+                    }),
+                    None => serde_json::json!({ "ok": false, "error": "detail 路由需要 item" }),
+                },
+                other => serde_json::json!({ "ok": false, "error": format!("未知路由 `{other}`") }),
+            },
+            Cmd::Open { item } => {
+                shell.app.open_detail(&item);
+                serde_json::json!({ "ok": true, "item": item })
+            }
+            Cmd::Tab { library } => {
+                shell.activate_tab(&library);
+                serde_json::json!({ "ok": true, "library": library })
+            }
+            Cmd::Search { term } => {
+                shell.apply_search(&term);
+                serde_json::json!({ "ok": true, "term": term })
+            }
+            Cmd::Screenshot { path } => {
+                *shell.pending_shot.borrow_mut() = Some(path.clone());
+                shell.host.borrow_mut().request_capture();
+                shell.app.ui().window().request_redraw();
+                serde_json::json!({ "ok": true, "queued": true, "path": path.display().to_string() })
+            }
+            Cmd::Quit => {
+                let _ = shell.app.ui().hide();
+                let _ = slint::quit_event_loop();
+                serde_json::json!({ "ok": true, "quit": true })
+            }
+        }
+    }
+
     fn request_images(&self, keys: Vec<ImageKey>) {
         request_images(
             &self.images,
@@ -988,6 +1130,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
     }
 }
 
+/// 调试通道的命令执行入口（在 UI 线程上被调用）。
 fn request_images(
     images: &Arc<ImageService>,
     local: &Arc<Local>,

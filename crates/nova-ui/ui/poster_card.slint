@@ -1,150 +1,98 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 海报卡：2:3 竖版图 + 标题 + 副标题/进度。
+//! 基础卡片：行 / 网格里的固定尺寸缩略图（含角标与底部进度条）。
 //!
-//! 图片为空时显示 `surface-raised` 底 + 首字母占位。占位与图片共用同一个
-//! 固定尺寸的容器（`poster-height = poster-width * 1.5`），所以图片加载完成
-//! 前后布局尺寸完全一致，不会跳动。
+//! 尺寸只由 card-width / card-height 决定，与图片是否已加载无关；
+//! 放大效果由独立的 `CardZoom` 覆盖层负责（不在这里做，避免布局跳动）。
 
 import { Theme } from "theme.slint";
-import { FocusRing } from "focus_ring.slint";
-import { ProgressBar } from "progress_bar.slint";
+import { CardData } from "models.slint";
 
 export component PosterCard inherits Rectangle {
-    in property <string> item-id: "";
-    in property <string> title: "";
-    in property <string> subtitle: "";
-    in property <string> badge: "";
-    in property <float> progress: -1;
-    // 保留字段（供上层继续传）：卡片不再渲染百分比文字，进度只用底部 2px 条表达。
-    in property <string> progress-text: "";
-    in property <string> initial: "";
-    in property <image> image;
-    in property <length> poster-width: 184px;
-    in-out property <bool> focused: false;
+    in property <CardData> card;
+    in property <length> card-width: 260px;
+    in property <length> card-height: 390px;
     callback clicked();
+    // 悬停状态上报给行（行用它在覆盖层里放大这张卡）。
+    callback hover-changed(bool);
 
-    width: poster-width;
-    height: poster-height + Theme.space-3 + 20px + Theme.space-1 + 18px;
-    property <length> poster-height: poster-width * 1.5;
-    property <bool> hovered: card-area.has-hover;
+    width: card-width;
+    height: card-height;
+    clip: true;
+    border-radius: Theme.radius-poster;
+    background: Theme.surface;
 
-    // 海报容器：尺寸只由 poster-width 决定，与图片是否已加载无关。
-    poster := Rectangle {
-        x: 0;
-        y: 0;
-        width: root.poster-width;
-        height: root.poster-height;
-        clip: true;
+    // 占位底色 + 首字母（图片为空时才可见）。
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: root.card.image.width > 0 ? transparent : Theme.surface-raised;
         border-radius: Theme.radius-poster;
-        border-width: 1px;
-        border-color: root.hovered ? Theme.hairline-strong : Theme.hairline;
-        background: Theme.surface;
 
-        // 占位底色 + 首字母（图片为空时才可见）。
+        Text {
+            text: root.card.initial;
+            color: Theme.text-faint;
+            font-family: Theme.font-family;
+            font-size: Theme.font-34;
+            font-weight: Theme.weight-bold;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            visible: root.card.image.width <= 0;
+        }
+    }
+
+    Image {
+        width: parent.width;
+        height: parent.height;
+        source: root.card.image;
+        image-fit: cover;
+    }
+
+    if (root.card.badge != "") :
+        Rectangle {
+            x: parent.width - self.width - Theme.space-2;
+            y: Theme.space-2;
+            width: badge-label.preferred-width + Theme.space-3;
+            height: 20px;
+            border-radius: Theme.radius-badge;
+            background: Theme.badge-bg;
+
+            badge-label := Text {
+                x: Theme.space-1;
+                width: parent.width;
+                height: parent.height;
+                text: root.card.badge;
+                color: Theme.text;
+                font-family: Theme.font-family;
+                font-size: Theme.font-12;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+        }
+
+    // 底部进度条：3px accent，贴底。
+    if (root.card.progress >= 0) :
         Rectangle {
             x: 0;
-            y: 0;
+            y: parent.height - self.height;
             width: parent.width;
-            height: parent.height;
-            background: root.image.width > 0 ? transparent : Theme.surface-raised;
-            border-radius: Theme.radius-poster;
+            height: 3px;
+            background: Theme.player-track;
 
-            Text {
-                text: root.initial;
-                color: root.focused ? Theme.accent : Theme.text-faint;
-                font-family: Theme.font-family;
-                font-size: Theme.font-34;
-                font-weight: Theme.weight-bold;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                visible: root.image.width <= 0;
-            }
-        }
-
-        Image {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            height: parent.height;
-            source: root.image;
-            image-fit: cover;
-        }
-
-        if (root.badge != "") :
             Rectangle {
-                x: poster.width - self.width - Theme.space-2;
-                y: Theme.space-2;
-                width: badge-label.preferred-width + Theme.space-3;
-                height: 20px;
-                border-radius: Theme.radius-badge;
-                background: Theme.badge-bg;
-
-                badge-label := Text {
-                    x: Theme.space-1;
-                    width: parent.width;
-                    height: parent.height;
-                    text: root.badge;
-                    color: Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-12;
-                    font-weight: Theme.weight-semibold;
-                    vertical-alignment: center;
-                }
-            }
-
-        // 进度条：只有 2px 高、贴底部留 1px 边距；不再叠百分比文字。
-        if (root.progress >= 0) :
-            ProgressBar {
                 x: 0;
-                y: poster.height - self.height - 1px;
-                width: poster.width;
-                height: 2px;
-                value: root.progress;
-                track-height: 2px;
+                y: 0;
+                height: parent.height;
+                width: parent.width * clamp(root.card.progress, 0, 1);
+                background: Theme.accent;
             }
-    }
-
-    Text {
-        x: 0;
-        y: poster.height + Theme.space-3;
-        width: root.poster-width;
-        height: 20px;
-        text: root.title;
-        color: root.focused ? Theme.accent : Theme.text;
-        font-family: Theme.font-family;
-        font-size: Theme.font-16;
-        font-weight: Theme.weight-semibold;
-        vertical-alignment: center;
-        overflow: elide;
-        wrap: no-wrap;
-    }
-
-    Text {
-        x: 0;
-        y: poster.height + Theme.space-3 + 20px + Theme.space-1;
-        width: root.poster-width;
-        height: 18px;
-        text: root.subtitle;
-        color: Theme.text-muted;
-        font-family: Theme.font-family;
-        font-size: Theme.font-12;
-        vertical-alignment: center;
-        overflow: elide;
-        wrap: no-wrap;
-    }
-
-    FocusRing {
-        x: -Theme.focus-offset;
-        y: -Theme.focus-offset;
-        width: root.width + Theme.focus-offset * 2;
-        height: root.height + Theme.focus-offset * 2;
-        active: root.focused;
-        ring-radius: Theme.radius-poster + Theme.focus-offset;
-    }
+        }
 
     card-area := TouchArea {
+        changed has-hover => {
+            root.hover-changed(self.has-hover);
+        }
         clicked => {
             root.clicked();
         }

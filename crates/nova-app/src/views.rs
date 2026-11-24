@@ -141,6 +141,10 @@ pub fn card_view(item: &MediaItem) -> CardView {
     if let Some(subtitle) = subtitle_for(item) {
         card = card.with_subtitle(subtitle);
     }
+    if let Some(overview) = &item.overview {
+        // billboard 最多 3 行简介；这里不截断，交给界面裁剪。
+        card = card.with_overview(overview.clone());
+    }
     if let Some(progress) = progress {
         card = card.with_progress(progress);
     }

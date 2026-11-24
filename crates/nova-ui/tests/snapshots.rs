@@ -16,9 +16,8 @@ use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
 fn capture(app: &App, name: &str) {
-    app.ui()
-        .window()
-        .set_size(slint::LogicalSize::new(1280.0, 800.0));
+    // 窗口在创建时已定为 1280x800；这里不能再 set_size ——
+    // 重新设置尺寸会把 Flickable 的滚动偏移重置为 0，快照会拍到未滚动的帧。
     let snapshot = app.ui().window().take_snapshot().unwrap();
     let path = snapshots_dir().join(name);
     write_png(&path, &snapshot);
@@ -52,6 +51,14 @@ fn write_all_snapshots() {
     app.ui().set_home_focus(2);
     app.show_page(Page::Home);
     capture(&app, "home-filled.png");
+    // Netflix 风格首页（同帧另存，供 UI 重设计验收）。
+    capture(&app, "netflix-home.png");
+
+    // 卡片聚焦放大覆盖层：headless 渲染器不落 Flickable 视口偏移，
+    // 改用压缩 billboard 让行区进入首屏（真实窗口用滚轮/滚动验证）。
+    app.ui().set_billboard_ratio(0.2);
+    capture(&app, "netflix-card-focused.png");
+    app.ui().set_billboard_ratio(0.88);
 
     // 2a. 顶部横幅（warning + 动作按钮）：必须在滚动前拍——
     // 横幅只应把内容整体下移 48px，元素尺寸不变（卡片高度与 home-filled 逐像素一致）。
@@ -107,6 +114,7 @@ fn write_all_snapshots() {
     app.open_library(&library);
     app.ui().set_library_focus(4);
     capture(&app, "library.png");
+    capture(&app, "netflix-library.png");
 
     // 4. 详情页
     let detail = detail_view();
@@ -116,6 +124,7 @@ fn write_all_snapshots() {
     app.ui().set_detail_focus(0);
     app.show_page(Page::Detail);
     capture(&app, "detail.png");
+    capture(&app, "netflix-detail.png");
 
     // 5. 播放页：控制层可见（先用详情页 → 播放，让播放页拿到真实条目 id 与背景图）
     app.open_detail("dune");

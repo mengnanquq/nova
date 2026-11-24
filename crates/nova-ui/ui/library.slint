@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 媒体库：标题 + 排序条外观 + 6 列（<1280 为 4 列）2:3 海报网格 + 滚动。
+//! 媒体库（Netflix 风格）：标题 + 数量、6 列（≥1440 宽 7 列）2:3 网格、12px 间距。
+//!
+//! 放大用独立覆盖层（`CardZoom`）：网格里基础卡片尺寸恒定，
+//! 覆盖层按焦点/悬停索引定位绘制，后绘制盖住相邻卡片，布局零跳动。
 
 import { Theme } from "theme.slint";
 import { LibraryData } from "models.slint";
 import { Navbar } from "navbar.slint";
 import { PosterCard } from "poster_card.slint";
+import { CardZoom } from "card_zoom.slint";
 import { EmptyState } from "empty_state.slint";
 
 export component LibraryPage inherits Rectangle {
@@ -25,141 +29,199 @@ export component LibraryPage inherits Rectangle {
     callback search-clear();
     callback search-escape();
 
-    /// 把焦点交给搜索输入框（Ctrl+F / 点击胶囊时由上层调到这里）。
+    /// 把焦点交给搜索输入框（Ctrl+F / 点击搜索图标时由上层调到这里）。
     public function focus-input() {
         nav.focus-input();
     }
 
     background: Theme.bg;
-    property <length> card-width: root.width < Theme.library-breakpoint
-        ? (root.width - Theme.gutter * 2 - Theme.card-gap * 3) / 4
-        : (root.width - Theme.gutter * 2 - Theme.card-gap * 5) / 6;
 
-    VerticalLayout {
-        nav := Navbar {
-            height: Theme.navbar-height;
-            tabs: root.data.tabs;
-            current-index: root.data.current-tab;
-            search-focused: root.search-focused;
-            search-text <=> root.search-text;
-            tab-activated(id) => {
-                root.tab-activated(id);
+    // 网格几何：6 列（≥1440 用 7 列），2:3 卡片，12px 间距。
+    property <int> columns: root.width < Theme.library-breakpoint ? 6 : 7;
+    property <length> card-width: (root.width - Theme.gutter * 2 - Theme.card-gap * (root.columns - 1))
+        / root.columns;
+    property <length> card-height: root.card-width * 1.5;
+    property <int> card-count: root.data.cards.length;
+    // 放大后浮出的信息区高度。
+    property <length> zoom-info: 76px;
+    property <float> zoom-factor: 1.0;
+    property <int> zoom-index: root.focus-index;
+    // 网格几何：行高含放大信息区。
+    property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.font-34 + Theme.space-4;
+    property <int> grid-rows: (root.card-count + root.columns - 1) / root.columns;
+    property <length> row-height: root.card-height + root.zoom-info;
+    property <length> grid-height: root.grid-rows * root.row-height;
+
+    states [
+        zoomed when root.zoom-index >= 0 && root.zoom-index < root.card-count : {
+            zoom-factor: 1.08;
+            in {
+                animate zoom-factor {
+                    duration: 120ms;
+                    delay: 80ms;
+                    easing: ease-out;
+                }
             }
-            search => {
+            out {
+                animate zoom-factor {
+                    duration: 120ms;
+                    easing: ease-out;
+                }
+            }
+        }
+    ]
+
+    if (root.data.empty) :
+        EmptyState {
+            width: parent.width;
+            height: parent.height;
+            title: root.data.title + " 里还没有内容";
+            message: "同步完成后，海报会出现在这里。";
+            primary-label: "重新搜索";
+            primary => {
                 root.search();
-            }
-            search-changed(text) => {
-                root.search-changed(text);
-            }
-            search-submit => {
-                root.search-submit();
-            }
-            search-clear => {
-                root.search-clear();
-            }
-            search-escape => {
-                root.search-escape();
             }
         }
 
-        if (root.data.empty) :
-            EmptyState {
-                vertical-stretch: 1;
-                title: root.data.title + " 里还没有内容";
-                message: "同步完成后，海报会出现在这里。";
-                primary-label: "重新搜索";
-                primary => {
-                    root.search();
-                }
-            }
-        if (!root.data.empty) :
-            Flickable {
-                vertical-stretch: 1;
-                interactive: true;
-                content-width: self.width;
-                content-height: content.preferred-height;
+    grid-flick := Flickable {
+        visible: !root.data.empty;
+        width: parent.width;
+        height: parent.height;
+            interactive: true;
+            content-width: self.width;
+            content-height: content.height;
 
-                content := VerticalLayout {
-                    width: parent.width;
-                    padding-left: Theme.gutter;
-                    padding-right: Theme.gutter;
-                    padding-top: Theme.space-6;
-                    padding-bottom: Theme.space-8;
-                    spacing: Theme.block-gap;
+            content := Rectangle {
+                width: parent.width;
 
-                    HorizontalLayout {
-                        spacing: Theme.space-4;
+                // 标题 + 数量 + 排序。
+                HorizontalLayout {
+                    x: Theme.gutter;
+                    y: Theme.navbar-height + Theme.space-5;
+                    width: parent.width - Theme.gutter * 2;
+                    height: Theme.font-34;
+                    spacing: Theme.space-4;
 
-                        Text {
-                            text: root.data.title;
+                    Text {
+                        text: root.data.title;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-34;
+                        font-weight: Theme.weight-bold;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.data.count-text;
+                        color: Theme.text-muted;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-14;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 1px;
+                        background: transparent;
+                    }
+
+                    Rectangle {
+                        width: sort-label.preferred-width + Theme.space-5;
+                        height: 36px;
+                        border-radius: Theme.radius-badge;
+                        background: sort-area.has-hover ? Theme.surface-raised : Theme.btn-secondary-bg;
+
+                        sort-label := Text {
+                            x: Theme.space-3;
+                            height: parent.height;
+                            text: root.data.sort-label + "  ▼";
                             color: Theme.text;
                             font-family: Theme.font-family;
-                            font-size: Theme.font-34;
-                            font-weight: Theme.weight-bold;
-                        }
-
-                        Text {
-                            text: root.data.count-text;
-                            color: Theme.text-faint;
-                            font-family: Theme.font-family;
-                            font-size: Theme.font-14;
+                            font-size: Theme.font-12;
                             vertical-alignment: center;
                         }
 
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            height: 1px;
-                            background: transparent;
-                        }
-
-                        Rectangle {
-                            width: sort-label.preferred-width + Theme.space-5;
-                            height: 36px;
-                            border-radius: Theme.radius-pill;
-                            background: sort-area.has-hover ? Theme.surface-raised : Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.hairline;
-
-                            sort-label := Text {
-                                x: Theme.space-3;
-                                height: parent.height;
-                                text: root.data.sort-label + "  ⌄";
-                                color: Theme.text-muted;
-                                font-family: Theme.font-family;
-                                font-size: Theme.font-12;
-                                vertical-alignment: center;
-                            }
-
-                            sort-area := TouchArea {
-
-                                clicked => {
-                                    root.sort();
-                                }
-                            }
-                        }
-                    }
-
-                    FlexboxLayout {
-                        spacing: Theme.card-gap;
-                        for card[i] in root.data.cards : PosterCard {
-                            item-id: card.id;
-                            title: card.title;
-                            subtitle: card.subtitle;
-                            badge: card.badge;
-                            progress: card.progress;
-                            progress-text: card.progress-text;
-                            initial: card.initial;
-                            image: card.image;
-                            poster-width: root.card-width;
-                            focused: root.focus-index == i;
-
+                        sort-area := TouchArea {
                             clicked => {
-                                root.focus-index = i;
-                                root.open-item(card.id);
+                                root.sort();
                             }
                         }
                     }
                 }
+
+                // 网格：手工定位（列数固定，位置可计算），行高含放大信息区。
+                for card[i] in root.data.cards : PosterCard {
+                    x: Theme.gutter + mod(i, root.columns) * (root.card-width + Theme.card-gap);
+                    y: grid-y + floor(i / root.columns) * row-height;
+                    card: card;
+                    card-width: root.card-width;
+                    card-height: root.card-height;
+                    clicked => {
+                        root.open-item(card.id);
+                    }
+                    hover-changed(has) => {
+                        // 网格的放大跟随键盘焦点；悬停时移过去。
+                        if (has) {
+                            root.focus-index = i;
+                        }
+                    }
+                }
+
+                // 放大覆盖层。
+                if (root.zoom-index >= 0 && root.zoom-index < root.card-count) :
+                    CardZoom {
+                        property <length> zw: root.card-width * root.zoom-factor;
+                        property <length> zh: root.card-height * root.zoom-factor;
+                        property <length> center-x: Theme.gutter
+                            + mod(root.zoom-index, root.columns) * (root.card-width + Theme.card-gap)
+                            + root.card-width / 2;
+                        property <length> center-y: grid-y
+                            + floor(root.zoom-index / root.columns) * row-height
+                            + root.card-height / 2;
+                        x: clamp(center-x - zw / 2, Theme.gutter, parent.width - Theme.gutter - zw);
+                        y: clamp(center-y - zh / 2, Theme.navbar-height, parent.height - zh);
+                        width: zw;
+                        card: root.data.cards[root.zoom-index];
+                        base-width: root.card-width;
+                        base-height: root.card-height;
+                        zoom-factor: root.zoom-factor;
+                        clicked => {
+                            root.open-item(root.data.cards[root.zoom-index].id);
+                        }
+                    }
+
+                height: grid-y + grid-height + Theme.space-8;
             }
+        }
+
+    // 顶栏最后绘制：透明浮在网格上；滚动 40px 后变实底。
+    nav := Navbar {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Theme.navbar-height;
+        tabs: root.data.tabs;
+        current-index: root.data.current-tab;
+        scrolled: !root.data.empty && grid-flick.content-y < -40px;
+        search-focused: root.search-focused;
+        search-text <=> root.search-text;
+        tab-activated(id) => {
+            root.tab-activated(id);
+        }
+        search => {
+            root.search();
+        }
+        search-changed(text) => {
+            root.search-changed(text);
+        }
+        search-submit => {
+            root.search-submit();
+        }
+        search-clear => {
+            root.search-clear();
+        }
+        search-escape => {
+            root.search-escape();
+        }
     }
 }

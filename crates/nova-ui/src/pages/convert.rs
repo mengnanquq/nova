@@ -34,6 +34,7 @@ pub fn card_data(card: &CardView, images: &ImageStore) -> CardData {
         id: card.item_id.clone().into(),
         title: card.title.clone().into(),
         subtitle: card.subtitle.clone().unwrap_or_default().into(),
+        overview: card.overview.clone().unwrap_or_default().into(),
         badge: card.badge.clone().unwrap_or_default().into(),
         progress: card.progress.unwrap_or(-1.0),
         progress_text: card.progress_percent().into(),
@@ -127,6 +128,20 @@ pub fn detail_data(view: &DetailView, images: &ImageStore) -> DetailData {
         poster: image_or_empty(images, &view.poster_key()),
         backdrop: image_or_empty(images, &view.backdrop_key()),
         sources: model(view.sources.iter().map(source_data).collect()),
+        selected_source_label: view
+            .sources
+            .iter()
+            .find(|source| source.selected)
+            .map(|source| source.title.clone())
+            .unwrap_or_default()
+            .into(),
+        genres_line: view
+            .genres
+            .iter()
+            .map(|genre| genre.as_str())
+            .collect::<Vec<&str>>()
+            .join(" · ")
+            .into(),
     }
 }
 

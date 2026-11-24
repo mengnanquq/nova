@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 详情页：背景压暗 + 海报 + 标题/元信息/简介/类型 + 播放按钮 + 多版本选择。
+//! 详情页（Netflix 风格）：全宽 backdrop（60vh）+ 上下双向渐变、
+//! 42px 标题、`·` 分隔的元信息、640px 简介、`▶ 播放` + `+ 我的列表`、
+//! NETFLIX 风格的版本下拉（替换三行列表）。
 
 import { Theme } from "theme.slint";
 import { DetailData } from "models.slint";
@@ -17,223 +19,214 @@ export component DetailPage inherits Rectangle {
 
     background: Theme.bg;
 
-    Image {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: parent.height;
-        source: root.data.backdrop;
-        image-fit: cover;
-        visible: root.data.backdrop.width > 0;
-    }
+    // "我的列表"是纯视觉态：点击切换，不落数据。
+    in-out property <bool> in-my-list: false;
+    in-out property <bool> drop-open: false;
 
-    // 压暗背景：纯色半透明，保证文字对比度。
-    Rectangle {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: parent.height;
-        background: Theme.scrim;
-    }
+    property <length> backdrop-height: self.height * 0.6;
 
-    Flickable {
+    flick := Flickable {
         width: parent.width;
         height: parent.height;
         interactive: true;
         content-width: self.width;
-        content-height: content.preferred-height;
+        content-height: content.height;
 
-        content := VerticalLayout {
+        content := Rectangle {
             width: parent.width;
-            padding-left: Theme.gutter;
-            padding-right: Theme.gutter;
-            padding-top: Theme.space-6;
-            padding-bottom: Theme.space-8;
-            spacing: Theme.block-gap;
+            // backdrop + 下方文字区（简介 / 按钮 / 版本）。
+            height: max(parent.height, root.backdrop-height + lower.preferred-height + Theme.space-8);
 
-            HorizontalLayout {
-                spacing: Theme.space-3;
+            // ---- Backdrop（60vh）----
+            Image {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: root.backdrop-height;
+                source: root.data.backdrop;
+                image-fit: cover;
+                visible: root.data.backdrop.width > 0;
+            }
 
+            // 无 backdrop 时的底板：只用一层极暗渐变，**不画首字母**。
+            //
+            // 之前在这里画了条目首字母，实测详情页在没有背景图时会正中冒出一个巨大的
+            // `#`（真实条目「#家」），看着像渲染坏了。详情页已经有标题了，不需要再暗示。
+            if (root.data.backdrop.width <= 0) :
                 Rectangle {
-                    width: back-label.preferred-width + Theme.space-5;
-                    height: 36px;
-                    border-radius: Theme.radius-pill;
-                    background: back-area.has-hover ? Theme.surface-raised : Theme.surface;
-                    border-width: 1px;
-                    border-color: Theme.hairline;
-
-                    back-label := Text {
-                        x: Theme.space-3;
-                        height: parent.height;
-                        text: "←  返回";
-                        color: Theme.text;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-14;
-                        vertical-alignment: center;
-                    }
-
-                    back-area := TouchArea {
-
-                        clicked => {
-                            root.back();
-                        }
-                    }
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: root.backdrop-height;
+                    background: @linear-gradient(180deg, Theme.surface 0%, Theme.bg 100%);
                 }
 
-                Rectangle {
-                    horizontal-stretch: 1;
-                    height: 1px;
-                    background: transparent;
+            // 上下双向渐变到 bg：下缘全渐变，上缘浅渐变压住顶栏。
+            Rectangle {
+                x: 0;
+                y: root.backdrop-height - self.height;
+                width: parent.width;
+                height: root.backdrop-height * 0.55;
+                background: @linear-gradient(180deg, #00000000 0%, Theme.bg 100%);
+            }
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: root.backdrop-height * 0.25;
+                background: @linear-gradient(180deg, Theme.scrim-soft 0%, #00000000 100%);
+                visible: root.data.backdrop.width > 0;
+            }
+
+            // 返回按钮（左上）。
+            Rectangle {
+                x: Theme.gutter;
+                y: Theme.space-4;
+                width: back-label.preferred-width + Theme.space-5;
+                height: 36px;
+                border-radius: Theme.radius-badge;
+                background: back-area.has-hover ? Theme.btn-secondary-bg : Theme.btn-secondary-bg;
+
+                back-label := Text {
+                    x: Theme.space-3;
+                    height: parent.height;
+                    text: "←  返回";
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    vertical-alignment: center;
+                }
+
+                back-area := TouchArea {
+                    clicked => {
+                        root.back();
+                    }
                 }
             }
 
-            HorizontalLayout {
-                spacing: Theme.space-8;
-                alignment: stretch;
-                cross-axis-alignment: start;
+            // ---- 标题 / 元信息（压在 backdrop 下缘）----
+            // 标题 / 元信息：手工定位（底边锚在 backdrop 下缘上方 24px），
+            // 全部显式高度 —— 无头渲染器对 CJK 回退字体的 preferred-height 测量不可靠。
+            property <length> title-top: root.backdrop-height - 160px;
 
-                // 海报：固定 2:3，占位与图片共用同一块尺寸。
-                poster := Rectangle {
-                    width: Theme.detail-poster-width;
-                    height: Theme.detail-poster-width * 1.5;
-                    clip: true;
-                    border-radius: Theme.radius-poster;
-                    border-width: 1px;
-                    border-color: Theme.hairline;
-                    background: Theme.surface;
+            title-block := Rectangle {
+                x: Theme.gutter;
+                width: parent.width - Theme.gutter * 2;
+                y: title-top;
+                height: 160px;
+                background: transparent;
 
-                    Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        background: root.data.poster.width > 0 ? transparent : Theme.surface-raised;
-                        border-radius: Theme.radius-poster;
-
-                        Text {
-                            text: root.data.initial;
-                            color: Theme.text-faint;
-                            font-family: Theme.font-family;
-                            font-size: Theme.font-48;
-                            font-weight: Theme.weight-bold;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            visible: root.data.poster.width <= 0;
-                        }
-                    }
-
-                    Image {
-                        x: 0;
-                        y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        source: root.data.poster;
-                        image-fit: cover;
-                    }
+                Text {
+                    y: 0;
+                    width: parent.width;
+                    height: 52px;
+                    text: root.data.title;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: 42px;
+                    font-weight: Theme.weight-bold;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    visible: root.data.original-title == "";
                 }
 
-                Rectangle {
-                    width: root.width - Theme.gutter * 2 - Theme.detail-poster-width - Theme.space-8;
-                    VerticalLayout {
-                        spacing: Theme.space-4;
+                // 有原文名时标题上移，给原文名留一行。
+                Text {
+                    y: root.data.original-title == "" ? 0px : -16px;
+                    width: parent.width;
+                    height: 52px;
+                    text: root.data.title;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: 42px;
+                    font-weight: Theme.weight-bold;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    visible: root.data.original-title != "";
+                }
 
-                    if (root.data.badge != "") :
-                        Rectangle {
-                            width: badge-label.preferred-width + Theme.space-3;
-                            height: 22px;
-                            border-radius: Theme.radius-badge;
-                            background: Theme.badge-bg;
-                            border-width: 1px;
-                            border-color: Theme.hairline-strong;
+                Text {
+                    y: 52px;
+                    width: parent.width;
+                    height: 20px;
+                    text: root.data.original-title;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    visible: root.data.original-title != "";
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
 
-                            badge-label := Text {
-                                x: Theme.space-2;
-                                height: parent.height;
-                                text: root.data.badge;
-                                color: Theme.accent;
-                                font-family: Theme.font-family;
-                                font-size: Theme.font-12;
-                                font-weight: Theme.weight-semibold;
-                                vertical-alignment: center;
-                            }
-                        }
+                Text {
+                    y: 52px + (root.data.original-title == "" ? 0px : 20px);
+                    width: parent.width;
+                    height: 20px;
+                    text: root.data.meta-line;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    visible: root.data.meta-line != "";
+                }
 
-                    Text {
-                        text: root.data.title;
-                        color: Theme.text;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-34;
-                        font-weight: Theme.weight-bold;
-                        overflow: elide;
-                        wrap: no-wrap;
-                    }
+                // 类型标签：text-secondary + `·` 分隔，不用胶囊。
+                Text {
+                    y: 92px + (root.data.original-title == "" ? 0px : 20px);
+                    width: parent.width;
+                    height: 20px;
+                    text: root.data.genres-line;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    vertical-alignment: center;
+                    visible: root.data.genres-line != "";
+                }
+            }
 
-                    Text {
-                        text: root.data.original-title;
-                        color: Theme.text-muted;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-14;
-                        visible: root.data.original-title != "";
-                        overflow: elide;
-                        wrap: no-wrap;
-                    }
+            // ---- 简介 / 按钮 / 版本下拉（backdrop 下方的黑底区）----
+            lower := VerticalLayout {
+                x: Theme.gutter;
+                width: parent.width - Theme.gutter * 2;
+                y: root.backdrop-height + Theme.space-5;
+                spacing: Theme.space-4;
 
-                    Text {
-                        text: root.data.meta-line;
-                        color: Theme.text-muted;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-12;
-                        visible: root.data.meta-line != "";
-                    }
+                Text {
+                    text: root.data.overview;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-16;
+                    width: 640px;
+                    height: 90px;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    visible: root.data.overview != "";
+                }
 
-                    if (root.data.genres.length > 0) :
-                        FlexboxLayout {
-                            spacing: Theme.space-2;
-                            alignment: start;
+                HorizontalLayout {
+                    spacing: Theme.space-3;
 
-                            for genre in root.data.genres : Rectangle {
-                                width: genre-label.preferred-width + Theme.space-4;
-                                height: 26px;
-                                border-radius: Theme.radius-pill;
-                                background: Theme.surface-raised;
-                                border-width: 1px;
-                                border-color: Theme.hairline;
-
-                                genre-label := Text {
-                                    x: Theme.space-2;
-                                    height: parent.height;
-                                    text: genre;
-                                    color: Theme.text-muted;
-                                    font-family: Theme.font-family;
-                                    font-size: Theme.font-12;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                    Text {
-                        text: root.data.overview;
-                        color: Theme.text;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-14;
-                        width: parent.width > 680px ? 680px : parent.width;
-                        wrap: word-wrap;
-                        height: 66px;
-                        overflow: elide;
-                        visible: root.data.overview != "";
-                    }
-
+                    // ▶ 播放：白底黑字。
                     Rectangle {
-                        width: play-label.preferred-width + Theme.space-8;
+                        width: root.data.play-label == "播放" ? Theme.play-button-width
+                            : play-label.preferred-width + Theme.space-5;
                         height: Theme.button-primary-height;
-                        border-radius: Theme.radius-pill;
-                        background: play-area.has-hover ? Theme.accent-hover : Theme.accent;
+                        border-radius: Theme.radius-badge;
+                        background: Theme.btn-primary-bg;
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.wash;
+                            visible: play-area.has-hover;
+                        }
 
                         play-label := Text {
                             x: Theme.space-4;
                             height: parent.height;
                             text: "▶  " + root.data.play-label;
-                            color: Theme.accent-contrast;
+                            color: Theme.btn-primary-fg;
                             font-family: Theme.font-family;
                             font-size: Theme.font-14;
                             font-weight: Theme.weight-semibold;
@@ -241,7 +234,6 @@ export component DetailPage inherits Rectangle {
                         }
 
                         play-area := TouchArea {
-
                             clicked => {
                                 root.focus-index = 0;
                                 root.play();
@@ -254,46 +246,98 @@ export component DetailPage inherits Rectangle {
                             width: parent.width + Theme.focus-offset * 2;
                             height: parent.height + Theme.focus-offset * 2;
                             active: root.focus-index == 0;
-                            ring-radius: Theme.radius-pill + Theme.focus-offset;
+                            ring-radius: Theme.radius-badge + Theme.focus-offset;
                         }
                     }
 
-                    if (root.data.sources.length > 0) :
-                        VerticalLayout {
-                            width: parent.width > 560px ? 560px : parent.width;
-                            spacing: Theme.space-2;
+                    // + 我的列表：次要按钮，点击只做视觉态。
+                    Rectangle {
+                        width: 150px;
+                        height: Theme.button-primary-height;
+                        border-radius: Theme.radius-badge;
+                        background: Theme.btn-secondary-bg;
 
-                            Text {
-                                text: "播放版本";
-                                color: Theme.text-muted;
-                                font-family: Theme.font-family;
-                                font-size: Theme.font-12;
-                                font-weight: Theme.weight-medium;
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.wash;
+                            visible: list-area.has-hover;
+                        }
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: root.in-my-list ? "已在列表" : "+  我的列表";
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            font-weight: Theme.weight-medium;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        list-area := TouchArea {
+                            clicked => {
+                                root.in-my-list = !root.in-my-list;
                             }
+                        }
+                    }
+                }
+
+                // 版本下拉：一行 NETFLIX 风格入口 + 展开面板。
+                VerticalLayout {
+                    width: parent.width > 640px ? 640px : parent.width;
+                    spacing: Theme.space-2;
+
+                    Rectangle {
+                        width: drop-label.preferred-width + Theme.space-5;
+                        height: 40px;
+                        border-radius: Theme.radius-badge;
+                        background: drop-area.has-hover
+                            ? Theme.surface-raised : Theme.btn-secondary-bg;
+
+                        drop-label := Text {
+                            x: Theme.space-3;
+                            height: parent.height;
+                            text: "播放版本：" + root.data.selected-source-label + "  ▼";
+                            color: Theme.text;
+                            font-family: Theme.font-family;
+                            font-size: Theme.font-14;
+                            vertical-alignment: center;
+                        }
+
+                        drop-area := TouchArea {
+                            clicked => {
+                                root.drop-open = !root.drop-open;
+                            }
+                        }
+                    }
+
+                    if (root.drop-open) :
+                        VerticalLayout {
+                            spacing: 0;
 
                             for source[i] in root.data.sources : Rectangle {
                                 width: 100%;
-                                height: 56px;
-                                border-radius: Theme.radius-panel;
-                                background: source.selected ? Theme.surface-raised : Theme.surface;
-                                border-width: 1px;
-                                border-color: source.selected ? Theme.hairline-strong : Theme.hairline;
+                                height: 48px;
+                                background: source-row.has-hover
+                                    ? Theme.surface-raised : Theme.surface;
 
-                                // 选中态只有一种指示：左侧 3px accent 竖条（不再叠实心圆）。
+                                // 选中态：左侧 3px accent 竖条。
                                 Rectangle {
                                     x: 0;
-                                    y: Theme.space-2;
+                                    y: 0;
                                     width: 3px;
-                                    height: parent.height - Theme.space-4;
-                                    border-radius: Theme.radius-pill;
+                                    height: parent.height;
                                     background: source.selected ? Theme.accent : transparent;
                                 }
 
                                 VerticalLayout {
                                     x: Theme.space-4;
-                                    y: Theme.space-2;
+                                    y: Theme.space-1;
                                     width: parent.width - Theme.space-4 * 2;
-                                    height: parent.height - Theme.space-2 * 2;
+                                    height: parent.height - Theme.space-1 * 2;
                                     spacing: 2px;
 
                                     Text {
@@ -301,9 +345,11 @@ export component DetailPage inherits Rectangle {
                                         color: source.selected ? Theme.text : Theme.text-muted;
                                         font-family: Theme.font-family;
                                         font-size: Theme.font-14;
-                                        font-weight: Theme.weight-medium;
+                                        font-weight: source.selected
+                                            ? Theme.weight-semibold : Theme.weight-regular;
                                         overflow: elide;
                                         wrap: no-wrap;
+                                        vertical-alignment: center;
                                     }
 
                                     Text {
@@ -314,29 +360,30 @@ export component DetailPage inherits Rectangle {
                                         overflow: elide;
                                         wrap: no-wrap;
                                         visible: source.subtitle != "";
+                                        vertical-alignment: center;
                                     }
                                 }
 
-                                TouchArea {
+                                source-row := TouchArea {
                                     clicked => {
                                         root.focus-index = i + 1;
+                                        root.drop-open = false;
                                         root.source-selected(source.id);
                                     }
                                 }
 
                                 FocusRing {
-                                    x: -Theme.focus-offset;
-                                    y: -Theme.focus-offset;
-                                    width: parent.width + Theme.focus-offset * 2;
-                                    height: parent.height + Theme.focus-offset * 2;
+                                    x: 0;
+                                    y: 0;
+                                    width: parent.width;
+                                    height: parent.height;
                                     active: root.focus-index == i + 1;
-                                    ring-radius: Theme.radius-panel + Theme.focus-offset;
+                                    ring-radius: 0px;
                                 }
                             }
                         }
                 }
             }
-                }
         }
     }
 }

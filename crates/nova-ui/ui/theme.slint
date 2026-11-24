@@ -1,63 +1,76 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 设计令牌：颜色 / 间距 / 字号 / 圆角 / 字体族。
+//! 设计令牌：颜色 / 间距 / 字号 / 圆角 / 字体族。Netflix 视觉体系。
 //!
 //! 组件里不允许写死颜色或尺寸，一律引用这里的 token。
 
 export global Theme {
     // ---- 颜色 ----
-    in property <color> bg: #0A0B0D;
-    in property <color> surface: #14161A;
-    in property <color> surface-raised: #1C1F25;
-    in property <color> hairline: #2A2E36;
-    in property <color> hairline-strong: #3A404B;
-    in property <color> text: #F2F4F7;
-    in property <color> text-muted: #9AA3AF;
-    in property <color> text-faint: #6B7280;
-    in property <color> accent: #E9A03C;
-    in property <color> accent-hover: #F5B85C;
-    in property <color> accent-contrast: #0A0B0D;
-    in property <color> danger: #E5484D;
-    // 纯色半透明：压图遮罩 / badge 底 / 悬停洗色。不用渐变。
-    in property <color> scrim: #0A0B0DE6;
-    in property <color> scrim-soft: #0A0B0DA6;
-    in property <color> hero-scrim: #0A0B0DCC;
-    in property <color> badge-bg: #0A0B0DCC;
-    in property <color> wash: #FFFFFF08;
+    // Netflix 是纯黑底，不是深灰。
+    in property <color> bg: #000000;
+    // 顶栏实底 / 菜单 / 面板。
+    in property <color> surface: #141414;
+    // 卡片 / 按钮悬停。
+    in property <color> surface-raised: #1F1F1F;
+    in property <color> hairline: #262626;
+    in property <color> hairline-strong: #404040;
+    in property <color> text: #FFFFFF;
+    // 元信息（text-secondary）：在 #000 上对比度 8.9:1。
+    in property <color> text-muted: #B3B3B3;
+    // 次要说明。
+    in property <color> text-faint: #808080;
+    // 品牌红：只用于 logo 点、选中态、进度条，不大面积铺。
+    in property <color> accent: #E50914;
+    in property <color> accent-hover: #F6121D;
+    // 红底上的文字 / 图标。
+    in property <color> accent-contrast: #FFFFFF;
+    in property <color> danger: #E50914;
+    // 压图遮罩 / badge 底 / 悬停洗色。
+    in property <color> scrim: #000000E6;
+    in property <color> scrim-soft: #000000A6;
+    in property <color> hero-scrim: #000000CC;
+    in property <color> badge-bg: #000000B3;
+    in property <color> wash: #FFFFFF1F;
+    // 主按钮（播放）：白底黑字。
+    in property <color> btn-primary-bg: #FFFFFF;
+    in property <color> btn-primary-fg: #000000;
+    // 次按钮（更多信息 / 我的列表）。
+    in property <color> btn-secondary-bg: #FFFFFF26;
     in property <color> player-bg: #000000;
-    // 播放控制层：底部渐变遮罩。两段式 —— 底部到 60% 高度是**不透明平台**（alpha 0.85），
-    // 60% → 100% 才衰减到 0。亮画面上单靠 0.10~0.19 的渐变上沿读不清标题。
-    in property <color> player-scrim-bottom: #000000D9;
+    // 播放控制层：底部渐变遮罩（比普通页面更深）。
+    in property <color> player-scrim-bottom: #000000F0;
     in property <color> player-scrim-mid: #000000D9;
     in property <color> player-scrim-top: #00000000;
-    // 进度条三层：轨道 / 已缓冲 / 已播。缓冲段**替换**轨道（不是叠画），所以两者要明显拉开。
-    in property <color> player-track: #FFFFFF26;
-    in property <color> player-buffered: #FFFFFF59;
-    // 图标底底 / 面板底。
-    in property <color> player-icon-bg: #00000073;
-    // 菜单 / 错误卡 / 气泡的不透明底：压在亮画面上也要保证文字对比度。
-    in property <color> player-panel-solid: #14161A;
+    // 进度条三层：轨道 / 已缓冲 / 已播（Netflix 红）。
+    in property <color> player-track: #FFFFFF33;
+    in property <color> player-buffered: #FFFFFF66;
+    // 控件底：Netflix 风格去掉胶囊底，只在悬停时出现一层淡白。
+    in property <color> player-icon-bg: transparent;
+    // 菜单 / 错误卡 / 气泡的不透明底。
+    in property <color> player-panel-solid: #141414;
     in property <color> player-menu-selected: #FFFFFF14;
     in property <color> warning: #E9A03C;
 
-    // ---- 间距（8 点栅格）----
+    // ---- 间距（沿用 4·8·12·16·24·40·60）----
     in property <length> space-1: 4px;
     in property <length> space-2: 8px;
     in property <length> space-3: 12px;
     in property <length> space-4: 16px;
     in property <length> space-5: 24px;
-    in property <length> space-6: 32px;
+    in property <length> space-6: 40px;
     in property <length> space-8: 48px;
-    in property <length> gutter: 48px;
-    in property <length> block-gap: 32px;
-    in property <length> section-gap: 32px;
-    in property <length> card-gap: 16px;
-    in property <length> navbar-height: 72px;
+    // 页面左右留白（Netflix 60px）。
+    in property <length> gutter: 60px;
+    in property <length> block-gap: 40px;
+    in property <length> section-gap: 40px;
+    in property <length> card-gap: 12px;
+    // 顶栏 68px，透明浮在 hero 上。
+    in property <length> navbar-height: 68px;
     // 顶部横幅（通知位）：贴顶方角，出现时内容整体下移。
     in property <length> banner-height: 48px;
 
-    // ---- 字号 / 字重 ----
+    // ---- 字号 / 字重（48/34/22/16/14/12）----
     in property <string> font-family: "Inter, Noto Sans CJK SC, PingFang SC, DejaVu Sans";
     in property <int> weight-regular: 400;
     in property <int> weight-medium: 500;
@@ -70,28 +83,31 @@ export global Theme {
     in property <length> font-34: 34px;
     in property <length> font-48: 48px;
 
-    // ---- 圆角 ----
-    in property <length> radius-poster: 6px;
-    in property <length> radius-panel: 10px;
+    // ---- 圆角（4 / 6）----
+    in property <length> radius-poster: 4px;
+    in property <length> radius-panel: 6px;
     in property <length> radius-pill: 999px;
     in property <length> radius-badge: 4px;
 
-    // ---- 动效 ----
-    in property <duration> motion: 140ms;
+    // ---- 动效（只这三种，180–200ms、ease-out）----
+    in property <duration> motion: 180ms;
     in property <length> focus-offset: 4px;
     in property <length> focus-width: 2px;
 
     // ---- 布局 ----
-    in property <length> hero-height: 250px;
-    // 区块标题行高与"至少露出标题 + N px"的可见性约束。
-    in property <length> section-title-height: 28px;
+    // Billboard：88vh、最大 720px（页面里按视口高度算）。
+    in property <length> billboard-max: 720px;
+    in property <length> billboard-left: 60px;
+    // 媒体库列数断点：宽 ≥1440 用 7 列，否则 6 列。
+    in property <length> library-breakpoint: 1440px;
+    // 行标题行高与"至少露出标题"的可见性约束。
+    in property <length> section-title-height: 34px;
     in property <length> section-title-reveal: 96px;
-    // 主按钮统一高度（hero 播放 / 详情播放 / 空状态主按钮 / 错误卡重试）。
-    in property <length> button-primary-height: 48px;
-    in property <length> detail-poster-width: 280px;
-    in property <length> library-breakpoint: 1280px;
-
-    // ---- 播放页 ----
+    // 主按钮统一尺寸（billboard / 详情）：44 高。
+    in property <length> button-primary-height: 44px;
+    in property <length> play-button-width: 130px;
+    in property <length> info-button-width: 150px;
+    // 播放页参数不变。
     in property <length> player-scrim-height: 264px;
     in property <length> player-bar-height: 4px;
     in property <length> player-hit-height: 28px;
@@ -100,7 +116,6 @@ export global Theme {
     in property <length> player-icon-size: 88px;
     in property <length> player-menu-width: 320px;
     in property <length> player-menu-row: 44px;
-    // 控制层底部内边距：进度条 / 传输行的位置由它反推（菜单锚点也用它）。
     in property <length> player-controls-bottom: 24px;
     in property <length> player-error-width: 420px;
 }
