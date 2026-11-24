@@ -1,0 +1,27 @@
+[package]
+name = "nova-secrets"
+description = "Nova 凭证存储门面：令牌只能经由这里进出，且不可序列化、不可打印"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["keyring"]
+# 关闭后只剩 MemoryStore（测试、无 GUI 的 CI、以及无 Secret Service 的 Linux 容器）。
+keyring = ["dep:keyring"]
+
+[dependencies]
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+keyring = { version = "3.6", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"], optional = true }
