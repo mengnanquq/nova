@@ -296,6 +296,8 @@ impl Shell {
             player.begin(item_id, source_id, post);
         }
         drop(slot);
+        // 播放页进场：之后 mpv 才允许往窗口 back buffer 上画。
+        self.host.borrow_mut().set_player_active(true);
         self.apply_pending_view();
         self.start_timer();
     }
@@ -924,6 +926,8 @@ fn install_callbacks(shell: &Rc<Shell>) {
             if let Some(shell) = weak.upgrade() {
                 shell.with_player(|player| player.exit(position));
                 shell.timer.stop();
+                // 播放页退场：停止往窗口画 mpv，否则回到首页会是最后一帧视频。
+                shell.host.borrow_mut().set_player_active(false);
             }
         });
     }

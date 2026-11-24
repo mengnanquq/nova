@@ -97,6 +97,11 @@ pub(crate) type Post = Arc<dyn Fn(Message) + Send + Sync>;
 pub(crate) struct Host {
     /// 捕获模式：音频输出用 `null`（不出声，也不让音频设备影响掉帧统计）。
     silent: bool,
+    /// 播放页是否在前台。
+    ///
+    /// **必须**用它门控 `before_rendering`：mpv 是画进窗口 back buffer 的，
+    /// 首页若也照常渲染，整窗会被 mpv 的空白画面盖掉——表现为"没有主页、没有搜索框"。
+    player_active: bool,
     engine: Option<MpvEngine>,
     gl: Option<GlFunctions>,
     readback: Option<gl::Readback>,
@@ -130,6 +135,7 @@ impl Host {
     pub(crate) fn new(silent: bool) -> Self {
         Self {
             silent,
+            player_active: false,
             engine: None,
             gl: None,
             readback: None,
@@ -145,6 +151,19 @@ impl Host {
             shot: None,
             shot_error: None,
             last_present: None,
+        }
+    }
+
+    /// 播放页进场/退场（由界面路由调用）。退出时同时清掉帧纹理，
+    /// 否则返回首页后仍会显示最后一帧视频。
+    pub(crate) fn set_player_active(&mut self, active: bool) {
+        if self.player_active == active {
+            return;
+        }
+        self.player_active = active;
+        if !active {
+            self.frame_image = None;
+            self.drew = false;
         }
     }
 
@@ -203,6 +222,11 @@ impl Host {
     /// 显示间隔；没有新帧时它立刻返回。
     fn before_rendering(&mut self, window: (u32, u32)) {
         self.window = window;
+        // 不在播放页就什么都不画：mpv 的渲染目标是窗口 back buffer，
+        // 无条件渲染会把首页/详情页整屏覆盖成 mpv 的空白画面。
+        if !self.player_active {
+            return;
+        }
         let Some(engine) = self.engine.as_mut() else {
             return;
         };
