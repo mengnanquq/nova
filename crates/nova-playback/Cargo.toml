@@ -1,0 +1,25 @@
+[package]
+name = "nova-playback"
+description = "Nova 引擎无关的播放核心：会话状态机、轨道选择、进度上报与恢复策略（不链接任何解码器）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nova-core = { workspace = true }
+
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# 工作区没有 futures 的 workspace 依赖，但 Cargo.lock 里已有 0.3.34（slint 侧引入），
+# 这里显式声明版本，不改动根 Cargo.toml。
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
