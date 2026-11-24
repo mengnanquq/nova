@@ -40,6 +40,18 @@ export component Navbar inherits Rectangle {
         background: Theme.hairline;
     }
 
+    // 右缘渐隐：标签放不下时，最后一个标签会被从中间切断，看起来像坏了。
+    // 盖一层向背景色过渡的渐变，暗示"后面还有，可以滚"。
+    // 只有真的溢出时才显示（否则纯色条会盖住最后一个标签的右半边）。
+    Rectangle {
+        x: parent.width - self.width;
+        y: 0;
+        width: 64px;
+        height: parent.height;
+        visible: tabs-row.preferred-width > tabs-view.width + 1px;
+        background: @linear-gradient(90deg, #0A0B0D00 0%, Theme.bg 78%);
+    }
+
     HorizontalLayout {
         x: Theme.gutter;
         width: parent.width - Theme.gutter * 2;
@@ -86,7 +98,7 @@ export component Navbar inherits Rectangle {
         // 用 Flickable 而不是普通容器：布局项的最小宽度默认会继承子元素的首选宽度，
         // 十个库标签加起来 1000+px，普通容器会把自己撑到溢满、把搜索框挤出可视区。
         // Flickable 的最小宽度是 0，天生裁剪，还能横向滚动查看后面的库。
-        Flickable {
+        tabs-view := Flickable {
             horizontal-stretch: 1;
             height: parent.height;
             viewport-width: tabs-row.preferred-width;
