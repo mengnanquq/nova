@@ -1,0 +1,32 @@
+[package]
+name = "nova-images"
+description = "Nova 图片缓存：封面/背景图的获取、解码与磁盘缓存"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nova-core = { path = "../nova-core" }
+nova-storage = { path = "../nova-storage" }
+
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# 只开 png / jpeg / webp：媒体服务器的图片就这三种，其余格式的
+# 解码器（tiff / gif / avif …）只会白占编译时间与二进制体积。
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+# 缓存键用 SHA-256：跨进程、跨重启稳定（std 的 DefaultHasher 不保证）。
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }
