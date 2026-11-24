@@ -176,7 +176,17 @@ Jellyfin `UserDataManager.UpdatePlayState` 有三道闸门，任何一条不满�
 - mpv 0.42 不接受 `audio=yes`（`audio` 是轨道选择）与 `sub-ass-override=style`（合法值 `no/yes/scale/force/strip`），
   实现在启动时降级并 warn。
 
-## 阶段 5 — 发布
+## 阶段 5 — 发布（进行中）
+
+- [x] AppImage：`packaging/appimage/build.sh` → `dist/Nova-x86_64.AppImage`（90.6 MiB，170 个捆绑库，39 个宿主库按白名单排除）
+- [ ] **阻塞项 1：X11/Xwayland 下起播崩溃**——`mpv_render_context_create()` 内 SIGSEGV，
+      未打包的二进制同样复现，所以是应用侧 GL 上下文问题（Wayland 正常）
+- [ ] **阻塞项 2：glibc 下限 2.44**——包内最高引用 `GLIBC_2.44` / `GLIBCXX_3.4.36`，
+      在 Debian stable / Ubuntu LTS 上会直接 `version not found`。需要在老基线容器里构建
+      （目标 glibc 2.28~2.31），否则"跨发行版分发"名不副实
+- [ ] 崩溃日志本地落盘 + 用户可导出
+- [ ] 隐私说明与实际行为对齐（零遥测）
+- [ ] AppImage 签名与 zsync 更新通道
 
 - [ ] Windows (MSI) / macOS (dmg + 公证) / Linux (AppImage + Flatpak)
 - [ ] 崩溃日志本地落盘、用户可导出
