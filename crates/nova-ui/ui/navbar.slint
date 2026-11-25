@@ -253,7 +253,11 @@ export component Navbar inherits Rectangle {
                 easing: ease-out;
             }
 
-            // 放大镜：24px 描边 2px（圆环 + 45° 手柄），不用字体字形。
+            // 放大镜：矢量 Path 画（圆环 + 45° 手柄），2px 描边、圆头。
+            //
+            // 以前是"圆角矩形当圆环 + 叠两个 `╲` 字形当手柄"：字形笔画按字体度量走，
+            // 与圆环的描边对不齐、换字体就散架（看着就是不协调）。Path 用与播放器
+            // 图标同一套画法，粗细与颜色都能精确控制。
             search-icon := Rectangle {
                 visible: !root.search-focused;
                 x: (parent.width - self.width) / 2;
@@ -262,89 +266,41 @@ export component Navbar inherits Rectangle {
                 height: 24px;
                 background: transparent;
 
-                Rectangle {
-                    x: 0.5px;
-                    y: 0.5px;
-                    width: 15px;
-                    height: 15px;
-                    border-radius: Theme.radius-pill;
-                    border-width: 2px;
-                    border-color: search-area.has-hover ? Theme.text : Theme.text-muted;
-                    background: transparent;
-                }
-
-                // 柄：╲ 字形当 45° 斜线（transform-rotation 在 1.19 渲染器不生效，
-                // 该字形笔画只有 1px，错位叠两个凑成 2px 描边，与圆环一致）。
-                // 盒子要比字形大：Text 会按自身几何裁剪，盒小了斜线会被裁没。
-                Text {
-                    x: 6px;
-                    y: 6px;
-                    width: 22px;
-                    height: 22px;
-                    text: "\u{2572}";
-                    color: search-area.has-hover ? Theme.text : Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: 18px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                Text {
-                    x: 7px;
-                    y: 6px;
-                    width: 22px;
-                    height: 22px;
-                    text: "\u{2572}";
-                    color: search-area.has-hover ? Theme.text : Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: 18px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Path {
+                    width: 24px;
+                    height: 24px;
+                    // 圆环：半径 7.5、圆心 (10,10)；手柄：从 45° 切点拉到右下角。
+                    commands: "M 10 2.5 C 5.85 2.5 2.5 5.85 2.5 10 C 2.5 14.15 5.85 17.5 10 17.5 C 14.15 17.5 17.5 14.15 17.5 10 C 17.5 5.85 14.15 2.5 10 2.5 Z M 15.6 15.6 L 21 21";
+                    stroke: search-area.has-hover ? Theme.text : Theme.text-muted;
+                    stroke-width: 2px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
                 }
             }
 
-            // 展开态左侧的 20px 小放大镜。
+            // 展开态左侧的小放大镜：与收起态同一套 Path 画法，缩到 16px。
+            //
+            // 原来这里也是"圆角矩形 + 两个 `╲` 字形"，实测**根本渲染不出来**——
+            // 展开后的搜索框左侧是空的，输入文字还按那 20px 缩进，看着就是不协调。
             search-icon-mini := Rectangle {
                 visible: root.search-focused;
-                x: Theme.space-2;
+                x: Theme.space-2 + 2px;
                 y: (parent.height - self.height) / 2;
-                width: 20px;
-                height: 20px;
+                width: 16px;
+                height: 16px;
                 background: transparent;
 
-                Rectangle {
-                    x: 0.5px;
-                    y: 0.5px;
-                    width: 12px;
-                    height: 12px;
-                    border-radius: Theme.radius-pill;
-                    border-width: 2px;
-                    border-color: Theme.text-muted;
-                    background: transparent;
-                }
-
-                Text {
-                    x: 6px;
-                    y: 6px;
-                    width: 15px;
-                    height: 15px;
-                    text: "\u{2572}";
-                    color: Theme.text-muted;
-                    font-family: Theme.font-family;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                Text {
-                    x: 7px;
-                    y: 6px;
-                    width: 15px;
-                    height: 15px;
-                    text: "\u{2572}";
-                    color: Theme.text-muted;
-                    font-family: Theme.font-family;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Path {
+                    width: 16px;
+                    height: 16px;
+                    // 圆环半径 5、圆心 (6.6,6.6)；手柄拉到右下角。
+                    commands: "M 6.6 1.6 C 3.84 1.6 1.6 3.84 1.6 6.6 C 1.6 9.36 3.84 11.6 6.6 11.6 C 9.36 11.6 11.6 9.36 11.6 6.6 C 11.6 3.84 9.36 1.6 6.6 1.6 Z M 10.3 10.3 L 14.4 14.4";
+                    stroke: Theme.text-muted;
+                    stroke-width: 1.5px;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    fill: transparent;
                 }
             }
 

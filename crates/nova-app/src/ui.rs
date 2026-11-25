@@ -718,6 +718,21 @@ impl Shell {
                     serde_json::json!({ "ok": true, "term": term, "route": "home" })
                 }
             }
+            Cmd::Resize { width, height } => {
+                // 等价于用户拖窗口边框：窗口系统会下发 configure，Slint 更新
+                // `Window.width/height`，`changed width` 再把 vw 写回 Theme 触发重排。
+                shell
+                    .app
+                    .ui()
+                    .window()
+                    .set_size(slint::LogicalSize::new(width as f32, height as f32));
+                serde_json::json!({
+                    "ok": true,
+                    "width": width,
+                    "height": height,
+                    "viewport_width": shell.app.ui().window().size().width,
+                })
+            }
             Cmd::Screenshot { path } => {
                 *shell.pending_shot.borrow_mut() = Some(path.clone());
                 shell.host.borrow_mut().request_capture();

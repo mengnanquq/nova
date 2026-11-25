@@ -38,11 +38,18 @@ pub(crate) enum Command {
     /// 当前视图摘要。
     View,
     /// 切路由：`home` / `library` / `detail`（需要 `item`）/ `player`（需要 `item`）。
-    Route { value: String, item: Option<String> },
+    Route {
+        value: String,
+        item: Option<String>,
+    },
     /// 打开条目详情。
-    Open { item: String },
+    Open {
+        item: String,
+    },
     /// 切换媒体库标签（`library` 为空串表示首页）。
-    Tab { library: String },
+    Tab {
+        library: String,
+    },
     /// 搜索：默认只用本地缓存过滤首页；`page` 为真时进搜索页并填好查询词。
     Search {
         /// 查询词。
@@ -51,7 +58,16 @@ pub(crate) enum Command {
         page: bool,
     },
     /// 自截窗口到 PNG（回读自己的 back buffer）。
-    Screenshot { path: PathBuf },
+    /// 调整窗口逻辑尺寸（等价于用户拖拽窗口边框；Wayland 下由窗口系统下发 configure）。
+    Resize {
+        /// 宽。
+        width: u32,
+        /// 高。
+        height: u32,
+    },
+    Screenshot {
+        path: PathBuf,
+    },
     /// 当前页面的可交互目标清单。
     Targets,
     /// 点一个目标：`target` 按名字，或者 `x`/`y` 按窗口坐标。
@@ -67,11 +83,17 @@ pub(crate) enum Command {
         y: Option<f32>,
     },
     /// 一个按键（命名键或单字符）。
-    Key { key: String },
+    Key {
+        key: String,
+    },
     /// 逐字符输入文本。
-    Type { text: String },
+    Type {
+        text: String,
+    },
     /// 在 UI 线程上不阻塞地等一段时间（动画 / 异步加载结算）。
-    Wait { ms: u64 },
+    Wait {
+        ms: u64,
+    },
     /// 交互扫描：对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化。
     Sweep,
     /// 只返回"点击后状态没有任何变化"的目标（`sweep` 的过滤版）。
@@ -130,6 +152,14 @@ impl Command {
                     .and_then(|page| page.as_bool())
                     .unwrap_or(false),
             }),
+            "resize" => {
+                let width = number("width").ok_or_else(|| "resize 需要 width".to_owned())?;
+                let height = number("height").ok_or_else(|| "resize 需要 height".to_owned())?;
+                Ok(Self::Resize {
+                    width: width.max(320.0) as u32,
+                    height: height.max(240.0) as u32,
+                })
+            }
             "screenshot" => Ok(Self::Screenshot {
                 path: PathBuf::from(text("path").ok_or_else(|| "screenshot 需要 path".to_owned())?),
             }),

@@ -20,12 +20,17 @@ export { Theme }
 export { TargetBus }
 
 export component AppWindow inherits Window {
-    // 窗口初始逻辑宽（真实启动 1280×800）。绑定只作初始值：用户手动缩窗时
-    // 窗口系统会直接写 width（覆盖本绑定）；测试可改 window-w 验证 vw 缩放。
+    // 窗口的逻辑尺寸**镜像**（只读观察值），用来在测试里模拟视口宽度。
+    //
+    // 这里**绝对不能**写 `width: root.window-w`：那会把窗口尺寸绑死在这个属性上，
+    // 用户拖窗口边框时窗口系统写进来的新尺寸会立刻被绑定拉回初始值——
+    // 表现就是"窗口拉不大"。之前就是这么写的（注释还误以为窗口系统会覆盖绑定）。
+    //
+    // 真实尺寸由窗口系统决定，我们在 `changed width` 里把它同步给 Theme。
+    // 测试里若要模拟某个视口宽度，用 `AppWindow::window().set_size()`（show 之前），
+    // 或改 `window-w` 触发布局（见下面的 `changed window-w`）。
     in-out property <length> window-w: 1280px;
     in-out property <length> window-h: 800px;
-    width: root.window-w;
-    height: root.window-h;
     background: Theme.bg;
     default-font-family: Theme.font-family;
     forward-focus: keyboard;
@@ -43,6 +48,11 @@ export component AppWindow inherits Window {
         Theme.viewport-width = root.window-w;
     }
     out property <length> probe-card-h: Theme.card-landscape-h;
+    // 窗口尺寸驱动的视口宽度（`vw` 的源头）：断言"窗口能自由缩放"用。
+    out property <length> probe-viewport-width: Theme.viewport-width;
+    // 断点派生值（1280 档 152 / 1920 档 200）：断点真的切换了才变。
+    out property <length> probe-content-gutter: Theme.content-gutter;
+    out property <length> probe-portrait-w: Theme.card-portrait-w;
 
     // 测试用：继续观看行的放大覆盖层几何（「放大不跳布局」断言）。
     out property <length> zoom-rect-x: home-page.zoom-rect-x;
