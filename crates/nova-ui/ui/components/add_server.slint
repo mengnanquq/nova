@@ -100,10 +100,13 @@ export component AddServerDialog inherits Rectangle {
 
                 Rectangle {
                     height: 36px;
-                    border-radius: Theme.radius-panel;
+                    // 官方 Hawkins 输入框令牌：`Input-BorderRadius: 0.25rem`（4px）、
+                    // `Input-BorderWidth: 0.0625rem`（1px）、`Input-Border:
+                    // rgba(128,128,128,0.7)`（聚焦态用品牌红覆盖）。
+                    border-radius: Theme.radius-input;
                     background: Theme.surface-raised;
-                    border-width: 1px;
-                    border-color: address-input.has-focus ? Theme.accent : Theme.hairline;
+                    border-width: Theme.input-border-width;
+                    border-color: address-input.has-focus ? Theme.accent : Theme.input-border;
 
                     address-input := TextInput {
                         x: Theme.space-3;
@@ -156,10 +159,13 @@ export component AddServerDialog inherits Rectangle {
 
                 Rectangle {
                     height: 36px;
-                    border-radius: Theme.radius-panel;
+                    // 官方 Hawkins 输入框令牌：`Input-BorderRadius: 0.25rem`（4px）、
+                    // `Input-BorderWidth: 0.0625rem`（1px）、`Input-Border:
+                    // rgba(128,128,128,0.7)`（聚焦态用品牌红覆盖）。
+                    border-radius: Theme.radius-input;
                     background: Theme.surface-raised;
-                    border-width: 1px;
-                    border-color: user-input.has-focus ? Theme.accent : Theme.hairline;
+                    border-width: Theme.input-border-width;
+                    border-color: user-input.has-focus ? Theme.accent : Theme.input-border;
 
                     user-input := TextInput {
                         x: Theme.space-3;
@@ -199,10 +205,13 @@ export component AddServerDialog inherits Rectangle {
 
                 Rectangle {
                     height: 36px;
-                    border-radius: Theme.radius-panel;
+                    // 官方 Hawkins 输入框令牌：`Input-BorderRadius: 0.25rem`（4px）、
+                    // `Input-BorderWidth: 0.0625rem`（1px）、`Input-Border:
+                    // rgba(128,128,128,0.7)`（聚焦态用品牌红覆盖）。
+                    border-radius: Theme.radius-input;
                     background: Theme.surface-raised;
-                    border-width: 1px;
-                    border-color: password-input.has-focus ? Theme.accent : Theme.hairline;
+                    border-width: Theme.input-border-width;
+                    border-color: password-input.has-focus ? Theme.accent : Theme.input-border;
 
                     password-input := TextInput {
                         x: Theme.space-3;
@@ -302,6 +311,8 @@ export component AddServerDialog inherits Rectangle {
                 Rectangle {
                     height: Theme.button-primary-height;
                     width: cancel-label.preferred-width + Theme.space-6 * 2;
+                    // 胶囊：官方营销页 CTA 是 `border-radius:100px`（会员端
+                    // Hawkins 的 Button-BorderRadius 是 4px），两种来源见 docs §10。
                     border-radius: Theme.radius-pill;
                     background: cancel-area.has-hover ? Theme.surface-raised : Theme.surface;
                     border-width: 1px;
@@ -351,6 +362,8 @@ export component AddServerDialog inherits Rectangle {
                 Rectangle {
                     height: Theme.button-primary-height;
                     width: connect-label.preferred-width + Theme.space-6 * 2;
+                    // 胶囊：官方营销页 CTA 是 `border-radius:100px`（会员端
+                    // Hawkins 的 Button-BorderRadius 是 4px），两种来源见 docs §10。
                     border-radius: Theme.radius-pill;
                     // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed / Disabled。
                     // 连接中固定显示“连接中…”；禁用态直接用 Disabled 底色（不再叠 opacity）。

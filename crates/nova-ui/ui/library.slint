@@ -41,7 +41,8 @@ export component LibraryPage inherits Rectangle {
     // 卡宽 / 卡高 / 行高 / 列起点由 `PosterGrid` 统一计算（搜索页共用同一套）。
     property <int> columns: 6;
     // 网格几何：行高含放大信息区。
-    property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.font-34 + Theme.space-4;
+    property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.text-h4-size
+        + Theme.space-4;
 
     // 不用 `visible` 门控网格：Slint 对属性的"第一次求值"不播动画，
     // 若数据到达之前它是隐藏的，网格入场淡入（`PosterGrid.reveal`）会被跳过。
@@ -63,15 +64,16 @@ export component LibraryPage inherits Rectangle {
                     x: Theme.content-gutter;
                     y: Theme.navbar-height + Theme.space-5;
                     width: parent.width - Theme.content-gutter * 2;
-                    height: Theme.font-34;
+                    height: Theme.text-h4-size;
                     spacing: Theme.space-4;
 
                     Text {
                         text: root.data.title;
                         color: Theme.text;
                         font-family: Theme.font-family;
-                        font-size: Theme.font-34;
-                        font-weight: Theme.weight-bold;
+                        // 官方 Hawkins Text 的 2rem/700 档（区块标题）。
+                        font-size: Theme.text-h4-size;
+                        font-weight: Theme.text-h4-weight;
                         vertical-alignment: center;
                     }
 
@@ -92,7 +94,8 @@ export component LibraryPage inherits Rectangle {
                     Rectangle {
                         width: sort-label.preferred-width + Theme.space-5;
                         height: 36px;
-                        border-radius: Theme.radius-badge;
+                        // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                        border-radius: Theme.radius-button;
                         background: sort-area.has-hover ? Theme.surface-raised : Theme.btn-secondary-bg;
 
                         sort-label := Text {

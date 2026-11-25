@@ -95,6 +95,11 @@ export component EmptyState inherits Rectangle {
                     spacing: Theme.space-3;
 
                     // 主按钮：连接服务器（唯一带 accent 的动作）。
+                    //
+                    // 圆角保持胶囊：会员端 Hawkins `Button-BorderRadius` 是 0.25rem（4px），
+                    // 但营销页的 CTA 按钮是 `border-radius:100px` + 240×48 的胶囊。
+                    // 空态的主动作是"引导开始用"的 CTA，两种官方来源都在，这里按后者
+                    // （与 `components/add_server.slint` 的动作按钮同一取法）。
                     Rectangle {
                         height: Theme.button-primary-height;
                         width: primary-label.preferred-width + Theme.space-6 * 2;

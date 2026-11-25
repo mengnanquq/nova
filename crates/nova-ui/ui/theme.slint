@@ -81,12 +81,22 @@ export global Theme {
     in property <length> space-6: 40px;
     in property <length> space-8: 48px;
     // 页面左右留白：4vw（1280 → 51px），≥1920 固定 60px。
+    // 只剩「贴窗口边缘的装饰 / 空态面板最大宽度」在用；正文列留白见 `content-gutter`。
     in property <length> gutter: root.viewport-width >= 1920px ? 60px : root.viewport-width * 0.04;
-    // 详情页正文左右留白：1920 实测各 200px（正文列宽 1520px）。
-    in property <length> detail-gutter: root.viewport-width >= 1920px ? 200px : root.gutter;
-    /// 正文列留白：Netflix 1920 视口实测左右各 200px（`main` 48 + 内容 padding 152），
-    /// 正文列宽 1520px。每行 6 张 240 宽海报 + 12 间距正好铺满 1520。
-    in property <length> content-gutter: root.viewport-width >= 1920px ? 200px : root.gutter;
+    /// 正文列留白：首页行 / 详情页 / 媒体库 / 搜索页**共用这一个 token**。
+    ///
+    /// 官方原文（`/tmp/genre_inline.css`，Hawkins 版式的页面级 padding）：
+    /// - `@media all{padding:0}`
+    /// - `@media all and (min-width: 960px){padding:0 3rem}`（48px）
+    /// - `@media all and (min-width: 1280px){padding:0 6.5rem}`（104px）
+    /// - `@media all and (min-width: 1920px){padding:0 9.5rem}`（152px）
+    /// 外层 `main` 另有 48px，所以内容起点 = 104+48 = **152px（1280–1919）**、
+    /// 152+48 = **200px（≥1920）**；1920 下正文列宽 1520px。
+    /// 1280 以下沿用 4vw 连续缩放（我们最小窗口就是 1280；官方 960–1279 是 48px 的
+    /// padding，见 docs/ui-netflix-1to1.md §10 的偏差记录）。
+    in property <length> content-gutter: root.viewport-width >= 1920px ? 200px
+        : root.viewport-width >= 1280px ? 152px
+        : root.viewport-width * 0.04;
     in property <length> block-gap: 40px;
     in property <length> section-gap: 40px;
     // 行内卡间距：Netflix 实测常量 12px（`margin-right: .75rem`，首末项归零）。
@@ -107,10 +117,22 @@ export global Theme {
         : root.viewport-width >= 1280px ? 327px
         : min(root.viewport-width * 0.25, 283px);
     in property <length> card-landscape-h: root.card-landscape-w * 9 / 16;
+    // 竖版海报固定 5:7：三档官方尺寸（150×210 / 184×257.6 / 240×336）全部是 5:7，
+    // 所以高度统一由这一对比例常量推导，**不写字面高度**（改了宽就不会有第二份真相）。
+    // 官方原文（`/tmp/genre_inline.css`，竖版卡容器）：
+    //   `@media all{border-radius:0.5rem;width:8.25rem;height:11.55rem;}`
+    //   `@media all and (min-width: 960px){width:9.375rem;height:13.125rem;border-radius:0.75rem;}`
+    //   `@media all and (min-width: 1280px){width:11.5rem;height:16.1rem;border-radius:0.75rem;}`
+    //   `@media all and (min-width: 1920px){width:15rem;height:21rem;border-radius:1rem;}`
+    // 换算：9.375rem = 150px、13.125rem = 210px；11.5rem = 184px、16.1rem = 257.6px；
+    // 15rem = 240px、21rem = 336px。
+    in property <float> poster-ratio-w: 5;
+    in property <float> poster-ratio-h: 7;
     in property <length> card-portrait-w: root.viewport-width >= 1920px ? 240px
         : root.viewport-width >= 1280px ? 184px
+        : root.viewport-width >= 960px ? 150px
         : min(root.viewport-width * 0.16, 130px);
-    in property <length> card-portrait-h: root.card-portrait-w * 7 / 5;
+    in property <length> card-portrait-h: root.card-portrait-w * root.poster-ratio-h / root.poster-ratio-w;
 
     // ---- 卡片外框（Netflix 集数卡实测）----
     //
@@ -141,8 +163,7 @@ export global Theme {
     // padding 里（上下 10.4px ≥ 5% 放大所需的 8.4px），行高本身由内容撑开。
     // 我们放大到 1.35，余量必须显式留，否则会压到下一行。
     in property <length> zoom-allowance: 96px;
-    // 行左右箭头：48×48 半透明黑圆角块。
-    in property <length> arrow-size: 48px;
+    // 行左右箭头尺寸见上方 `arrow-width` / `arrow-height`（官方 24×80）。
     // 顶栏链接间距：1.5vw（1280 → 19px）。
     in property <length> nav-link-gap: root.viewport-width * 0.015;
     // 顶栏 72px（Netflix header 实测 `height: 72px`），透明浮在 hero 上。
@@ -169,6 +190,8 @@ export global Theme {
     in property <int> weight-medium: 500;
     in property <int> weight-semibold: 600;
     in property <int> weight-bold: 700;
+    // 官方 Hawkins 令牌 `Text-TextFontWeight` 最大档是 900（hero 主标题用）。
+    in property <int> weight-black: 900;
     in property <length> font-12: 12px;
     in property <length> font-14: 14px;
     in property <length> font-16: 16px;
@@ -179,23 +202,106 @@ export global Theme {
     in property <length> font-34: 34px;
     in property <length> font-42: 42px;
     in property <length> font-48: 48px;
+
+    // ---- 官方 Hawkins 排版梯度（`Text-*` 令牌，字号 + 字重成对）----
+    //
+    // 官方原文（`/tmp/tw_inline.css`，`--hcw--local-design--Text-*` 的全部取值）：
+    //   TextFontSize: 4rem / 3.5rem / 2.5rem / 2rem / 1.5rem / 1.25rem /
+    //                 1.125rem / 1rem / 0.875rem / 0.8125rem
+    //   TextFontWeight: 400 / 500 / 700 / 900
+    //   TextLineHeight: 125%
+    // 下面 10 对就是那 10 档（字号→官方字重按 Hawkins 的档位搭配）。
+    // 旧的 `font-*` token 全部保留（避免大面积改动），新代码优先用这一组。
+    in property <length> text-h1-size: 64px; // 4rem
+    in property <int> text-h1-weight: root.weight-black; // 900
+    in property <length> text-h2-size: 56px; // 3.5rem
+    in property <int> text-h2-weight: root.weight-black; // 900
+    in property <length> text-h3-size: 40px; // 2.5rem
+    in property <int> text-h3-weight: root.weight-bold; // 700
+    in property <length> text-h4-size: 32px; // 2rem
+    in property <int> text-h4-weight: root.weight-bold; // 700
+    in property <length> text-h5-size: 24px; // 1.5rem
+    in property <int> text-h5-weight: root.weight-medium; // 500
+    in property <length> text-h6-size: 20px; // 1.25rem
+    in property <int> text-h6-weight: root.weight-medium; // 500
+    in property <length> text-body-lg-size: 18px; // 1.125rem
+    in property <int> text-body-lg-weight: root.weight-medium; // 500
+    in property <length> text-body-size: 16px; // 1rem
+    in property <int> text-body-weight: root.weight-regular; // 400
+    in property <length> text-label-size: 14px; // 0.875rem
+    in property <int> text-label-weight: root.weight-regular; // 400
+    in property <length> text-caption-size: 13px; // 0.8125rem
+    in property <int> text-caption-weight: root.weight-regular; // 400
+    /// 官方 `Text-TextLineHeight: 125%`。Slint 没有 CSS 那种全局行高：
+    /// 逐元素用 `line-height-factor`。目前只落在行标题上（详情 / 正文的框高是实测值，
+    /// 盲改会把已经定好的裁切边界撞坏，见 docs/ui-netflix-1to1.md §10）。
+    in property <float> text-line-height: 1.25;
+
+    // ---- 行标题三级断点（官方 Hawkins Text 断点）----
+    //
+    // - `<960px`：1.25rem / 500（= 20px）
+    // - `960–1279`：1.5rem / 500（= 24px）
+    // - `≥1280`：2rem / 700（= 32px；1920 实测文本框高 46px、下方留白 12px）
+    in property <length> row-title-size-sm: 20px;
+    in property <int> row-title-weight-sm: root.weight-medium;
+    in property <length> row-title-size-md: 24px;
+    in property <int> row-title-weight-md: root.weight-medium;
+    in property <length> row-title-size-lg: 32px;
+    in property <int> row-title-weight-lg: root.weight-bold;
+    // 当前断点解析值（组件只引用这两个 + 下面的高度）。
+    in property <length> row-title-size: root.viewport-width >= 1280px ? root.row-title-size-lg
+        : root.viewport-width >= 960px ? root.row-title-size-md
+        : root.row-title-size-sm;
+    in property <int> row-title-weight: root.viewport-width >= 1280px ? root.row-title-weight-lg
+        : root.viewport-width >= 960px ? root.row-title-weight-md
+        : root.row-title-weight-sm;
     // 详情页 backdrop 占窗口高度比例：实测 hero 845px / 视口 1080px = 0.782。
     in property <float> detail-backdrop-ratio: 0.78;
     // 顶栏搜索框：展开宽度 / 高度。
     in property <length> search-box-width: 240px;
     in property <length> search-box-height: 36px;
-    // 搜索页顶部的大搜索框：高 48px（比顶栏的 240×36 大一档，字号 font-22）。
+    // 搜索页顶部的大搜索框：高 48px（比顶栏的 240×36 大一档，字号用官方
+    // `Text` 的 1.5rem/500 —— 即 `text-h5-size`，已从原来的 22px 正过来）。
     // 页内无 navbar，输入框本身就是页面头，所以尺寸不跟顶栏联动。
     in property <length> search-input-height: 48px;
+    // 行内翻页箭头：官方原文（`/tmp/genre_inline.css`，行右缘的 handle 按钮）
+    //   `.handle{height:5rem;width:1.5rem;border-radius:16rem;border:none;…
+    //            background-color:rgba(128,128,128,0.4)}`
+    //   `:hover{border-radius 不变;background-color:rgba(128,128,128,0.2)}`
+    // 即 24 宽 × 80 高、胶囊圆角（16rem = 256px，大于半高 → 等价 pill）。
+    // （会员端 `akiraClient.css` 的旧实现是 `.slider .handle{width:4%}`、宽屏 `width:60px`、
+    //  `background:hsla(0,0%,8%,.5)`；两套来源都在 §10 列了，我们取新的 24×80。）
+    in property <length> arrow-width: 24px;
+    in property <length> arrow-height: 80px;
+    in property <color> arrow-bg: #80808066; // rgba(128,128,128,0.4)
+    // 官方 `:hover{background-color:rgba(128,128,128,0.2)}`。我们没改悬停的动画层
+    // （上一轮定稿的是 `opacity → 0.85`，见 docs/ui-netflix-1to1.md §9），
+    // 官方 hover 底色记在这里备查：`#80808033`。
     // 行左右箭头字形（‹ / ›）字号。
-    in property <length> arrow-glyph-size: 26px;
+    // 官方是 SVG chevron；我们是字体字形，26px 字形塞进 24px 宽会横向裁切，取 20px。
+    in property <length> arrow-glyph-size: 20px;
 
-    // ---- 圆角（4 / 6）----
-    // 卡片圆角：Netflix 实测 1rem = 16px（图片与容器一致）。
-    in property <length> radius-poster: 16px;
+    // ---- 圆角 ----
+    // 海报卡圆角：官方竖版卡容器三档（见上面 card-portrait-w 的原文摘录）
+    //   <960 → 0.5rem = 8px；960–1919 → 0.75rem = 12px；≥1920 → 1rem = 16px。
+    in property <length> radius-poster: root.viewport-width >= 1920px ? 16px
+        : root.viewport-width >= 960px ? 12px
+        : 8px;
     in property <length> radius-panel: 6px;
     in property <length> radius-pill: 999px;
+    // 徽标 / 角标的方角。
     in property <length> radius-badge: 4px;
+    // 按钮方角：官方 Hawkins 令牌 `Button-BorderRadius: 0.25rem` = 4px
+    // （会员端按钮；营销页 CTA 是 `border-radius:100px` 的胶囊，见 §10 的两种来源）。
+    in property <length> radius-button: 4px;
+    // 输入框方角 / 描边：官方 Hawkins 令牌
+    //   `Input-BorderRadius: 0.25rem`（4px）、`Input-BorderWidth: 0.0625rem`（1px）、
+    //   `Input-Border: rgba(128,128,128,0.7)`。
+    // 注意：任务书里写的 `Input-BorderRadius: 6.25rem`（胶囊）在三个样式表里都查不到，
+    // 6.25rem 只作为 font-size / 容器 height 出现，令牌原文明确是 0.25rem。
+    in property <length> radius-input: 4px;
+    in property <color> input-border: #808080B3;
+    in property <length> input-border-width: 1px;
 
     // ---- 动效 ----
     //
@@ -238,12 +344,24 @@ export global Theme {
     //   - 其余（我们自定）：`ease-out`
 
     // ---- 布局 ----
-    // Billboard：88vh、最大 720px（页面里按视口高度算）；左侧留白跟随 4vw gutter。
-    in property <length> billboard-max: 720px;
-    in property <length> billboard-left: root.gutter;
-    // 媒体库列数断点：宽 ≥1440 用 7 列，否则 6 列。
-    // 行标题行高与"至少露出标题"的可见性约束。
-    in property <length> section-title-height: 34px;
+    // Billboard 高度：官方会员端原文（`/tmp/live_akira.css`）
+    //   `.billboard{background-color:#000;height:56.25vw;position:absolute;width:100%;z-index:0}`
+    //   `.billboard-row{background-color:#000;margin-bottom:20px;padding-bottom:40%;position:relative;…}`
+    // 56.25vw 就是 16:9 满宽视频的高度（16:9 窗口下 = 100vh）。
+    // 我们的 billboard 是内容流里的一个块（不是绝对定位的背景层），所以直接满屏会
+    // 把整行挤出首屏；这里取 `min(56.25vw, 92vh)` —— **92vh 不是官方值**，是小窗口可用性
+    // 折中（1280×800 这类非 16:9 窗口下 56.25vw = 90vh，双约束同时生效）。
+    in property <length> billboard-height: root.viewport-width * 0.5625;
+    // billboard 文案块左留白：官方会员端原文（`/tmp/live_akira.css`）
+    //   `.billboard-row .billboard .info{left:4%;…}`
+    //   `@media screen and (min-width:1500px){.billboard-row .billboard .info{left:60px}}`
+    // 注意它和正文列（`content-gutter`）**不是一个数**：Netflix 自己的 hero 文案就是
+    // 更靠左（4%），行与网格才从 152/200 起。
+    in property <length> billboard-left: root.viewport-width >= 1500px ? 60px
+        : root.viewport-width * 0.04;
+    // 行标题区高度：官方 1920 实测 h2 框高 46px（字号 32），即字号 +14px；
+    // 其它断点按同一增量推导（20px 字号 → 34px，与改动前一致）。
+    in property <length> section-title-height: root.row-title-size + 14px;
     in property <length> section-title-reveal: 96px;
     // 主按钮统一尺寸（billboard / 详情）：44 高。
     in property <length> button-primary-height: 44px;

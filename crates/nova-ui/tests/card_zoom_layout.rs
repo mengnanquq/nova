@@ -20,12 +20,17 @@ use common::{home_filled, home_image_ids, init_backend, install_posters};
 use nova_ui::{App, AppWindow, Page};
 use slint::ComponentHandle;
 
+/// 行内翻页箭头的尺寸：官方 CSS 原文 `width:1.5rem;height:5rem`（24×80），
+/// 与 `Theme.arrow-width` / `Theme.arrow-height` 同值（见 docs/ui-netflix-1to1.md §10）。
+const ARROW_W: f64 = 24.0;
+const ARROW_H: f64 = 80.0;
+
 /// 一个像素是否落在「覆盖层 ∪ 左右箭头」内（逻辑坐标 + 2px 余量）。
 fn in_expected_region(x: f64, y: f64, zoom: (f64, f64, f64, f64), arrows: [(f64, f64); 2]) -> bool {
     let (zx, zy, zw, zh) = zoom;
     let in_zoom = x >= zx - 2.0 && x <= zx + zw + 2.0 && y >= zy - 2.0 && y <= zy + zh + 2.0;
     let in_arrow = arrows.iter().any(|&(ax, ay)| {
-        x >= ax - 2.0 && x <= ax + 48.0 + 2.0 && y >= ay - 2.0 && y <= ay + 48.0 + 2.0
+        x >= ax - 2.0 && x <= ax + ARROW_W + 2.0 && y >= ay - 2.0 && y <= ay + ARROW_H + 2.0
     });
     in_zoom || in_arrow
 }
@@ -68,7 +73,7 @@ fn zooming_a_card_does_not_move_other_cards() {
     let arrow_y = f64::from(app.ui().get_row0_arrow_y());
     // 行宽 = 窗口宽；左右箭头分别贴住窗口左右缘。
     let width = f64::from(before.width()) / scale;
-    let arrows = [(0.0, arrow_y), (width - 48.0, arrow_y)];
+    let arrows = [(0.0, arrow_y), (width - ARROW_W, arrow_y)];
 
     let (pa, pb) = (before.as_slice(), after.as_slice());
     let w = before.width();

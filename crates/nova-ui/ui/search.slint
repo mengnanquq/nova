@@ -7,7 +7,8 @@
 //! 结构（自上而下）：
 //!
 //! 1. 顶部大搜索框：`navbar-height` 之下再留 `space-6`，左右 `content-gutter`，
-//!    高 `search-input-height`（48px）、字号 `font-22`、透明底 + 底部 1px `hairline`；
+//!    高 `search-input-height`（48px）、字号用官方 Hawkins `Text` 的 1.5rem/500
+//!    （`text-h5-size/weight`）、透明底 + 底部 1px `hairline`；
 //! 2. 结果头：`「{term}」的搜索结果` + `共 {total} 部`（与 `library.slint` 的标题行同构）；
 //! 3. 结果网格：`PosterGrid`（5:7 竖版卡、6 列、`content-gutter` / `card-gap`、
 //!    放大覆盖层）——与媒体库页是**同一个组件**，不是第二份公式；
@@ -63,7 +64,7 @@ export component SearchPage inherits Rectangle {
     // 结果区起点：搜索框下沿 + 24px。
     property <length> results-y: root.bar-y + root.bar-height + Theme.space-5;
     // 结果头行高与网格起点（内容区坐标）。
-    property <length> header-height: Theme.font-22;
+    property <length> header-height: Theme.row-title-size;
     property <length> grid-top: root.header-height + Theme.space-4;
 
     // ---- 探针（测试用：6 列 / 5:7 / 起点 = content-gutter）----
@@ -100,7 +101,9 @@ export component SearchPage inherits Rectangle {
             text: "搜索影片、剧集…";
             color: Theme.text-faint;
             font-family: Theme.font-family;
-            font-size: Theme.font-22;
+            // 官方 Hawkins Text 的 1.5rem/500 档（原来是 22px）。
+            font-size: Theme.text-h5-size;
+            font-weight: Theme.text-h5-weight;
             vertical-alignment: center;
             visible: root.search-text == "";
         }
@@ -113,7 +116,9 @@ export component SearchPage inherits Rectangle {
             text <=> root.search-text;
             color: Theme.text;
             font-family: Theme.font-family;
-            font-size: Theme.font-22;
+            // 官方 Hawkins Text 的 1.5rem/500 档（原来是 22px）。
+            font-size: Theme.text-h5-size;
+            font-weight: Theme.text-h5-weight;
             vertical-alignment: center;
             single-line: true;
 
@@ -231,8 +236,9 @@ export component SearchPage inherits Rectangle {
                     text: root.data.title;
                     color: Theme.text;
                     font-family: Theme.font-family;
-                    font-size: Theme.font-22;
-                    font-weight: Theme.weight-bold;
+                    // 与首页行标题同一组断点 token（<960 20/500、960–1279 24/500、≥1280 32/700）。
+                    font-size: Theme.row-title-size;
+                    font-weight: Theme.row-title-weight;
                     vertical-alignment: center;
                 }
 

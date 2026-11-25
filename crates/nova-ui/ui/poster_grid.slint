@@ -37,7 +37,8 @@ export component PosterGrid inherits Rectangle {
     // ---- 几何（媒体库与搜索页都只读这些）----
     out property <length> card-width: (root.width - root.content-gutter * 2
         - Theme.card-gap * (root.columns - 1)) / root.columns;
-    out property <length> card-height: root.card-width * 7 / 5;
+    // 竖版海报严格 5:7（比例常量在 Theme 里，与首页行的竖版卡同一份真值）。
+    out property <length> card-height: root.card-width * Theme.poster-ratio-h / Theme.poster-ratio-w;
     out property <length> card-step: root.card-width + Theme.card-gap;
     out property <length> first-card-x: root.content-gutter;
     out property <int> row-count: (root.cards.length + root.columns - 1) / root.columns;

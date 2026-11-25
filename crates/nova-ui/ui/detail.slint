@@ -97,11 +97,12 @@ export component DetailPage inherits Rectangle {
 
             // 返回按钮（左上）。
             Rectangle {
-                x: Theme.detail-gutter;
+                x: Theme.content-gutter;
                 y: Theme.space-4;
                 width: back-label.preferred-width + Theme.space-5;
                 height: 36px;
-                border-radius: Theme.radius-badge;
+                // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                border-radius: Theme.radius-button;
                 background: back-area.has-hover ? Theme.btn-secondary-bg : Theme.btn-secondary-bg;
 
                 back-label := Text {
@@ -130,8 +131,8 @@ export component DetailPage inherits Rectangle {
                 y: Theme.motion-rise-hero * (1 - root.reveal);
                 width: parent.width;
                 height: root.backdrop-height;
-                padding-left: Theme.detail-gutter;
-                padding-right: Theme.detail-gutter;
+                padding-left: Theme.content-gutter;
+                padding-right: Theme.content-gutter;
                 alignment: end;
                 spacing: Theme.space-1;
                 opacity: root.reveal;
@@ -149,7 +150,8 @@ export component DetailPage inherits Rectangle {
                         color: Theme.text;
                         font-family: Theme.font-family;
                         font-size: Theme.font-48;
-                        font-weight: Theme.weight-bold;
+                        // 官方 hero h1 字重是 Hawkins `Text` 的最大档 900。
+                        font-weight: Theme.weight-black;
                         min-height: 56px;
                         wrap: word-wrap;
                         vertical-alignment: center;
@@ -186,8 +188,8 @@ export component DetailPage inherits Rectangle {
 
             // ---- 简介 / 按钮 / 版本下拉（backdrop 下方的黑底区）----
             lower := VerticalLayout {
-                x: Theme.detail-gutter;
-                width: parent.width - Theme.detail-gutter * 2;
+                x: Theme.content-gutter;
+                width: parent.width - Theme.content-gutter * 2;
                 // 内容块现在落在 hero **下方**。Netflix 实测是叠在 hero 下半部
                 // （内容底端距 hero 下缘 112px），但把 VerticalLayout 上移后子项
                 // 会互相重叠（标题压住简介），需要先重排内部定位才能做，见文档备注。
@@ -220,7 +222,8 @@ export component DetailPage inherits Rectangle {
                         width: root.data.play-label == "播放" ? Theme.play-button-width
                             : play-label.preferred-width + Theme.space-5;
                         height: Theme.button-primary-height;
-                        border-radius: Theme.radius-badge;
+                        // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                        border-radius: Theme.radius-button;
                         background: Theme.btn-primary-bg;
 
                         Rectangle {
@@ -274,7 +277,7 @@ export component DetailPage inherits Rectangle {
                             width: parent.width + Theme.focus-offset * 2;
                             height: parent.height + Theme.focus-offset * 2;
                             active: root.focus-index == 0;
-                            ring-radius: Theme.radius-badge + Theme.focus-offset;
+                            ring-radius: Theme.radius-button + Theme.focus-offset;
                         }
                     }
 
@@ -282,7 +285,8 @@ export component DetailPage inherits Rectangle {
                     Rectangle {
                         width: Theme.info-button-width;
                         height: Theme.button-primary-height;
-                        border-radius: Theme.radius-badge;
+                        // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                        border-radius: Theme.radius-button;
                         background: Theme.btn-secondary-bg;
 
                         Rectangle {
@@ -337,7 +341,8 @@ export component DetailPage inherits Rectangle {
                     Rectangle {
                         width: drop-label.preferred-width + Theme.space-5;
                         height: 40px;
-                        border-radius: Theme.radius-badge;
+                        // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                        border-radius: Theme.radius-button;
                         background: drop-area.has-hover
                             ? Theme.surface-raised : Theme.btn-secondary-bg;
 

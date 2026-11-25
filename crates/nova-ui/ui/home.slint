@@ -91,11 +91,11 @@ component CardRow inherits Rectangle {
     // 行高：标题区 + 卡 + 放大下探预留（覆盖层可能溢出行底）。
     height: title-off + root.card-height + Theme.zoom-allowance;
 
-    // 行标题 + 查看全部（与卡同起于 gutter）。
+    // 行标题 + 查看全部（与卡同起于 content-gutter）。
     HorizontalLayout {
-        x: Theme.gutter;
+        x: Theme.content-gutter;
         y: root.rise;
-        width: parent.width - Theme.gutter * 2;
+        width: parent.width - Theme.content-gutter * 2;
         height: Theme.section-title-height;
         spacing: Theme.space-3;
 
@@ -103,8 +103,11 @@ component CardRow inherits Rectangle {
             text: root.title;
             color: Theme.text;
             font-family: Theme.font-family;
-            font-size: Theme.font-22;
-            font-weight: Theme.weight-bold;
+            // 官方 Hawkins Text 断点：<960 20/500、960–1279 24/500、≥1280 32/700。
+            font-size: Theme.row-title-size;
+            font-weight: Theme.row-title-weight;
+            // 官方 `Text-TextLineHeight: 125%`。
+            line-height-factor: Theme.text-line-height;
             vertical-alignment: center;
         }
 
@@ -208,15 +211,16 @@ component CardRow inherits Rectangle {
     out property <length> zoom-rect-h: zoom-ov.height;
     out property <length> arrow-y: arrow-left.y;
 
-    // 行左右箭头：48×48 半透明黑圆角块，垂直居中，悬停行时出现；
+    // 行左右箭头：官方 24×80 胶囊（`width:1.5rem;height:5rem;border-radius:16rem`、
+    // 底色 `rgba(128,128,128,.4)`），垂直居中于卡区，悬停行时出现；
     // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
     arrow-left := Rectangle {
         x: 0;
-        y: title-off + root.rise + (root.card-height - Theme.arrow-size) / 2;
-        width: Theme.arrow-size;
-        height: Theme.arrow-size;
-        border-radius: Theme.radius-badge;
-        background: Theme.badge-bg;
+        y: title-off + root.rise + (root.card-height - Theme.arrow-height) / 2;
+        width: Theme.arrow-width;
+        height: Theme.arrow-height;
+        border-radius: Theme.radius-pill;
+        background: Theme.arrow-bg;
         visible: root.zoom-index >= 0 || arrow-left-area.has-hover;
         // 悬停微交互：只降不透明度，图标本体不位移。
         opacity: arrow-left-area.has-hover ? 0.85 : 1;
@@ -254,10 +258,10 @@ component CardRow inherits Rectangle {
     arrow-right := Rectangle {
         x: parent.width - self.width;
         y: arrow-left.y;
-        width: Theme.arrow-size;
-        height: Theme.arrow-size;
-        border-radius: Theme.radius-badge;
-        background: Theme.badge-bg;
+        width: Theme.arrow-width;
+        height: Theme.arrow-height;
+        border-radius: Theme.radius-pill;
+        background: Theme.arrow-bg;
         visible: root.zoom-index >= 0 || arrow-right-area.has-hover;
         opacity: arrow-right-area.has-hover ? 0.85 : 1;
         animate opacity {
@@ -315,7 +319,16 @@ export component HomePage inherits Rectangle {
 
     background: Theme.bg;
 
-    // billboard 占视口高度的比例（0.88 = 88vh）；testing 快照可调小以拍到行区。
+    // billboard 高度的 **vh 封顶比例**（默认 0.88）。
+    //
+    // 主值来自官方 `.billboard{height:56.25vw}`（见 `Theme.billboard-height`）；
+    // 但官方那个高度是**绝对定位的背景层**，外面还有 `.billboard-row{padding-bottom:40%}`
+    // 给内容流定高，所以 100vh 的 hero 不会挤掉行。我们的 hero 是内容流里的一个块，
+    // 直接取 56.25vw 在 1280×800 会把首行卡片推到 y=802（窗口只有 800）——实测快照里
+    // 行区完全看不到。所以用 88vh 封顶（**非官方值**，可用性折中）：1280×800 下
+    // 还留 14px 卡顶，1920×1080 下 950px。取 92vh 也会挤光（720 → 卡顶 802），
+    // 故不用任务书里的 92。详细算术见 docs/ui-netflix-1to1.md §10。
+    // testing 快照可调小以拍到行区。
     in property <float> billboard-ratio: 0.88;
 
     // 当前纵向滚动偏移（测试 / 调试用）。
@@ -343,8 +356,8 @@ export component HomePage inherits Rectangle {
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
 
-    // Billboard：88vh、最大 720px。
-    property <length> billboard-height: min(self.height * root.billboard-ratio, Theme.billboard-max);
+    // Billboard：官方 56.25vw，用 88vh 封顶（非官方，理由见 `billboard-ratio`）。
+    property <length> billboard-height: min(Theme.billboard-height, self.height * root.billboard-ratio);
     property <int> continue-count: root.data.continue-watching.length;
     property <int> recent-count: root.data.recently-added.length;
     // 键盘焦点落到行内的局部索引（焦点不在该行时为 -1）。
@@ -449,7 +462,8 @@ export component HomePage inherits Rectangle {
                             color: Theme.text;
                             font-family: Theme.font-family;
                             font-size: Theme.font-48;
-                            font-weight: Theme.weight-bold;
+                            // 官方 hero h1 字重是 Hawkins `Text` 的最大档 900。
+                            font-weight: Theme.weight-black;
                             height: 58px;
                             overflow: elide;
                             wrap: no-wrap;
@@ -487,7 +501,8 @@ export component HomePage inherits Rectangle {
                             Rectangle {
                                 width: Theme.play-button-width;
                                 height: Theme.button-primary-height;
-                                border-radius: Theme.radius-badge;
+                                // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                                border-radius: Theme.radius-button;
                                 background: Theme.btn-primary-bg;
 
                                 // 悬停洗色：opacity 过渡而不是 visible 硬切。
@@ -541,7 +556,8 @@ export component HomePage inherits Rectangle {
                             Rectangle {
                                 width: Theme.info-button-width;
                                 height: Theme.button-primary-height;
-                                border-radius: Theme.radius-badge;
+                                // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                                border-radius: Theme.radius-button;
                                 background: Theme.btn-secondary-bg;
 
                                 Rectangle {
