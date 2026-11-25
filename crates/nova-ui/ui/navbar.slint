@@ -138,8 +138,8 @@ export component Navbar inherits Rectangle {
 
         // 搜索：图标按钮，聚焦时展开为 240px 输入框。
         Rectangle {
-            width: root.search-focused ? 240px : 36px;
-            height: 36px;
+            width: root.search-focused ? Theme.search-box-width : 36px;
+            height: Theme.search-box-height;
             border-radius: Theme.radius-poster;
             background: root.search-focused
                 ? Theme.surface-raised : (search-area.has-hover ? Theme.wash : transparent);

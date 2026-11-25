@@ -23,7 +23,7 @@ export component DetailPage inherits Rectangle {
     in-out property <bool> in-my-list: false;
     in-out property <bool> drop-open: false;
 
-    property <length> backdrop-height: self.height * 0.6;
+    property <length> backdrop-height: self.height * Theme.detail-backdrop-ratio;
 
     flick := Flickable {
         width: parent.width;
@@ -124,7 +124,7 @@ export component DetailPage inherits Rectangle {
                     text: root.data.title;
                     color: Theme.text;
                     font-family: Theme.font-family;
-                    font-size: 42px;
+                    font-size: Theme.font-42;
                     font-weight: Theme.weight-bold;
                     overflow: elide;
                     wrap: no-wrap;
@@ -139,7 +139,7 @@ export component DetailPage inherits Rectangle {
                     text: root.data.title;
                     color: Theme.text;
                     font-family: Theme.font-family;
-                    font-size: 42px;
+                    font-size: Theme.font-42;
                     font-weight: Theme.weight-bold;
                     overflow: elide;
                     wrap: no-wrap;
@@ -242,7 +242,7 @@ export component DetailPage inherits Rectangle {
 
                     // + 我的列表：次要按钮，点击只做视觉态。
                     Rectangle {
-                        width: 150px;
+                        width: Theme.info-button-width;
                         height: Theme.button-primary-height;
                         border-radius: Theme.radius-badge;
                         background: Theme.btn-secondary-bg;

@@ -40,10 +40,11 @@ export component LibraryPage inherits Rectangle {
     property <int> columns: root.width < Theme.library-breakpoint ? 6 : 7;
     property <length> card-width: (root.width - Theme.gutter * 2 - Theme.card-gap * (root.columns - 1))
         / root.columns;
-    property <length> card-height: root.card-width * 1.5;
+    // 竖版海报 5:7（Netflix 实测 240×336 = 5:7，与 Theme.card-portrait-h 一致）。
+    property <length> card-height: root.card-width * 7 / 5;
     property <int> card-count: root.data.cards.length;
     // 放大后浮出的信息区高度。
-    property <length> zoom-info: 76px;
+    property <length> zoom-info: Theme.zoom-info-height;
     property <float> zoom-factor: 1.0;
     property <int> zoom-index: root.focus-index;
     // 网格几何：行高含放大信息区。
