@@ -282,33 +282,65 @@ fn error_and_hwdec_status_are_surfaced_in_the_data() {
 }
 
 #[test]
-fn time_text_switches_between_elapsed_and_remaining() {
+fn time_text_defaults_to_remaining_and_switches_to_elapsed() {
     let app = player_app();
-    assert_eq!(app.ui().get_player().time_text.as_str(), "12:34 / 2:18:00");
+    // 官方播放器的时间位是剩余时长（`.time-remaining__time`），默认就该是它。
+    assert_eq!(app.ui().get_player().time_text.as_str(), "-2:05:26");
 
     app.ui().invoke_player_time_toggle();
     assert_eq!(
         app.ui().get_player().time_text.as_str(),
-        "-2:05:26",
-        "点时间文本切到剩余，且不再同时渲染已播/总长"
+        "12:34 / 2:18:00",
+        "点时间文本切成已播/总长，且不同时渲染两份"
     );
 
     app.ui().invoke_player_time_toggle();
-    assert_eq!(app.ui().get_player().time_text.as_str(), "12:34 / 2:18:00");
+    assert_eq!(app.ui().get_player().time_text.as_str(), "-2:05:26");
 }
 
 #[test]
-fn engine_detail_row_is_collapsed_by_default_and_toggles_with_ctrl_d() {
+fn volume_slider_sets_absolute_volume_and_unmutes() {
+    let app = player_app();
+    let volumes = Rc::new(RefCell::new(Vec::new()));
+    let sink = volumes.clone();
+    app.on_player_volume(move |v| sink.borrow_mut().push(v));
+
+    // 滑杆 = 直接设到百分比（不是加减）。
+    app.ui().invoke_player_volume_set(0.25);
+    assert!((app.player_view().volume - 0.25).abs() < f32::EPSILON);
+    assert_eq!(volumes.borrow().as_slice(), &[0.25]);
+
+    // 往上拖解除静音（与键盘加音量同一口径）。
+    app.ui().invoke_player_mute_toggle();
+    assert!(app.player_view().muted);
+    app.ui().invoke_player_volume_set(0.5);
+    assert!(!app.player_view().muted);
+    assert_eq!(volumes.borrow().as_slice(), &[0.25, 0.5]);
+
+    // 越界值夹到 0..1。
+    app.ui().invoke_player_volume_set(1.7);
+    assert!((app.player_view().volume - 1.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn engine_detail_stays_data_only_and_is_never_rendered() {
+    // 引擎诊断（直连/转码、hwdec、1080p60）只是 `PlayerData` 里的数据：
+    // 控制层上**没有**任何常驻 / 可展开的诊断文字（Netflix 播放器没有）。
     let app = player_app();
     let data = app.ui().get_player();
-    assert_eq!(data.transport_mode.as_str(), "直连", "常驻只有短标签");
+    assert_eq!(data.transport_mode.as_str(), "直连");
     assert_eq!(data.engine_line.as_str(), "直连 · hwdec=vaapi · 1080p60");
-    assert!(!data.show_engine_detail, "完整诊断行默认收起");
+    assert!(!data.show_engine_detail, "展开位只是数据，不在画面上渲染");
 
-    assert!(app.handle_player_key(PlayerKey::ToggleEngineDetail));
-    assert!(app.ui().get_player().show_engine_detail, "Ctrl+D 展开");
-    assert!(app.handle_player_key(PlayerKey::ToggleEngineDetail));
-    assert!(!app.ui().get_player().show_engine_detail);
+    // 画面不改：Ctrl+D 已从播放页快捷键表里移除（13 号意图不再存在）。
+    assert_eq!(PlayerKey::from_intent(13), None, "Ctrl+D 不再是播放页按键");
+
+    // 数据侧仍可翻转（调试通道 / 测试用），但没有任何 .slint 元素读它。
+    let mut view = app.player_view();
+    view.toggle_engine_detail();
+    assert!(view.show_engine_detail);
+    view.toggle_engine_detail();
+    assert!(!view.show_engine_detail);
 }
 
 #[test]

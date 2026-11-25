@@ -115,8 +115,6 @@ pub enum PlayerKey {
     SubtitleMenu,
     /// `F`：全屏开关。
     Fullscreen,
-    /// `Ctrl+D`：展开 / 收起完整诊断行。
-    ToggleEngineDetail,
     /// `Esc` / `Backspace`：先提交进度再退出。
     Exit,
 }
@@ -137,7 +135,6 @@ impl PlayerKey {
             10 => Some(Self::SubtitleMenu),
             11 => Some(Self::Fullscreen),
             12 => Some(Self::Exit),
-            13 => Some(Self::ToggleEngineDetail),
             _ => None,
         }
     }
@@ -1202,6 +1199,15 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     {
         let weak = ui.as_weak();
         let state = state.clone();
+        ui.on_player_volume_set(move |volume| {
+            if let Some(ui) = weak.upgrade() {
+                player_volume_set(&ui, &state, volume);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
         ui.on_player_subtitle_delay(move |seconds| {
             if let Some(ui) = weak.upgrade() {
                 player_subtitle_delay(&ui, &state, f64::from(seconds));
@@ -1532,6 +1538,28 @@ fn player_scrub_cancel(ui: &AppWindow, _state: &Rc<RefCell<State>>) {
     player::clear_scrub(ui);
 }
 
+/// 音量滑杆：把目标音量（0..1）直接写进视图模型。
+///
+/// 只改 UI 状态 + 把目标值交给引擎回调（`on_player_volume`），不碰播放逻辑；
+/// 与 `player_volume_by` 共享同一套收尾（解除静音 / 短时数字 / 重绘 / 通知引擎）。
+fn player_volume_set(ui: &AppWindow, state: &Rc<RefCell<State>>, volume: f32) {
+    let (volume, handler) = {
+        let mut state = state.borrow_mut();
+        let volume = volume.clamp(0.0, 1.0);
+        state.player.volume = volume;
+        // 往上拖滑杆视为解除静音（与键盘加音量同一口径）。
+        if volume > 0.0 {
+            state.player.muted = false;
+        }
+        state.player.note_volume_change();
+        (volume, state.callbacks.player_volume.clone())
+    };
+    player_refresh(ui, state);
+    if let Some(handler) = handler {
+        handler(volume);
+    }
+}
+
 fn player_volume_by(ui: &AppWindow, state: &Rc<RefCell<State>>, delta: f32) {
     let (volume, handler) = {
         let mut state = state.borrow_mut();
@@ -1708,13 +1736,7 @@ fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey)
         PlayerKey::AudioMenu => player_toggle_menu(ui, state, true),
         PlayerKey::SubtitleMenu => player_toggle_menu(ui, state, false),
         PlayerKey::Fullscreen => player_toggle_fullscreen(ui, state),
-        PlayerKey::ToggleEngineDetail => player_toggle_engine_detail(ui, state),
         PlayerKey::Exit => return player_exit(ui, state),
     }
     true
-}
-
-fn player_toggle_engine_detail(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    state.borrow_mut().player.toggle_engine_detail();
-    player_refresh(ui, state);
 }

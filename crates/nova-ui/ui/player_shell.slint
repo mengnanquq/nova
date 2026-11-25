@@ -34,6 +34,7 @@ export component PlayerShellPage inherits Rectangle {
     callback rate-cycle();
     callback time-toggle();
     callback mute-toggle();
+    callback volume-set(float);
     callback subtitle-delay(float);
     callback subtitle-external();
 
@@ -72,14 +73,8 @@ export component PlayerShellPage inherits Rectangle {
                 horizontal-alignment: center;
             }
 
-            Text {
-                text: "引擎接入后由 mpv 渲染到这里";
-                color: Theme.text-faint;
-                font-family: Theme.font-family;
-                font-size: Theme.font-12;
-                horizontal-alignment: center;
-            }
-
+            // 首帧到达前的空态：只保留一行用户看得懂的信息。
+            // 原来这里还有一行“引擎接入后由 mpv 渲染到这里”——引擎早就接进来了，那是过时的开发提示，已删。
             Text {
                 text: "支持 HDR 片源的色调映射（纹理经 mpv 映射为 SDR 8bit）";
                 color: Theme.text-faint;
@@ -167,6 +162,10 @@ export component PlayerShellPage inherits Rectangle {
 
         mute-toggle => {
             root.mute-toggle();
+        }
+
+        volume-set(volume) => {
+            root.volume-set(volume);
         }
 
         subtitle-delay(seconds) => {

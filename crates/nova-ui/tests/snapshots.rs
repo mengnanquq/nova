@@ -201,14 +201,19 @@ fn write_all_snapshots() {
     capture(&app, "player-subtitle-menu.png");
 
     // 11. 播放页：亮色假帧（米白 / 天空色）。
-    // 遮罩的两段式渐变必须在亮画面上也能让标题 / 副标题 / 诊断行读得清。
+    // 底部遮罩是官方两层渐变（`PlayerControlsNeo__gradient-bottom` 的 `rgba(0,0,0,.7)` ×
+    // `.75` + `watch-video--bottom-controls-container-scrim` 的 `.3`），必须在亮画面上
+    // 也能让标题 / 副标题 / 时间码读得清（详见 docs/ui-netflix-1to1.md §11）。
+    // 标题行不再有诊断文字（直连 / hwdec / 引擎行已从画面删除）。
     // 字幕带画在“已抬起”的位置（控制层可见时引擎把 sub-margin-y 抬到 ≈280px），
     // 验证传输行不会再盖住字幕。
     app.set_backdrop("dune", bright_frame(SUBTITLE_BAND_TOP - 280));
     app.set_player(&player_view());
     capture(&app, "player-controls-bright.png");
 
-    // 12. 播放页：刚按过静音 / 音量键——数字文本短时可见（喇叭图标变成斜线）。
+    // 12. 播放页：静音态——喇叭图标变成斜线/静音字形。
+    // （官方播放器没有音量数字；`volume-hint` 数字文本已从界面移除，只留在 viewmodel，
+    //  所以这张快照现在验证的是“静音字形 + 控制行统一形态”，见 docs §11.11。）
     let mut volume = player_view().with_muted(true);
     volume.note_volume_change();
     app.set_player(&volume);

@@ -33,12 +33,15 @@ pub const SUBTITLE_MARGIN_MIN: i64 = 160;
 pub const SUBTITLE_MARGIN_MAX: i64 = 400;
 
 /// 时间行的渲染模式：已播/总长 与 剩余时长**二选一**（不同时出现）。
+///
+/// 默认 [`TimeMode::Remaining`]：官方播放器的时间位显示的就是**剩余时长**
+/// （`.time-remaining__time`），详情页/媒体库也不该出现"已播/总长"这种调试口吻。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TimeMode {
     /// `"12:34 / 2:18:00"`。
-    #[default]
     Elapsed,
-    /// `"-2:05:26"`（Infuse 风格）。
+    /// `"-2:05:26"`。
+    #[default]
     Remaining,
 }
 
@@ -127,7 +130,8 @@ pub struct PlayerView {
     pub hwdec_notice: Option<String>,
     /// 诊断用一行（引擎 / 直连或转码 / 实际 hwdec），可关。
     pub engine_line: Option<String>,
-    /// 是否展开完整诊断行（`Ctrl+D`）。默认关闭：常驻的只有 `直连` / `转码`。
+    /// 诊断行“展开”位。播放画面上**不渲染**（官方播放器没有任何常驻诊断文字），
+    /// 只作为数据给 `--debug-socket` 的 `view` 用。
     pub show_engine_detail: bool,
     /// 时间行的渲染模式（点击时间文本切换）。
     pub time_mode: TimeMode,
@@ -877,13 +881,17 @@ mod tests {
     #[test]
     fn time_mode_renders_only_one_of_the_two() {
         let mut view = sample();
+        // 官方播放器的时间位就是剩余时长（`.time-remaining__time`），所以默认是 Remaining。
+        assert_eq!(view.time_mode, TimeMode::Remaining);
+        assert_eq!(view.time_text(), "-2:05:26", "剩余模式下不叠已播/总长");
+        view.toggle_time_mode();
         assert_eq!(view.time_mode, TimeMode::Elapsed);
         assert_eq!(view.time_text(), "12:34 / 2:18:00");
         view.toggle_time_mode();
-        assert_eq!(view.time_mode, TimeMode::Remaining);
-        assert_eq!(view.time_text(), "-2:05:26", "剩余模式下不再叠已播/总长");
-        view.toggle_time_mode();
-        assert_eq!(view.time_text(), "12:34 / 2:18:00");
+        assert_eq!(view.time_text(), "-2:05:26");
+
+        let explicit = sample().with_time_mode(TimeMode::Elapsed);
+        assert_eq!(explicit.time_text(), "12:34 / 2:18:00");
 
         // 剩余时长未知（没有时长）时退回已播文本，不渲染空白。
         let unknown = PlayerView::new("x")

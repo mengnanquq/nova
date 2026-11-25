@@ -168,7 +168,7 @@ export component AppWindow inherits Window {
     callback key-intent(int);
 
     // 播放页：键位在这里只做分派，射出什么行为由 Rust 决定。
-    // 1 Space/K / 2 ← / 3 → / 4 Shift+← / 5 Shift+→ / 6 ↑ / 7 ↓ / 8 M / 9 A / 10 S / 11 F / 12 Esc / 13 Ctrl+D
+    // 1 Space/K / 2 ← / 3 → / 4 Shift+← / 5 Shift+→ / 6 ↑ / 7 ↓ / 8 M / 9 A / 10 S / 11 F / 12 Esc
     callback player-key(int);
     callback player-back();
     callback player-play-pause();
@@ -188,6 +188,7 @@ export component AppWindow inherits Window {
     callback player-rate-cycle();
     callback player-time-toggle();
     callback player-mute-toggle();
+    callback player-volume-set(float);
     callback player-subtitle-delay(float);
     callback player-subtitle-external();
     // 控制层显隐变化时把字幕应该抬多高（px）报出去（mpv 的 sub-margin-y）。
@@ -244,10 +245,8 @@ export component AppWindow inherits Window {
                     root.player-key(11);
                     return accept;
                 }
-                if (event.modifiers.control && (event.text == "d" || event.text == "D")) {
-                    root.player-key(13);
-                    return accept;
-                }
+                // Ctrl+D（完整诊断行）已移除：Netflix 播放器画面上没有常驻/可展开的诊断文字，
+                // 引擎诊断只走 `--debug-socket` 的 `view`。这里不再占一个键，也不留“按了没反应”的键。
                 if (event.text == Key.Escape || event.text == Key.Backspace) {
                     root.player-key(12);
                     return accept;
@@ -538,6 +537,10 @@ export component AppWindow inherits Window {
 
         mute-toggle => {
             root.player-mute-toggle();
+        }
+
+        volume-set(volume) => {
+            root.player-volume-set(volume);
         }
 
         subtitle-delay(seconds) => {

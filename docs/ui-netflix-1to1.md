@@ -85,16 +85,17 @@
 口径：1920×1080 视口、**免登录 non-member 版**详情页，取值方式是 DevTools 读
 `getComputedStyle` / `getBoundingClientRect`（已知条目 `80100172`）。
 
-> **「播放」/「更多信息」双按钮与播放器的完整控件布局因未登录无法实测**（该区域被登录引导替代），
+> **「播放」/「更多信息」双按钮因未登录无法实测**（该区域被登录引导替代），
 > 所以按钮尺寸**沿用我们现有值**（高 44px、白底/半透明白底）。
-> 但 hero 内的**视频控制圆钮**与**播放器样式表（CSSOM）**可以拿到，见下面的「顶栏」「播放器圆钮」两行，
-> 我们据此对齐播放器的圆钮与进度条交互；本节其余项均为实测。
+> 播放器的**控件布局与像素也无法实测**，但播放器**样式表（CSSOM）原文**可以拿到 ——
+> 播放器控件本轮已按官方 em 比例重做（基数由我们选定），见 **§11 播放器**；
+> 本节只保留 hero 内圆钮与旧口径的历史记录。
 
 | 项 | 实测值 | 落在代码哪里 |
 |---|---|---|
 | 顶栏 | `height: 72px` / `z-index: 20` / `background-image: linear-gradient(to top, rgba(0,0,0,0) 0%, rgb(0,0,0) 100%)` | `Theme.navbar-height: 72px`；未滚动态用 `Theme.navbar-scroll-gradient`（`180deg` + `#000000 → #00000000`，即 CSS `to top` 的反写）再向下延伸 `Theme.navbar-gradient-extend: 56px`；滚动后仍是 `Theme.surface` 实底 |
-| 播放器圆钮（hero 内视频控制钮实测） | 40×40 / `border-radius: 20px`（正圆）/ `background: rgba(22,22,22,.7)` / `border: 1px solid rgba(128,128,128,.7)` / 内图标 24×24 / 两钮间距 12px | `Theme.player-control-size: 40px`、`Theme.player-icon-bg: #161616B3`、`Theme.player-icon-border: #808080B3` + `Theme.player-icon-border-width: 1px`、`Theme.player-icon-glyph: 24px`、行内 `spacing: Theme.space-3`；左上返回钮保持 44×44（不是实测项，保留现状） |
-| 进度条交互（播放器样式表 CSSOM 原文，未渲染验证） | `.nfp .scrubber-container .scrubber-head:hover { transform: scale(1.2) }`；`.nfp .is-scrubbing .scrubber-container .track, .nfp .scrubber-container:hover .track { height: 1em }`；`.nfp .volume-controller .scrubber-target:hover { transform: scale(1.2) }` | 拖动头 `Theme.player-bar-knob: 12px` × `Theme.player-bar-knob-scale: 1.2`；轨道 `Theme.player-bar-height: 4px` → `Theme.player-bar-height-hover: 8px`（Netflix 的 `1em` = 16px 属大屏播放器，我们的控制层按 40px 控件缩到 8px）；悬停 / 拖动均走 `Theme.motion` 过渡 |
+| 播放器圆钮（hero 内视频控制钮实测，**旧口径**） | 40×40 / `border-radius: 20px`（正圆）/ `background: rgba(22,22,22,.7)` / `border: 1px solid rgba(128,128,128,.7)` / 内图标 24×24 / 两钮间距 12px | **已按 §11 改掉**：同一组 token 现在装的是官方全屏播放器的值（`Theme.player-control-size` = 3.2222em、`Theme.player-icon-bg: #414141D9`、`Theme.player-icon-border` = 3px transparent、图标改 em 比例，`player-icon-glyph` 已删除）。hero 里若还要 40×40 圆钮请另开 token |
+| 进度条交互（播放器样式表 CSSOM 原文，未渲染验证） | `.nfp .scrubber-container{height:3.3em}`；`.track{background:#5b5b5b;height:.5em;transition:height .2s ease}`；`.scrubber-head{2.3em×2.3em;background:#e50914;border-radius:50%;opacity:1}`；`:hover .track / .is-scrubbing .track{height:1em}`；`.scrubber-head:hover,.is-scrubbing .scrubber-head{transform:scale(1.2)}` | **已按官方重做**：`Theme.player-hit-height`＝3.3em（52.8px）、`player-bar-height`＝8px → `player-bar-height-hover`＝16px、`player-bar-knob`＝36.8px × `player-bar-knob-scale` 1.2、轨道 `#5B5B5B` / 缓冲 `#FFFFFF33` / 已播 `#E50914`；过渡 `Theme.motion-zoom`(200ms)。详见 §11.3 / §11.5 |
 | 页面底色 | `background-color: rgb(15,15,15)` | `Theme.detail-bg`（**不动** `Theme.bg`，其它页仍然纯黑） |
 | hero 高度 | 845px / 视口 1080px = 0.782 | `Theme.detail-backdrop-ratio: 0.78` |
 | hero 底部渐变 | `linear-gradient(rgba(0,0,0,0) 40%, rgba(0,0,0,.6) 100%)`，占 hero 高 60% | `detail.slint` 底部层：高 `backdrop-height * 0.6`、`@linear-gradient(180deg, #00000000 40%, #00000099 100%)` |
@@ -147,9 +148,12 @@
 
 **仍然无法实测的部分**（不要当成事实）：
 
-- 播放器的**完整控件布局**（传输行顺序、间距、左右分组）需要登录才能拿到，保持不变。
-- 播放器**中央大钮尺寸**（现用 `Theme.player-play-size: 56px`，中央覆盖图标圈 `Theme.player-icon-size: 88px`）无法实测，**保留现状**。
-- 进度条轨道静息高度（4px）也是我们的选择：Netflix 只给出悬停态的 `1em`，未给出静息值。
+- 播放器的**完整控件布局**（传输行顺序、间距、左右分组）需要登录才能拿到；CSS 里只有各行的
+  padding/margin，没有按钮顺序。见 §11.8。
+- 播放器**中央大钮尺寸**（现用 `Theme.player-play-size` = 3.6em = 57.6px、中央覆盖图标圈
+  `Theme.player-icon-size` = 5.5em = 88px）：官方没有“中央大钮”这条规则，这两个数是我们自定的（§11.6）。
+- 进度条**轨道静息高度**其实官方给了：`.track{height:.5em}` = 8px（旧版写的“官方只给悬停态 1em”是错的，
+  已在 §11.2 更正）。
 
 ## 8. 搜索页
 
@@ -672,3 +676,457 @@ backdrop 与渐变层逐像素不变。
 
 回归断言：`crates/nova-ui/tests/detail_layout.rs`（body 底端 + 112 = hero 下缘 ±2px、
 `body.y > 0`、标题底 ≤ 简介顶 ≤ 简介底 ≤ 按钮顶、内容比 hero 高时兜底到 0）。
+
+## 11. 播放器
+
+### 11.1 口径与前提（先读这一段）
+
+一手素材：`/tmp/live_akira.css`（会员端 403KB 样式表，播放器的全部规则都在里面）。
+**但播放器没法实测像素**：`/watch/<id>` 未登录 302 回登录页；免登录的详情页里播放器又被
+登录引导替代。所以本节与其它节的口径不同：
+
+- **比例 100% 来自 CSS 原文**（下面 11.2 / 11.4 是原样摘录）；
+- **基数由我们选定**：`Theme.player-unit: 16px`，所有播放器尺寸 = `player-unit × 官方 em`；
+- **像素是我们算的 / 在我们自己的窗口里量的**，不是量 Netflix 的播放器。
+
+官方基数本身就有三条互相矛盾的线索（所以“官方到底几 px”本来就没有唯一答案）：
+
+```
+.NFPlayer.container-large{font-size:24px}
+.NFPlayer.container-small{font-size:18px}
+html.watch-video-root{font-size:10px!important}            /* 1920×1080 命中这一档 */
+@media only screen and (max-width:1280px){html.watch-video-root{font-size:9px!important}}
+@media only screen and (max-height:720px){html.watch-video-root{font-size:9px!important}}
+@media only screen and (max-width:1152px){html.watch-video-root{font-size:8px!important}}
+@media only screen and (max-width:1024px){html.watch-video-root{font-size:7.2px!important}}
+@media only screen and (max-width:960px){html.watch-video-root{font-size:6.6px!important}}
+@media only screen and (max-width:854px){html.watch-video-root{font-size:6px!important}}
+@media only screen and (max-width:640px){html.watch-video-root{font-size:5.3px!important}}
+@media only screen and (max-width:426px){html.watch-video-root{font-size:4.8px!important}}
+```
+
+`container-*` 是 loading / postplay 小窗那层的字号，`watch-video-root` 才是全屏页面的 html 根。
+**我们选了 16px**：介于 18 / 24 之间，落在桌面窗口上看着不憋屈；比 `watch-video-root` 的
+10px 大一档（同样的 em 比例会比 Netflix 的播放器整体大 1.6 倍——这是基数的差，不是比例的差）。
+这条差异是本节最重要的“不要当成一致”的地方。
+
+### 11.2 官方原文摘录（逐条，未改写）
+
+容器 / 全屏：
+
+```
+.NFPlayer{height:100%;transition:width .3s,height .3s,top .3s,left .3s,opacity .3s;width:100%}
+.NFPlayer.nf-player-container{background:#000;bottom:0;left:0;overflow:hidden;position:absolute;
+  right:0;top:0;user-select:none;z-index:1}
+.NFPlayer.nf-player-container.active{cursor:default}
+.NFPlayer.nf-player-container.inactive{cursor:none}
+.watch-video{box-sizing:border-box;height:100%;left:0;margin:0;overflow:hidden;padding:0;
+  position:absolute;top:0;width:100%}
+```
+
+进度条（`/tmp/live_akira.css`，`.nfp` 作用域；**这是本轮重做的核心**）：
+
+```
+.nfp .scrubber-container{align-items:center;cursor:pointer;display:flex;height:3.3em;
+  position:relative;touch-action:none;width:100%}
+.nfp .scrubber-container .scrubber-bar{flex-grow:1;flex-shrink:0;position:relative;width:auto}
+.nfp .scrubber-container .track{background:#5b5b5b;height:.5em;position:relative;
+  transition:height .2s ease;will-change:height}
+.nfp .scrubber-container .buffered,
+.nfp .scrubber-container .current-progress{bottom:0;display:flex;height:100%;left:0;
+  position:absolute;right:0;top:0;width:100%}
+.nfp .scrubber-container .current-progress{background:#e50914}
+.nfp .scrubber-container .buffered{background:hsla(0,0%,100%,.2)}
+.nfp .scrubber-container .scrubber-head{background:#e50914;border-radius:50%;cursor:pointer;
+  height:2.3em;margin:-1.15em;opacity:1;position:absolute;top:50%;
+  transform:scale(1) translateZ(0);transform-origin:50% 50%;transition:transform .2s ease;
+  width:2.3em}
+.nfp .scrubber-container .scrubber-head:hover{transform:scale(1.2) translateZ(0)}
+.nfp .is-scrubbing .scrubber-head{transform:scale(1.2) translateZ(0)}
+.nfp .is-scrubbing .scrubber-container .track,
+.nfp .scrubber-container:hover .track{height:1em}
+```
+
+控制层骨架（全屏播放器 `PlayerControlsNeo`）：
+
+```
+.PlayerControlsNeo__gradient-bottom{background-image:linear-gradient(0deg,rgba(0,0,0,.7) 0,transparent);
+  bottom:0}
+.PlayerControlsNeo__gradient-top{background-image:linear-gradient(180deg,rgba(0,0,0,.7) 0,transparent);top:0}
+.PlayerControlsNeo__gradient-bottom,.PlayerControlsNeo__gradient-top{height:20%;left:0;opacity:0;
+  position:absolute;right:0;transition:opacity .3s ease}
+.PlayerControlsNeo__layout--active .PlayerControlsNeo__gradient-bottom,
+.PlayerControlsNeo__layout--active .PlayerControlsNeo__gradient-top{opacity:.75}
+.PlayerControlsNeo__layout--dimmed{background-color:rgba(0,0,0,.5)}
+.PlayerControlsNeo__layout--dimmed .PlayerControlsNeo__core-controls,
+.PlayerControlsNeo__layout--inactive .PlayerControlsNeo__core-controls,
+.PlayerControlsNeo__progress-control-row--row-hidden{opacity:0}
+.PlayerControlsNeo__core-controls .top-left-controls{margin:4em}
+.PlayerControlsNeo__core-controls .button-nfplayerBack{font-size:2.8em}
+.PlayerControlsNeo__progress-container{align-items:center;display:flex;padding-left:3em;
+  padding-right:3em;transition:opacity .2s ease}
+.PlayerControlsNeo__button-control-row{align-items:center;display:flex;
+  justify-content:space-between;padding-right:.9em}
+.PlayerControlsNeo__button-control-row-left,
+.PlayerControlsNeo__button-control-row-right{align-items:center;display:flex;padding:0 4em}
+.PlayerControls--control-element{transform:translateZ(0) scale(1);
+  transition:transform .25s cubic-bezier(.5,0,.1,1),opacity .25s}
+.PlayerControls--control-element.progress-control{align-items:center;display:flex;
+  margin:0 2.5em 0 0;width:100%}
+.PlayerControls--control-element.video-title{align-items:center;box-sizing:border-box;display:flex;
+  flex-grow:1;margin:0 1.5em;overflow:hidden;padding:0 0 1.68em}
+.PlayerControls--control-element.video-title h4{font-size:2.2em;margin:0 .5em 0 0;padding:0;
+  white-space:nowrap}
+.PlayerControls--control-element.video-title span{color:#adadad;display:inline;font-size:2em;
+  padding-right:.5em}
+.time-remaining__time{font-size:1.8em}
+.watch-video--bottom-controls-container-scrim{
+  background-image:linear-gradient(0deg,rgba(0,0,0,.3) 0,transparent)}
+```
+
+按钮与图标：
+
+```
+.nfp-button-control{align-items:center;background:transparent;border:0;box-sizing:content-box;
+  cursor:pointer;display:flex;flex:0 0 auto;justify-content:center;outline:none;fill:#fff}
+.nfp-button-control.default-control-button{height:3.22222222em;padding:0 .83333333em}
+.nfp-button-control.circle-control-button:before{background:rgba(65,65,65,.85);border-radius:50%;
+  content:"";height:2em;left:50%;position:absolute;top:50%;
+  transform:translate(-50%,-50%);width:2em}
+.PlayerControlsNeo__bottom-controls .nfp-button-control{border:3px solid transparent;
+  border-radius:.3em;box-sizing:border-box;display:flex;flex:0 1 auto;font-size:2.8em;
+  height:3.6em;padding:0 0 .6em;width:3.4em}
+.PlayerControlsNeo__bottom-controls .nfp-popup-control{display:flex;flex:0 1 auto;font-size:2.8em;
+  height:3.6em;width:3.4em}
+.nfp .svg-icon{border:1px solid transparent;height:1.6em;margin:0 -1px;overflow:visible;
+  width:1.6em;stroke-width:0;stroke:#fff;font-size:1.1em}
+.nf-kb-nav-wrapper.kb-nav .nfp-button-control:focus,
+.nf-kb-nav-wrapper.kb-nav .scrubber-head:focus,
+.nf-kb-nav-wrapper.kb-nav .speed-controller .value-container:focus .dot{outline:3px solid #fff}
+.nf-kb-nav-wrapper.kb-nav .PlayerControlsNeo__bottom-controls .nfp-button-control:focus{
+  border:3px solid #fff;outline:0}
+```
+
+loading 层（顶部渐变 / 标题 / 返回，本轮照它取的值）：
+
+```
+.watch-video .player-loading .gradient{background:linear-gradient(180deg,rgba(0,0,0,.651),transparent);
+  height:11.11111111em;left:0;position:absolute;right:0;top:0}
+.watch-video .player-loading .top-left-controls,
+.watch-video .player-loading .top-right-controls{margin:4.5em}
+.watch-video .player-loading .title{font-size:2em;font-weight:500}
+.watch-video .player-loading .playable-title{font-size:3.3em;font-weight:500}
+.watch-video .player-loading .subtitle{font-size:1.33em}
+.watch-video .player-loading .metadata{color:#e4e4e4;font-weight:500;left:2.5em;top:3.5em}
+.watch-video .player-loading .player-exit{color:#fff;height:1.4em;width:1.4em;opacity:.5;
+  transition:opacity .2s ease-out;fill:#fff}
+.watch-video .player-loading .player-exit:hover{opacity:1}
+.watch-video .BackToBrowse>svg{fill:#dadada;height:6.75em;width:6.75em;padding:.75em}
+.nfp.AkiraPlayer .player-loading .top-left-controls,
+.nfp.AkiraPlayer .player-loading .top-right-controls,
+.watch-video .player-loading .top-left-controls,
+.watch-video .player-loading .top-right-controls{margin:4.5em}
+```
+
+弹出层（音轨 / 字幕菜单）：
+
+```
+.nfp-popup-control .popup-content{background:#262626;border-radius:.3em;font-size:.8em;overflow:hidden}
+.nfp-popup-control .popup-content-wrapper{bottom:3.5em;margin:-.5em;opacity:0;padding:.5em;
+  pointer-events:none;position:absolute;right:.5em;transform:scale(.95) translateZ(0);
+  transition:opacity .16s ease,transform .2s ease,visibility 0s linear .16s;visibility:hidden}
+.audio-subtitle-controller{background:#282828;direction:ltr;display:flex}
+.audio-subtitle-controller .track-list h3{margin:0}
+.audio-subtitle-controller .track-list .list-header{color:#fff;cursor:default;font-size:.94444444em;
+  font-weight:500;padding:.75em 2.6em;white-space:nowrap}
+.audio-subtitle-controller .track-list li{color:#b3b3b3;cursor:pointer;font-size:.72222222em;
+  outline:none;padding:1em 3.4em;position:relative;white-space:nowrap}
+.audio-subtitle-controller .track-list li:hover{background:hsla(0,0%,100%,.1);color:#fff}
+.audio-subtitle-controller .track-list .selected{color:#fff;font-weight:500}
+```
+
+### 11.3 官方 em 比例 → `Theme.player-unit` → 实际像素
+
+`player-unit = 16px`。左列是 CSS 原文里的 em 值（原样），右两列是算出来的像素
+（真机 = `--window-size 1920x1080` 的实拍量测，无头 = 1280×800 快照量测）。
+
+| 项 | 官方原文 | em | 我们的 token / 像素 | 真机实测 | 无头实测 |
+|---|---|---|---|---|---|
+| 尺寸基数 | `.NFPlayer.container-*{font-size:18px/24px}` + `html.watch-video-root{font-size:10px}` | 1em | `Theme.player-unit: 16px` | — | — |
+| 控制层边距（左/上/右/下） | `.top-left-controls{margin:4.5em}` | 4.5 | `player-gutter` = **72px** | 72 | 72 |
+| 进度条可点区高 | `.scrubber-container{height:3.3em}` | 3.3 | `player-hit-height` = **52.8px** | 53 | 53 |
+| 轨道静息高 | `.track{height:.5em}` | 0.5 | `player-bar-height` = **8px** | 8 | 8 |
+| 轨道 hover / 拖动高 | `:hover .track,.is-scrubbing .track{height:1em}` | 1 | `player-bar-height-hover` = **16px** | — | 16 |
+| 拖动头直径 | `.scrubber-head{height:2.3em;width:2.3em;margin:-1.15em}` | 2.3 | `player-bar-knob` = **36.8px** | 36 | 36 |
+| 拖动头 hover / 拖动放大 | `.scrubber-head:hover{transform:scale(1.2)}` | 1.2 | `player-bar-knob-scale` | 44.2 理论 | 44 |
+| 轨道 / 缓冲 / 已播颜色 | `#5b5b5b` / `hsla(0,0%,100%,.2)` / `#e50914` | — | `player-track` / `player-buffered` / `player-progress` | 逐像素一致 | 逐像素一致 |
+| 顶部渐变高 | `.player-loading .gradient{height:11.11111111em}` | 11.111 | `player-top-scrim-height` = **177.8px** | — | 178 |
+| 顶部渐变颜色 | `linear-gradient(180deg,rgba(0,0,0,.651),transparent)` | — | `player-top-gradient`（`#000000A6`） | — | 渐变已生效 |
+| 底部渐变（主层） | `.PlayerControlsNeo__gradient-bottom{…rgba(0,0,0,.7)…;height:20%}` + `.75` | .7×.75 | `player-scrim-bottom: #00000086`（0.525 预乘） | — | — |
+| 底部渐变（第二层） | `.watch-video--bottom-controls-container-scrim{…rgba(0,0,0,.3)…}` | .3 | `player-scrim-floor: #0000004D` | — | — |
+| 底部渐变高度 | `height:20%` | 20% | `max(视口高×0.2, player-scrim-min-height)`，1280×800 → **322.4px** | — | 322 |
+| 左上返回图标 | `.player-exit{width:1.4em;height:1.4em;opacity:.5}` | 1.4 | `player-back-size` = **22.4px** | 22×20（墨迹） | 22×19 |
+| 标题字号 / 字重 | `.title{font-size:2em;font-weight:500}` | 2 | `player-title-size` = **32px** / `player-title-weight` 500 | 32 | 32 |
+| 副标题字号 / 颜色 | `.subtitle{font-size:1.33em}` / `video-title span{color:#adadad}` | 1.33 | `player-subtitle-size` = **21.3px** / `player-subtitle-color: #ADADAD` | — | 21 |
+| 时间码 | `.time-remaining__time{font-size:1.8em}` | 1.8 | `player-time-size` = **28.8px** | — | 29 |
+| 普通按钮盒高 | `.nfp-button-control.default-control-button{height:3.22222222em}` | 3.2222 | `player-control-size` = **51.6px** | — | 52 |
+| 播放钮盒高 | `.PlayerControlsNeo__bottom-controls .nfp-button-control{height:3.6em}` | 3.6 | `player-play-size` = **57.6px** | 盒透明量不到；图标墨迹 16×18（理论 16.9×19.6） | 图标墨迹 16×18 |
+| 按钮内边距 | `.nfp-button-control{padding:0 .83333333em}` | 0.8333 | `player-control-padding` = **13.3px** | — | — |
+| 圆钮底 | `.circle-control-button:before{background:rgba(65,65,65,.85);border-radius:50%}` | — | `player-icon-bg: #414141D9` | — | — |
+| 焦点环 / 常驻边框 | `:focus{outline:3px solid #fff}`、`border:3px solid transparent` | 3px | `player-focus-width: 3px` / `player-focus-color: #fff` | — | 3 |
+| 弹出层底色 / 圆角 | `.popup-content{background:#262626;border-radius:.3em}` | 0.3 | `player-panel-solid: #262626`（圆角沿用 `radius-panel`） | — | — |
+
+### 11.4 图标 → 官方 em 比例 → 我们的 px
+
+官方 `.watch-video .svg-icon.svg-icon-*{width:…em;height:…em}`（左边是官方类名）。
+注意官方还有一层字号嵌套（图标所在按钮 `font-size:2.8em`，`.nfp .svg-icon{font-size:1.1em}`），
+**我们没有复制这层嵌套**：图标盒直接 = `player-unit × 比例`（任务书口径）。比例本身是官方的。
+
+| 图标 | 官方宽 × 高（em） | 我们的 token | 我们的 px（16px 基数） |
+|---|---|---|---|
+| 播放 / 暂停 `nfplayerPlay` / `nfplayerPause` | 1.05555556 × 1.22222222 | `player-icon-play-w/h` | 16.9 × 19.6 |
+| 音量 `volumeLow/Medium/Max/Muted` | 1.33333333 × 1.11111111 | `player-icon-volume-w/h` | 21.3 × 17.8 |
+| 全屏 / 窗口 `nfplayerFullscreen` / `nfplayerWindowed` | 1 × 1 | `player-icon-fullscreen-w/h` | 16 × 16 |
+| 字幕 `nfplayerSubtitles` | 1.33333333 × 1.11111111 | `player-icon-subtitles-w/h` | 21.3 × 17.8 |
+| 集数 `nfplayerEpisodes` | 1.5 × 1 | `player-icon-episodes-w/h` | 24 × 16 |
+| 下一集 `nfplayerNextEpisode` | .83333333 × 1 | `player-icon-next-episode-w/h` | 13.3 × 16 |
+| 快退 10s `nfplayerBackTen` | 1.11111111 × 1.33333333 | `player-icon-back-ten-w/h` | 17.8 × 21.3 |
+| 快进 10s `nfplayerFastForward` | 官方**没给**单独尺寸（与 BackTen 同形镜像） | `player-icon-forward-ten-w/h`（复用上一行） | 17.8 × 21.3 |
+| 重播 `nfplayerReplay` | 1.5 × 1.5 | `player-icon-replay-w/h` | 24 × 24 |
+| 停止 `nfplayerStop` | 1 × 1 | `player-icon-stop-w/h` | 16 × 16 |
+| 投屏 `nfplayerMdx` / `MdxFull` | 1.22222222 × 1 | `player-icon-mdx-w/h` | 19.6 × 16 |
+| 勾选 `nfplayerCheck` | .94444444 × .83333333 | `player-icon-check-w/h` | 15.1 × 13.3 |
+| 返回 `nfplayerBack` | .72222222 × 1 | `player-icon-back-w/h` | 11.6 × 16 |
+| 关闭 `nfplayerExit` | 1 × 1 | `player-icon-exit-w/h` | 16 × 16 |
+
+实际用到的向量图形：播放三角、暂停双竖条、喇叭（含静音斜线）、左上返回箭头。
+其余 10 个比例先存成 token（`theme.slint` 的“播放器图标”段），因为我们的传输行目前是
+**文字标签按钮**（`-15s` / `+15s` / `音轨` / `字幕` / `1x` / `全屏`），不是官方那套 SVG 图标；
+换成图标是另一件事（见 11.7）。
+
+### 11.5 本轮到底改了什么（逐条对官方原文）
+
+| # | 官方原文 | 落地 |
+|---|---|---|
+| 1 | `.scrubber-container{height:3.3em}` | `PlayerProgress` 整体高 = `player-hit-height`＝52.8px（旧 28px），命中区就是这一整条 |
+| 2 | `.track{background:#5b5b5b;height:.5em}` | 轨道**整条铺满**、不透明 `#5B5B5B`、高 8px、**方头**（官方三条都没有 `border-radius`）；旧实现是半透明白 + 胶囊 |
+| 3 | `.buffered{background:hsla(0,0%,100%,.2)}` | 缓冲段改成**叠在轨道上**的半透明层（旧实现把缓冲段的轨道挖空了，缓冲段会比官方暗） |
+| 4 | `.current-progress{background:#e50914}` | 已播段 `Theme.player-progress` = `#E50914` |
+| 5 | `.scrubber-head{height:2.3em;width:2.3em;margin:-1.15em;background:#e50914;border-radius:50%;opacity:1}` | 红色圆点、直径 36.8px，**常驻**（旧实现只在 hover 时出现） |
+| 6 | `.scrubber-head:hover{transform:scale(1.2)}`、`.is-scrubbing .scrubber-head{transform:scale(1.2)}` | `player-bar-knob-scale: 1.2`，hover 与拖动都放大 |
+| 7 | `.track{transition:height .2s ease}` | `animate bar-height { duration: Theme.motion-zoom; easing: cubic-bezier(.25,.1,.25,1) }`（CSS `ease` 的原值），knob 同步 |
+| 8 | `.top-left-controls{margin:4.5em}` | 左上返回 / 底栏左右 / 菜单右边距统一 `player-gutter` = 72px |
+| 9 | `.player-exit{width:1.4em;height:1.4em;opacity:.5;transition:opacity .2s ease-out}` + `:hover{opacity:1}` | 左上返回去掉 44px 圆钮底，改成 22.4px 图标、opacity .5 → 1、`motion-zoom`(200ms) + `ease-out` |
+| 10 | `.player-loading .gradient{…rgba(0,0,0,.651)…;height:11.11111111em}` | 新增顶部渐变层（旧实现根本没有），高 177.8px |
+| 11 | `.title{font-size:2em;font-weight:500}`、`.subtitle{1.33em}`、`video-title span{color:#adadad}` | 底部标题 32px/500、副标题 21.3px `#ADADAD`（旧 22px/600 + 14px muted） |
+| 12 | `.PlayerControlsNeo__gradient-bottom{linear-gradient(0deg,rgba(0,0,0,.7) 0,transparent);height:20%;opacity:.75}` + `bottom-controls-container-scrim{…rgba(0,0,0,.3)…}` | 底部渐变从“两段式 0.94 平台”换成官方**两层**梯度（0.525 + 0.3），高度 = `max(视口×0.2, 控制块 + 两倍留白)` |
+| 13 | `.nfp-button-control{height:3.22222222em;padding:0 .83333333em}`、`border:3px solid transparent` | 传输按钮 51.6px 高、左右内边距 13.3px、3px 透明边框（聚焦/选中时换白） |
+| 14 | `.nfp-button-control{background:transparent}`（底栏按钮**无底色、无描边**） | **控制行统一成一套图标/文字按钮**：播放/暂停、音量、±15s、字幕、音轨、倍速、全屏全部 `background:transparent` + `3px solid transparent`、白色图标/文字、hover 只有极淡高亮（`player-control-hover`）。旧的深色圆底 + 描边（hero 视频圆钮那套）**整块删除** |
+| 15 | `:focus{outline:3px solid #fff}` | `player-focus-width: 3px` + `player-focus-color: #fff`，画在“菜单已打开”的按钮上（见 11.6） |
+| 16 | `.popup-content{background:#262626}`、`li{color:#b3b3b3}`、`.selected{color:#fff;font-weight:500}` | 弹出层底色 `#262626`；行高跟控制层一致（51.6px）；行内文字色沿用原来的 accent/muted（**没改**，见 11.6） |
+| 17 | `.time-remaining__time{font-size:1.8em}` | 时间码 28.8px 等宽（旧 14px） |
+| 18 | 图标比例表（11.4） | 播放/暂停/音量/返回四个图形按 `player-unit × 比例` 重画；`player-icon-glyph: 24px` 这个绝对值 token **已删除** |
+| 19 | 官方播放器画面上**没有任何**常驻/可展开的诊断文字 | 删掉常驻的 `直连 / 转码` 短标签、硬解提示、`Ctrl+D` 展开的引擎行；数据仍在 `PlayerData`（`transport-mode` / `engine-line` / `hwdec-notice` / `show-engine-detail`），交给 `--debug-socket` 的 `view` 读。`Ctrl+D` 从播放页快捷键表整条移除（不留“按了没反应”的键） |
+| 20 | `.nf-big-play-pause button .svg-icon{opacity:.7}`（中央大钮 = 半透明大图标，无底色无描边） | 中央暂停钮去掉 88px 深色圆底 + 描边，改成 3em 的半透明播放图标（`opacity: .7`） |
+| 21 | `.time-remaining__time`（时间位 = **剩余**时长） + 底栏按钮分组 | 时间默认显示 `-2:05:26`（`TimeMode` 默认改成 `Remaining`），放在控制行**最右**；左侧一组 = 播放/暂停、音量、-15s、+15s，右侧一组 = 字幕、音轨、倍速、全屏，组间只有**一个** `horizontal-stretch: 1` |
+| 22 | `.nfp .volume-controller`（图标 + 滑杆；`.scrubber-target{1em}` + `:hover{scale(1.2)}`、`slider-bar-container{#5b5b5b}`、`slider-bar-percentage{#e50914}`） | 音量 = 喇叭图标 + **悬停时向右展开的水平滑杆**（轨道 6.4px `#5B5B5B`、填充 `#E50914`、手柄 `1em`×1.2），点击/拖动滑杆直接设到百分比（新增 `volume-set(float)` 回调链）；`player-icon-bg` / `player-icon-border-width` 两个只为圆钮存在的 token **已删除** |
+
+### 11.6 偏差与自定（不要当成“和 Netflix 一致”）
+
+| 项 | 官方 | 我们 | 理由 |
+|---|---|---|---|
+| **基数** | `watch-video-root` 10px（1920×1080）/ `container-*` 18–24px | `player-unit: 16px` | 见 11.1；16px 是我们选的，**不是官方值**，同样的 em 比例我们会整体大 1.6 倍 |
+| 控制行两种来源 | 播放器底栏：无底色无描边（`background:transparent`）；hero 视频圆钮：`rgba(22,22,22,.7)` 底 + `1px solid rgba(128,128,128,.7)` | 只用前者；后者**不再用在播放器里** | 这两条来自**不同来源**（§7 的实测是 hero 上的浮层圆钮），上一轮误把它套到了控制行，本轮按用户反馈改回官方底栏样式 |
+| 底部渐变的 stop 位置 | 纯线性 `0deg`（从底到顶线性淡出） | `#00000086`（0.525）在底部 **75%** 保持不降，上面 25% 才淡出（第二层 `.3` 同样） | 我们的控制块（标题在顶、进度条、按钮）比官方高，标题会正好压在渐变的透明端点上；颜色与两层结构仍是官方的，只把 stop 下移（亮画面上标题/副标题要可读） |
+| 底部渐变的高度 | `height:20%` | `max(视口高×0.2, 控制块 + 2×player-gutter)`（1280×800 → 322px） | 20% 在 800 高的窗口上只有 160px，装不下 178px 的控制块 |
+| 边距 | `.core-controls .top-left-controls{margin:4em}`、进度行 `padding:0 3em`、按钮行 `padding:0 4em` | 统一 4.5em（72px） | 任务书口径（取 loading 层的 `4.5em`）；三处官方值不一致，统一成一个 token 避免“进度条和按钮左右不对齐” |
+| 播放钮 | 全屏底栏的播放钮是**透明底 + 白色图标**（`.nfp-button-control{background:transparent}`） | 同样透明底 + 白色图标（57.6px 盒、图标按 1.0555×1.2222 em），hover 只有极淡高亮 | 已按官方统一；旧的"红底圆钮"已删除（hero 圆钮那套不适用控制行） |
+| 音量滑杆方向 | 官方 `.volume-controller .slider-container{width:1.5em;height:8em}` 是**垂直** popup | 水平内联展开（图标右侧） | 任务书要求水平；比例/颜色仍照官方。滑杆总宽 `6em`（96px）是**我们自定**，官方没给总宽 |
+| 控制行 hover 反馈 | 官方底栏 hover 只换 `fill`（图标本来就是白 → 视觉上几乎没有变化） | 一层 `hsla(0,0%,100%,.1)` 的极淡白底（官方弹层 `li:hover` 用的就是这个值） | 完全照官方会"悬停没反应"，取官方另一个 hover 值做等价反馈 |
+| 时间模式默认 | 官方只有剩余时长 | 默认剩余，点一下切"已播/总长" | 多了个切换是功能增强（不是常驻额外元素） |
+| 快退 / 快进步长 | 官方图标是 ±10s（`nfplayerBackTen` / `nfplayerFastForward`） | 文字 `-15s` / `+15s`（与键盘 ←/→ 的 15s 一致） | 形态统一了，步长保留我们的（改步长会连带改键盘语义与测试）；图标比例已在 11.4 备好 |
+| 传输行内容 | SVG 图标（播放/快退10/快进10/集数/字幕/音轨/倍速/全屏） | 文字标签按钮（`-15s` / `+15s` / `音轨` / `字幕` / `1x` / `全屏`） | 图标比例已进 token（11.4），但把文字行换成图标行会连带改进度/菜单锚点，不在本轮范围 |
+| 键盘焦点环 | `:focus{outline:3px solid #fff}`，由 `.kb-nav` 键盘导航驱动 | 同样的 3px 白边框，但画在“这个菜单已打开/选中”的按钮上 | 播放页没有逐控件的键盘焦点模型（键位由 `app.slint` 的全局 `FocusScope` 分派给 Rust），这是最接近的可见状态；等有了控件级导航再接真正的 `:focus` |
+| `--dimmed` 整屏压暗 | `.PlayerControlsNeo__layout--dimmed{background-color:rgba(0,0,0,.5)}` | **没用** | 同一个规则组里还写着 `--dimmed .PlayerControlsNeo__core-controls{opacity:0}`：压暗时控制层是隐藏的，说明它是另一个状态（菜单/加载），不是“控件可见就压暗整帧”。token `player-dim` 保留备查 |
+| 时间气泡 | 官方只有 trickplay **缩略图**（`.trickplay`），没有文字气泡 | 保留我们的文字气泡（`player-bubble-height`） | 我们没有生成 trickplay 缩略图的能力 |
+| 诊断行（直连 / 转码 / hwdec / 引擎行） | 无对应规则（Netflix 播放画面上没有任何诊断文字） | **本轮已从画面删除**（连 `Ctrl+D` 一起）；数据留在 `PlayerData`，只给调试通道 | 它属于我们自己的调试残留，不是用户播放时需要的信息；删掉后标题行只剩标题 + 副标题（见 11.7） |
+| 弹出层的行内排版 | `li{color:#b3b3b3;font-size:.72222222em;padding:1em 3.4em}`、`list-header{font-size:.9444em;padding:.75em 2.6em}` | 只对齐了底色（`#262626`）、行高与标题条高度；字号仍是 14/12px | 菜单不是本轮 5 项之一；`.7222em` × 16px = 11.6px 会让中文行变得难读（官方基数 10px 时才 7.2px，是“小字菜单”） |
+| `cursor:none` | `.nf-player-container.inactive{cursor:none}` | 用 `TouchArea.mouse-cursor: MouseCursor.none` 实现（已有） | Slint 1.19 用户代码**确实**能设 `mouse-cursor`，所以这条是照做的，不是跳过 |
+
+### 11.7 与官方播放器的元素对照
+
+判断标准只有一条：**播放时用户真正需要的信息**才留在画面上，其余都是我们自己的诊断 / 调试残留。
+
+| 元素 | 官方播放器 | 我们 | 处理 |
+|---|---|---|---|
+| 返回箭头 | `.player-exit{width:1.4em;height:1.4em;opacity:.5}` + hover `.5 → 1` | 左上 1.4em 箭头、opacity .5 → 1、200ms ease-out | **保留**（照官方） |
+| 标题 + 副标题 | `.video-title h4{font-size:2.2em}` + `span{color:#adadad;font-size:2em}`；loading 层 `.title{2em;500}` / `.subtitle{1.33em}` | 32px/500 + 21.3px `#ADADAD` | **保留**（照官方排版梯度） |
+| 进度条 + 把手 | `.scrubber-container` 全套 | 3.3em 命中区 / 8→16px 轨道 / 36.8px 红把手 | **保留**（照官方，见 11.3） |
+| 时间 | `.time-remaining__time{font-size:1.8em}`，显示**剩余** | 28.8px 等宽、控制行最右、默认 `-2:05:26`；点一下切 `12:34 / 2:18:00` | **保留**（默认已按官方改成剩余；切换是增益） |
+| 播放 / 暂停 | 底栏图标钮（透明底、白色图标） | 透明底图标钮 57.6px，图标按 1.0555×1.2222 em | **保留**（已统一成官方形态，见 11.11） |
+| 快退 / 快进 | `nfplayerBackTen` / `nfplayerFastForward` 图标（±10s） | 文字钮 `-15s` / `+15s` | **保留**（功能等价、步长是我们选的 15s；图标比例已存 token 备用） |
+| 音量 | 图标 + 滑条（官方 popup 是垂直的） | 图标（点击静音）+ 悬停时向右展开的**水平滑杆**，手柄红色圆点 | **保留**（滑杆按任务书做水平；数字百分比已从画面移除，见 11.11） |
+| 音轨 / 字幕 | `audio-subtitle-controller` 弹层 | 同构弹层 + 官方 `#262626` 底 | **保留** |
+| 倍速 | `speed-controller` 弹层（0.5×–1.5× 刻度） | 单钮循环 1× → 1.25× → 1.5× → 0.75× | **保留**（简化形态，功能在） |
+| 全屏 | `nfplayerFullscreen` / `nfplayerWindowed` | 文字钮（`全屏` / `退出全屏`） | **保留** |
+| 下一集 | `nfplayerNextEpisode` + 底栏钮 | **缺** | 暂不做（我们没有播放队列 / 连播上下文；`PlayerData` 里也没有 next 字段） |
+| 集数选择 | `nfplayerEpisodes` + `.episode-list` | **缺** | 暂不做（同上） |
+| 投屏 mdx | `nfplayerMdx` | **缺** | 不做（我们的播放器是本机 mpv） |
+| 暂停时中央播放钮 | `.nf-big-play-pause`（图标 `opacity:.7`，无底圆） | 88px 半透明圆 + 图标 | **保留**（尺寸自定；半透明底是为了压住字幕区） |
+| 缓冲指示 | **转圈动画**，无文字 | `缓冲中…` 文字角标（放官方 `top-right-controls` 的 4.5em 位置） | **保留**：Slint 1.19 没有内建 spinner，也没有循环动画能力（`Timer` 无法替代声明式动画）；文字是最小代价的等价信息。**这是画面上唯一一个“官方用动画、我们用文字”的常驻元素**（只缓冲时出现） |
+| 错误提示 | fatal-error 视图 + 退出 | 错误卡 + 原因 + 重试 | **保留**（照官方结构简化） |
+| 拖动时的时间气泡 | **trickplay 缩略图**（`.trickplay`） | 文字气泡（`12:34`） | **保留**（没有生成缩略图的能力；气泡只在拖动时出现，不常驻） |
+| 常驻诊断：`直连 / 转码`、硬解提示、`Ctrl+D` 引擎行 | **没有这类东西** | 曾有三条常驻文字 | **已删除**（本轮）；数据留在 `PlayerData` 给 `--debug-socket` |
+| 首帧前的空态 | 转圈 | `视频画面` + 一行 HDR 说明 | **保留**（只在没有画面时出现，播放时不渲染）；顺手删掉过时的开发提示「引擎接入后由 mpv 渲染到这里」 |
+
+结论：删掉了 3 条常驻文字（都是我们自己的诊断），删掉了 1 行过时的开发提示；
+其余“我们多的”都是**功能**（时间气泡、音量数字、菜单里的字幕延迟 / 外挂字幕），
+它们要么只在交互时出现，要么在菜单里，不属于“播放画面上常驻的状态文字”。
+官方有而我们没有的只有三项：**下一集 / 集数选择 / 投屏**，理由都写在表里。
+
+菜单里的层级也顺手压了一档（`ActionRow`）：字幕延迟 / 外挂字幕从 14px 降到 **12px**、
+行高 44px < 轨道行 51.6px，上方有 `Theme.hairline` 分隔线——轨道列表仍是菜单主体。
+（Slint 里画分隔线的成本不高，所以直接在 `TrackMenu` 里放了一条 `Rectangle`，不用改结构。）
+
+### 11.8 没找到 / 没做的官方规则（明确列出）
+
+- **完整控制条布局**：官方 DOM 里是 `top-left-controls` / `top-right-controls` / `progress-container`
+  / `button-control-row-left|right` 四块，但 CSS 只给 padding/margin，**没有给出各按钮的顺序、
+  分组与完整间距**（那是 React 组件的结构，不在样式表里）。我们的顺序（播放 → ±15s → 时间 →
+  音量 → 音轨 → 字幕 → 倍速 → 全屏）是自己的。
+- **倍速菜单**：只找到 `.speed-controller{padding:1em 1.4em}`、`.values .value{width:6.1em;…}`、
+  `.active-dot{…}` 这些内部零件，**没有找到整套弹层的容器尺寸**。我们仍是“点一下循环倍速”。
+- **字幕渲染样式**：`.player-timedtext*` 只有字体族覆盖（`[lang=ja]{font-family:…}`）与
+  `.VideoContainer--hide-subtitles`，字幕的位置/字号由浏览器 `::cue` 与引擎决定；
+  我们这条链路由 mpv 渲染，界面上只能标注“引擎渲染，样式不可改”（已有）。
+- **trickplay 缩略图**：规则有（`.trickplay{…border-radius:.3em;bottom:2.5em}`、
+  `.tp-text{font-size:1.8em;padding:.5em 0}`），但缩略图本身是服务端生成的雪碧图，我们没有。
+- **键盘导航状态机**：只有 `.nf-kb-nav-wrapper.kb-nav` 下的 `:focus` 样式，没有“焦点如何移动”的规则。
+- **`--active` / `--inactive` / `--dimmed` / `--timedout` 四个状态的切换时机**：样式表里只有样式，
+  没有时序（3 秒自动隐藏是我们的 `pages::player::TICK_INTERVAL` 相关逻辑）。
+
+### 11.9 快照变化（本轮 8 张，其余 21 张逐字节不变）
+
+`cargo test -p nova-ui --test snapshots` 重拍后与改动前逐像素比对（bbox = 差异外接框）：
+
+| 快照 | 差异区域 bbox | 差异像素 | 为什么变 |
+|---|---|---|---|
+| `player.png` / `player-controls.png` | 全图 | 633 740 | 同一帧两存：① 底部换成官方两层渐变（顶部 45% 变透明、底部更暗）+ 新增顶部渐变；② 标题 22/600 → 32/500、副标题 14 → 21.3/`#ADADAD`，右侧三条常驻诊断（`直连`/硬解/引擎行）**整块删除**；③ 进度条 4px 半透明白胶囊 → 8px `#5b5b5b` 方头 + 36.8px 红把手常驻 + 缓冲段改为叠加；④ 返回钮 44px 圆钮 → 22.4px icon；⑤ **控制行统一**：红底播放圆钮 / 深色音量胶囊 + 描边 → 全部透明底白色图标/文字，音量改成图标 + 悬停滑杆，按钮从 `space-3` 改成 `space-2` 间距；⑥ 时间码从左侧 `12:34 / 2:18:00` 挪到**最右**并默认显示剩余 `-2:05:26`；⑦ 音量百分比数字从界面移除 |
+| `player-controls-bright.png` | 全图 | 638 720 | 同上；另外这是唯一验证“亮画面上文字可读”的帧：官方两层渐变（0.525 + 0.3）+ 底部 75% 平台后，米白画面上的实测对比度 = 标题 3.9–5.2:1、时间码/按钮 8.3:1、副标题（官方 `#adadad`）2.3–3.7:1（比旧的两段式 0.94 平台低；副标题偏淡是官方颜色 + 官方渐变叠加的必然结果，要更黑就得偏离官方）|
+| `player-buffering.png` | 全图 | 633 740 | 同 `player-controls` + 缓冲角标从 (right−gutter, 24px) 移到官方 `top-right-controls` 的 `margin:4.5em` 位置（72,72），高度改用 `player-badge-height`（2.25em = 36px，外观不变） |
+| `player-volume-hint.png` | 全图 | 638 720 | 同 `player-controls`。这张的**语义变了**：以前验证“短时音量数字”，现在数字已从界面移除，验证的是“静音态下喇叭换成静音字形 + 控制行统一形态”（`volume-text` / `volume-hint` 数据仍在 viewmodel，只是没有元素读它） |
+| `player-error.png` | 全图 | 699 889 | 同 `player-controls` + 错误卡底 `#141414` → `#262626`（官方 `.popup-content` 底色）、重试按钮跟着变 |
+| `player-audio-menu.png` | 全图 | 650 956 | 同 `player-controls` + 菜单底 `#141414` → `#262626`、行高 52 → 51.6、菜单右边距 `Theme.gutter`(51) → `player-gutter`(72)、锚点跟着进度条变、`音轨` 按钮多一圈 3px 白描边（= `:focus` 环）；按钮从胶囊底色改成无底色后，菜单附近的像素也一起变 |
+| `player-subtitle-menu.png` | 全图 | 714 761 | 同 `player-audio-menu` + 字幕菜单多 3 行动作行（`字幕延迟 ±0.5s` / `加载外挂字幕…`，字号 14 → **12**、行高 44px），行高变化被 5 行放大 |
+| `player-controls-hidden.png` | — | 0 | 控制层不可见 → 顶部/底部渐变与所有控件一起 `opacity:0` 且不参与命中测试（**逐字节不变**是“隐藏时全不可点”的正面证据） |
+
+其余 21 张（`home-*` / `detail*` / `library` / `search*` / `banner-*` / `add-server-*`）逐字节不变。
+
+中途踩到的坑：海报卡底部“继续观看”进度条也引用了 `Theme.player-track`，把轨道色改成
+`#5b5b5b` 会让首页 4 张快照出现 1 600+ 像素的差异；已拆出独立 token
+`Theme.card-progress-track`（仍是半透明白），首页回到逐字节不变。
+
+删除三条常驻诊断**没有**再动布局高度：它们和标题在同一行（`HorizontalLayout`），
+行高由标题的 2em 行高撑开，所以控制块高度、进度条与按钮的 y 坐标都没变，
+差别只是标题行右侧那三个文本块不再画（见 `player-controls*.png` 的标题行）。
+
+### 11.10 真机验证（1920×1080）
+
+```bash
+WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 NOVA_DATA_DIR=$HOME/.local/share/nova \
+  ./target/release/nova-desktop --window-size 1920x1080 --play 6564 \
+  --screenshot /tmp/player.png --screenshot-delay 8000
+# screenshot: 1920x1080 -> /tmp/player.png
+```
+
+| 量 | 理论（官方 em × 16px） | 真机实测 |
+|---|---|---|
+| 进度条轨道高 | `0.5 × 16` = 8px | **8px**（行 904–911） |
+| 拖动头直径 | `2.3 × 16` = 36.8px | **36px**（y 890–925） |
+| 控制层左边距 | `4.5 × 16` = 72px | **72px**（轨道 x 72…1847，右侧同理 1920−72−1） |
+| 控制层下边距 | 72px | **72px**（播放钮 y 951–1006，底 1007 ≈ 1080−72） |
+| 播放/暂停图标 | `1.0555 × 1.2222 em` = 16.9 × 19.6px | **16 × 18px**（墨迹 bbox x 93–108 / y 970–987；按钮盒 57.6px 透明、像素上量不到底色） |
+| 左上返回图标 | `1.4 × 16` = 22.4px | **22×20px**（墨迹 bbox x 72–93 / y 73–92） |
+| 进度条 hover（无头） | `1 × 16` = 16px / 把手 `36.8 × 1.2` = 44.2px | **16px / 44px**（临时测试：指针移到 (600,628) 后拍帧，验证完已删除该测试文件） |
+| 音量滑杆（无头） | 轨道 `.4em` = 6.4px / 手柄 `1em`×1.2 = 19.2px / 总宽 6em = 96px（自定） | **6px / 19px / 滑杆从图标右侧展开约 96px**（临时测试：指针移到音量钮 (160,699) 后拍帧，见 `/tmp/player-volume-open.png`） |
+| 剩余时间右对齐 | 右侧留白 72px | **11px** 内边距 + 文字右缘 1837（容差 3px，等宽字体边距） |
+
+图象：第一次跑（`--screenshot-delay 8000`）该条目报了「这个条目没有可播放的版本」→ 错误卡；
+再跑就正常起播了（说明那是当次的服务端 / 选源结果，不是稳定状态）。三张图都留着当证据：
+
+- `/tmp/player-controls-1920.png`（`--screenshot-delay 2000`）：控制层可见，上面的量测都出自它，
+  标题行**只有**「阿基拉　1988 · 动画 / 科幻」，没有任何诊断文字；控制行是统一的无底色按钮 +
+  左侧 `音量/-15s/+15s`、右侧 `字幕/音轨/1×/全屏`、最右剩余时间 `-2:04:46`。
+- `/tmp/player-volume-open.png` / `/tmp/player-scrub-hover.png`：无头临时测试（验证完已删除），
+  分别验证“音量滑杆悬停展开”与“进度条 hover 变粗”。
+- `/tmp/player.png`（`--screenshot-delay 8000`）：控制层已按 3 秒规则自动隐藏，只剩画面。
+
+顺带记一个**偶发**现象（与本轮改动无关）：某一跑里 mpv 首帧在 1920×1080 下上下 + 左右翻转
+（片头的日文标题是倒的），随后用**同一条命令**再跑两次都是正的；`--window-size 1280x800` 也复现过一次。
+既然不稳定复现，更像首帧 / 尺寸协商期的纹理朝向问题，记为**待排查**，本轮只改 `.slint`（不碰 GL），
+没有追溯。
+
+### 11.11 控制行统一 + 音量滑杆（用户反馈的两项）
+
+前一轮把"hero 视频圆钮"的实测样式（深色圆底 `rgba(22,22,22,.7)` + `1px solid rgba(128,128,128,.7)`
+描边）套到了播放器控制行上，结果是**同一行两种控件语言**：音量是深色胶囊钮，右边的
+「字幕 / 音轨 / 1× / 全屏」是纯文字。用户直接反馈"音量按键也很不和谐"。本轮按官方底栏重做。
+
+#### 官方原文（这一段决定"统一形态"）
+
+```
+.nfp-button-control{align-items:center;background:transparent;border:0;box-sizing:content-box;
+  cursor:pointer;display:flex;flex:0 0 auto;justify-content:center;outline:none;fill:#fff}
+.PlayerControlsNeo__bottom-controls .nfp-button-control{border:3px solid transparent;
+  border-radius:.3em;box-sizing:border-box;font-size:2.8em;height:3.6em;padding:0 0 .6em;width:3.4em}
+.PlayerControlsNeo__button-control-row{align-items:center;display:flex;
+  justify-content:space-between;padding-right:.9em}
+.PlayerControlsNeo__button-control-row-left,
+.PlayerControlsNeo__button-control-row-right{align-items:center;display:flex;padding:0 4em}
+.nf-kb-nav-wrapper.kb-nav .PlayerControlsNeo__bottom-controls .nfp-button-control:focus{
+  border:3px solid #fff;outline:0}
+/* 音量 */
+.nfp .volume-controller .slider-container{align-content:center;align-items:center;background:#262626;
+  border-radius:.3em;box-sizing:border-box;display:flex;flex-direction:column;height:8em;padding:1em 0;
+  transition:opacity .3s ease;width:1.5em}
+.nfp .volume-controller .slider-bar-container{background:#5b5b5b;box-sizing:border-box;height:100%;
+  position:relative;width:.4em}
+.nfp .volume-controller .slider-bar-percentage{background:#e50914;bottom:0;left:0;position:absolute;right:0}
+.nfp .volume-controller .scrubber-target{height:1em;left:50%;margin:-.5em;position:absolute;
+  transform:scale(1);transition:transform .2s ease;width:1em}
+.nfp .volume-controller .scrubber-target:hover{transform:scale(1.2)}
+.nfp .volume-controller .scrubber-head{background:#e50914;border-radius:50%;height:100%;
+  position:absolute;width:100%}
+```
+
+#### 落地
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| 播放 / 暂停 | 红底圆钮（`Theme.accent`，57.6px） | 透明底 + 白色 pause/play 图标（盒 57.6px），hover 只有极淡高亮 |
+| 音量 | 深色圆底 + 1px 描边胶囊 + 短时百分比文字 | 透明底喇叭图标（点击静音）+ **悬停展开的水平滑杆** |
+| -15s / +15s | 深色胶囊 + 文字 | 透明底 + 白字（`-15s` / `+15s`） |
+| 字幕 / 音轨 / 倍速 / 全屏 | 透明底但边框色 `hairline-strong`、active 时换 accent 字色 | 透明底 + 白字，active 只留 3px 白焦点环、不换字色 |
+| 中央暂停大钮 | 88px 深色圆底 + 描边 | 3em 半透明的播放图标（官方 `.svg-icon{opacity:.7}`） |
+| 分组 | 播放、-15s、+15s、时间、`stretch`、音量+数字、音轨、字幕、倍速、全屏（时间在左、弹性间距在组内） | 左组：播放 / 音量 / -15s / +15s；**组间一个 `horizontal-stretch: 1`**；右组：字幕 / 音轨 / 倍速 / 全屏；最右：剩余时间 |
+| 时间 | 左侧 `12:34 / 2:18:00` | 最右 `-2:05:26`（`TimeMode` 默认改成 `Remaining`；点一下仍可切已播/总长） |
+| 音量数字 | `volume-text` + `volume-hint` 画在按钮右边 | **从界面移除**（官方没有数字）；`PlayerData.volume-text` / `volume-hint` 与 viewmodel 逻辑保留，只是没有元素读 |
+
+#### 音量滑杆的取值（哪些是官方、哪些是我们自定）
+
+| 项 | 值 | 来源 |
+|---|---|---|
+| 图标→滑杆的展开 | 鼠标悬停 / 拖动中展开，`Theme.motion`(180ms) + `ease-out` | 我们自定（官方是 popup，靠 CSS `:hover` 显示） |
+| 滑杆方向 | **水平** | 任务书要求；官方 CSS 里 `.slider-container{width:1.5em;height:8em}` 是**垂直** popup（已在此说明，不假装一致） |
+| 滑杆总宽 | `6 × player-unit` = 96px | **我们自定**（官方未给总宽） |
+| 轨道粗细 | `.slider-bar-container{width:.4em}` = **6.4px** | 官方 |
+| 轨道色 / 填充色 | `#5b5b5b` / `#e50914`（与进度条同一套 token） | 官方 |
+| 手柄 | `1em` = **16px** 红色圆点，hover / 拖动中 ×1.2 | 官方（`.scrubber-target{height:1em;width:1em}` + `:hover{scale(1.2)}`） |
+| 点击 / 拖动 | 按下与拖动都把 `mouse-x` 映射成 0..1 并调 `volume-set(float)` | 我们实现（官方是拖 popup 里的滑条） |
+| 静音时 | 图标换静音字形，滑杆仍可拖动；往上拖自动解除静音 | 官方无明文（`<audio>` 语义），与键盘加音量同一口径 |
+| 键盘聚焦展开 | **没做**（播放页没有逐控件焦点模型，同 11.6 的焦点环说明） | 已知缺口 |
+
+`volume-set(float)` 是一条新回调链：`PlayerOverlay.volume-set` → `PlayerShellPage.volume-set`
+→ `AppWindow.player-volume-set` → Rust `player_volume_set()`；它**只**写 `PlayerView.volume`
+（+ 解除静音 + `note_volume_change()`）并把目标值交给已有的引擎回调 `on_player_volume`，
+**没有**碰任何播放逻辑。

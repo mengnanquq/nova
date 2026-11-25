@@ -50,20 +50,51 @@ export global Theme {
     // 次按钮（更多信息 / 我的列表）。
     in property <color> btn-secondary-bg: #FFFFFF26;
     in property <color> player-bg: #000000;
-    // 播放控制层：底部渐变遮罩（比普通页面更深）。
-    in property <color> player-scrim-bottom: #000000F0;
-    in property <color> player-scrim-mid: #000000D9;
+    // 播放控制层：底部渐变。官方原文（`/tmp/live_akira.css`）：
+    //   `.PlayerControlsNeo__gradient-bottom{background-image:linear-gradient(0deg,rgba(0,0,0,.7) 0,transparent);
+    //      bottom:0;height:20%;opacity:0}`
+    //   `.PlayerControlsNeo__layout--active .PlayerControlsNeo__gradient-bottom{opacity:.75}`
+    // 即**单段** `.7` 黑 → 透明（不是我们原来的两段式），高度 20%，激活时整层再乘 0.75。
+    // 0.7 × 0.75 = 0.525 → alpha 134（`#86`）。**预乘在这里写死**：如果在 Slint 里
+    // 给整个 Rectangle 设 `opacity: .75`，它的子控件（标题 / 按钮）也会变成半透明。
+    in property <color> player-scrim-bottom: #00000086;
     in property <color> player-scrim-top: #00000000;
-    // 进度条三层：轨道 / 已缓冲 / 已播（Netflix 红）。
-    in property <color> player-track: #FFFFFF33;
-    in property <color> player-buffered: #FFFFFF66;
-    // 圆钮底：Netflix 实测 `rgba(22,22,22,.7)`（hero 内的视频控制圆钮）。
-    in property <color> player-icon-bg: #161616B3;
-    // 圆钮描边：实测 `1px solid rgba(128,128,128,.7)`。
-    in property <color> player-icon-border: #808080B3;
-    in property <length> player-icon-border-width: 1px;
-    // 菜单 / 错误卡 / 气泡的不透明底。
-    in property <color> player-panel-solid: #141414;
+    // 官方 `.watch-video--bottom-controls-container-scrim{
+    // background-image:linear-gradient(0deg,rgba(0,0,0,.3) 0,transparent)}`：
+    // 控层 DOM 里的**第二层**底渐变（和 `PlayerControlsNeo__gradient-bottom` 叠加）。
+    in property <color> player-scrim-floor: #0000004D;
+    // 官方顶部渐变（loading 层）：`background:linear-gradient(180deg,rgba(0,0,0,.651),transparent)`；
+    // 全屏层是 `linear-gradient(180deg,rgba(0,0,0,.7) 0,transparent)` + `height:20%` + `opacity:.75`。
+    // 我们按 loading 层这条（任务书口径），全屏层那条记在 docs §11。
+    in property <brush> player-top-gradient: @linear-gradient(180deg, #000000A6 0%, #00000000 100%);
+    // 官方 `.PlayerControlsNeo__layout--dimmed{background-color:rgba(0,0,0,.5)}`：
+    // 我们**不用**这一条（同组的 `--dimmed .PlayerControlsNeo__core-controls{opacity:0}`
+    // 说明那是“控件隐藏”的另一个状态，不是“控件可见就压暗整帧”）。留 token 记录原文。
+    in property <color> player-dim: #00000080;
+    // 官方 `.PlayerControlsNeo__layout--active … {opacity:.75}`（已预乘进上面的底色，
+    // 留这个数只为对照）。
+    in property <float> player-scrim-opacity: 0.75;
+    // 进度条三层：轨道 / 已缓冲 / 已播。官方原文（`.nfp .scrubber-container …`）：
+    //   `.track{background:#5b5b5b}`、`.buffered{background:hsla(0,0%,100%,.2)}`、
+    //   `.current-progress{background:#e50914}`
+    in property <color> player-track: #5B5B5B;
+    in property <color> player-buffered: #FFFFFF33;
+    in property <color> player-progress: #E50914;
+    // 海报卡底部的“继续观看”进度条轨道：仍沿用旧的半透明白（卡在海报上，
+    // 不能像播放器那样用不透明的 `#5b5b5b`，否则在亮海报上会变成一条深灰。
+    in property <color> card-progress-track: #FFFFFF33;
+    // 播放器控制行的按钮**没有底色**：官方 `.nfp-button-control{background:transparent}` +
+    // `border:3px solid transparent`（底栏里播放/音量/字幕/音轨/全屏全是这一套）。
+    // 旧版把 hero 视频圆钮的实测样式（`rgba(22,22,22,.7)` 底 + `1px solid rgba(128,128,128,.7)` 描边）
+    // 套到了控制行上，那一层**已删除**——两处来源不同，不要混用（见 §7 / §11.6）。
+    // hover 反馈：官方底栏 hover 只换 `fill`、没有底色；我们用一层极淡白
+    //（取官方弹层 `li:hover{background:hsla(0,0%,100%,.1)}` 的同一个值）。
+    in property <color> player-control-hover: #FFFFFF1A;
+    // 官方按钮常驻 `border:3px solid transparent`，键盘焦点时换成 `3px solid #fff`；
+    // 所以透明边框色在这里，宽度直接用 `player-focus-width`（3px）。
+    in property <color> player-icon-border: #00000000;
+    // 菜单 / 错误卡 / 气泡的不透明底：官方 `.nfp-popup-control .popup-content{background:#262626}`。
+    in property <color> player-panel-solid: #262626;
     in property <color> player-menu-selected: #FFFFFF14;
     in property <color> warning: #E9A03C;
 
@@ -407,23 +438,127 @@ export global Theme {
     in property <length> button-primary-height: 44px;
     in property <length> play-button-width: 130px;
     in property <length> info-button-width: 150px;
-    // 播放页参数不变。
-    in property <length> player-scrim-height: 264px;
-    in property <length> player-bar-height: 4px;
-    // 悬停 / 拖动时轨道变粗（Netflix 规则 `.scrubber-container:hover .track { height: 1em }`
-    // 是大屏播放器的 16px；我们的控制层按 40px 控件缩过，取 8px）。
-    in property <length> player-bar-height-hover: 8px;
-    // 拖动头 12px，悬停 / 拖动时放大 1.2 倍（实测 `.scrubber-head:hover { transform: scale(1.2) }`）。
-    in property <length> player-bar-knob: 12px;
+    // ================= 播放器尺寸体系（官方整套播放器用 em）=================
+    //
+    // 官方原文（`/tmp/live_akira.css`）：
+    //   `.NFPlayer.container-large{font-size:24px}`
+    //   `.NFPlayer.container-small{font-size:18px}`
+    //   `html.watch-video-root{font-size:10px!important}`，另有一串断点：
+    //     `@media (max-width:1280px)/(max-height:720px){font-size:9px}`
+    //     `(max-width:1152px)/(max-height:648px){8px}`、`(max-width:1024px)/(max-height:576px){7.2px}`、
+    //     `(max-width:960px)/(max-height:540px){6.6px}` …
+    // 三条线索互相矛盾（container-* 是 loading / postplay 小窗的 18/24px，
+    // watch-video-root 才是全屏页面的 html 根），而我们**无法登录会员端**去确认
+    // 真实播放器最终生效的基数。所以：
+    //   - **比例全部照抄官方 em**；
+    //   - **基数由我们选定 16px**（`player-unit`，桌面窗口折中，介于官方 18 与 24 之间）；
+    //   - 所有播放器尺寸 = `player-unit × 官方 em 值`，组件里不再写零散 px。
+    // 详见 docs/ui-netflix-1to1.md §11。
+    in property <length> player-unit: 16px;
+    // 控制层边距：官方 `.watch-video .player-loading .top-left-controls{margin:4.5em}`
+    // （全屏层 `PlayerControlsNeo__core-controls .top-left-controls{margin:4em}`，
+    //  进度行 `padding-left/right:3em`、按钮行 `padding:0 4em`——差异记在 §11）。
+    in property <length> player-gutter: root.player-unit * 4.5;
+    // 焦点环：官方 `.nf-kb-nav-wrapper.kb-nav … :focus{outline:3px solid #fff}` 与
+    // 按钮常驻的 `border:3px solid transparent`。
+    in property <length> player-focus-width: 3px;
+    in property <color> player-focus-color: #FFFFFF;
+    // 进度条（`.nfp .scrubber-container{height:3.3em}` / `.track{height:.5em}` /
+    // `:hover/.is-scrubbing → 1em` / `.scrubber-head{height:2.3em;width:2.3em;margin:-1.15em}`）。
+    in property <length> player-hit-height: root.player-unit * 3.3;
+    in property <length> player-bar-height: root.player-unit * 0.5;
+    in property <length> player-bar-height-hover: root.player-unit * 1;
+    in property <length> player-bar-knob: root.player-unit * 2.3;
     in property <float> player-bar-knob-scale: 1.2;
-    in property <length> player-hit-height: 28px;
-    in property <length> player-control-size: 40px;
-    in property <length> player-play-size: 56px;
-    // 圆钮里的图标字形 / 图形边长（Netflix 实测内图标 24×24）。
-    in property <length> player-icon-glyph: 24px;
-    in property <length> player-icon-size: 88px;
+    // 标题 / 副标题：官方 loading 层 `.title{font-size:2em;font-weight:500}`、
+    // `.subtitle{font-size:1.33em}`；全屏层的 `video-title span{color:#adadad;font-size:2em}`。
+    in property <length> player-title-size: root.player-unit * 2;
+    in property <int> player-title-weight: root.weight-medium;
+    in property <length> player-subtitle-size: root.player-unit * 1.33;
+    in property <color> player-subtitle-color: #ADADAD;
+    in property <length> player-title-row-height: root.player-title-size * root.text-line-height;
+    // 左上返回：官方 `.player-exit{width:1.4em;height:1.4em;opacity:.5;transition:opacity .2s ease-out}`。
+    in property <length> player-back-size: root.player-unit * 1.4;
+    in property <float> player-back-opacity: 0.5;
+    // 顶部渐变高度：官方 loading 层 `height:11.11111111em`。
+    in property <length> player-top-scrim-height: root.player-unit * 11.11111111;
+    // 按钮盒：官方 `.nfp-button-control.default-control-button{height:3.22222222em}`；
+    // 全屏底栏 `.PlayerControlsNeo__bottom-controls .nfp-button-control{height:3.6em;width:3.4em}`。
+    in property <length> player-control-size: root.player-unit * 3.22222222;
+    in property <length> player-play-size: root.player-unit * 3.6;
+    in property <length> player-control-padding: root.player-unit * 0.83333333;
+    // 中央大播放钮（我们自己的覆盖层，官方无对应规则，见 §11 的“自定”清单）。
+    in property <length> player-icon-size: root.player-unit * 5.5;
+    // 时间码：官方 `.time-remaining__time{font-size:1.8em}`。
+    in property <length> player-time-size: root.player-unit * 1.8;
+    // 音量滑杆：官方 `.volume-controller .slider-container{width:1.5em;height:8em}`（**垂直** popup）、
+    // `.slider-bar-container{background:#5b5b5b;width:.4em}`、`.slider-bar-percentage{background:#e50914}`、
+    // `.scrubber-target{height:1em;width:1em}` + `:hover{transform:scale(1.2)}`。
+    // 我们按任务书做成**水平**内联展开（官方未给总宽，6em 是我们自定）；
+    // 轨道/填充/手柄的比例与颜色照官方。
+    in property <length> player-volume-slider-width: root.player-unit * 6;
+    in property <length> player-volume-bar: root.player-unit * 0.4;
+    in property <length> player-volume-knob: root.player-unit * 1;
+    // 拖动时间气泡高（气泡是我们自加的，官方只有 trickplay 缩略图）。
+    in property <length> player-bubble-height: root.player-unit * 1.75;
+    // 缓冲角标高（自定：官方没有这个角标）。
+    in property <length> player-badge-height: root.player-unit * 2.25;
+    // ---- 播放器图标：官方 `svg-icon-*` 的 em 比例（宽 × 高）----
+    //
+    // 官方原文（`/tmp/live_akira.css`，`.watch-video .svg-icon.svg-icon-*` 全套）：
+    //   nfplayerPlay/Pause 1.05555556 × 1.22222222
+    //   volumeLow/Medium/Max/Muted 1.33333333 × 1.11111111
+    //   nfplayerFullscreen/Windowed 1 × 1
+    //   nfplayerSubtitles 1.33333333 × 1.11111111
+    //   nfplayerEpisodes 1.5 × 1
+    //   nfplayerNextEpisode .83333333 × 1
+    //   nfplayerBackTen 1.11111111 × 1.33333333（nfplayerFastForward 官方没给单独尺寸，
+    //     它和 BackTen 是同一套图形、镜像使用，这里复用同一对比例）
+    //   nfplayerReplay 1.5 × 1.5
+    //   nfplayerStop 1 × 1
+    //   nfplayerMdx/MdxFull 1.22222222 × 1
+    //   nfplayerCheck .94444444 × .83333333
+    //   nfplayerBack .72222222 × 1
+    //   nfplayerExit 1 × 1
+    // 注意官方还有一层字号嵌套（`.nfp .svg-icon{font-size:1.1em}` 在 `font-size:2.8em` 的
+    // 按钮里，再乘 `.nfp-button-control{font-size:2.8em}`），**我们不复制这层嵌套**：
+    // 图标盒直接用 `player-unit × 比例`（任务书口径），比例本身照抄。
+    in property <float> player-icon-play-w: 1.05555556;
+    in property <float> player-icon-play-h: 1.22222222;
+    in property <float> player-icon-volume-w: 1.33333333;
+    in property <float> player-icon-volume-h: 1.11111111;
+    in property <float> player-icon-fullscreen-w: 1;
+    in property <float> player-icon-fullscreen-h: 1;
+    in property <float> player-icon-subtitles-w: 1.33333333;
+    in property <float> player-icon-subtitles-h: 1.11111111;
+    in property <float> player-icon-episodes-w: 1.5;
+    in property <float> player-icon-episodes-h: 1;
+    in property <float> player-icon-next-episode-w: 0.83333333;
+    in property <float> player-icon-next-episode-h: 1;
+    in property <float> player-icon-back-ten-w: 1.11111111;
+    in property <float> player-icon-back-ten-h: 1.33333333;
+    in property <float> player-icon-forward-ten-w: root.player-icon-back-ten-w;
+    in property <float> player-icon-forward-ten-h: root.player-icon-back-ten-h;
+    in property <float> player-icon-replay-w: 1.5;
+    in property <float> player-icon-replay-h: 1.5;
+    in property <float> player-icon-stop-w: 1;
+    in property <float> player-icon-stop-h: 1;
+    in property <float> player-icon-mdx-w: 1.22222222;
+    in property <float> player-icon-mdx-h: 1;
+    in property <float> player-icon-check-w: 0.94444444;
+    in property <float> player-icon-check-h: 0.83333333;
+    in property <float> player-icon-back-w: 0.72222222;
+    in property <float> player-icon-back-h: 1;
+    in property <float> player-icon-exit-w: 1;
+    in property <float> player-icon-exit-h: 1;
+    // 控制块高度（标题行 + 12 + 进度条命中区 + 16 + 传输行）：
+    // 官方底栏是 `height:20%` 的渐变 + 自带 padding，没给“控制块总高”；这个和用来算渐变最小高。
+    in property <length> player-controls-block: root.player-title-row-height + root.space-3
+        + root.player-hit-height + root.space-4 + root.player-play-size;
+    // 渐变最小高度 = 控制块 + 上下各一份留白（官方 20% 在 1080 下是 216px，装不下我们的
+    // 控制块；上面多留的那一份是给渐变淡出用的 ramp，否则标题正好压在透明端点上）。
+    in property <length> player-scrim-min-height: root.player-controls-block + root.player-gutter * 2;
     in property <length> player-menu-width: 320px;
     in property <length> player-menu-row: 44px;
-    in property <length> player-controls-bottom: 24px;
     in property <length> player-error-width: 420px;
 }

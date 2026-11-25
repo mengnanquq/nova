@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 播放控制层（对标 Infuse）。
+//! 播放控制层。
 //!
-//! 布局自下而上：底部全宽渐变遮罩（标题 → 进度条 → 传输控件）、左上返回、
+//! 尺寸 / 颜色 / 时长全部来自 `theme.slint` 的播放器 token 组，而那一组是照
+//! `/tmp/live_akira.css`（Netflix 会员端 CSS）的 em 值写的：
+//! `Theme.player-unit × 官方 em 值`（基数 16px 由我们选定，见 docs/ui-netflix-1to1.md §11）。
+//!
+//! 布局自下而上：底部渐变（标题 → 进度条 → 传输控件）、顶部渐变 + 左上返回、
 //! 中央暂停图标、缓冲角标、错误卡、音轨 / 字幕弹出层。
 //!
 //! 这里**只**做摆放与指针/键位分派：进度、菜单开合、自动隐藏计时都在
@@ -13,137 +17,245 @@
 import { Theme } from "theme.slint";
 import { PlayerData, TrackData } from "models.slint";
 
-// 播放三角：用 Path 画，不依赖字体里是否有 "▶" 字形。
-// Path 会缩放到元素尺寸，所以宽高必须显式给出（否则取父级尺寸，图形会被拉大）。
-// 边长按 Theme.player-icon-glyph（24px）归一，宽度保持原始 16:18 比例（命令行不动）。
+// 播放三角。官方 `.watch-video .svg-icon.svg-icon-nfplayerPlay{width:1.05555556em;height:1.22222222em}`。
+// `Path` 会按 width/height 等比缩放（`fit` 默认 contain），所以外框给官方比例即可。
 component PlayGlyph inherits Path {
     in property <color> tint: Theme.text;
-    width: Theme.player-icon-glyph * 8 / 9;
-    height: Theme.player-icon-glyph;
+    width: Theme.player-unit * Theme.player-icon-play-w;
+    height: Theme.player-unit * Theme.player-icon-play-h;
     commands: "M 0 0 L 16 9 L 0 18 Z";
     fill: root.tint;
 }
 
-// 暂停双竖条。
-component PauseGlyph inherits Rectangle {
+// 暂停双竖条。官方与 play 同一组尺寸（`.svg-icon-nfplayerPause{1.05555556em × 1.22222222em}`）。
+component PauseGlyph inherits Path {
     in property <color> tint: Theme.text;
-    // 原始图形 18×20，高度归一到 24px。所有内层尺寸按同一比例从 token 派生。
-    property <length> u: Theme.player-icon-glyph / 20;
-    width: 18 * root.u;
-    height: Theme.player-icon-glyph;
-    background: transparent;
-
-    Rectangle {
-        x: 0;
-        y: 0;
-        width: 6 * root.u;
-        height: parent.height;
-        border-radius: 1 * root.u;
-        background: root.tint;
-    }
-
-    Rectangle {
-        x: 12 * root.u;
-        y: 0;
-        width: 6 * root.u;
-        height: parent.height;
-        border-radius: 1 * root.u;
-        background: root.tint;
-    }
+    width: Theme.player-unit * Theme.player-icon-play-w;
+    height: Theme.player-unit * Theme.player-icon-play-h;
+    commands: "M 0 0 L 6 0 L 6 20 L 0 20 Z M 12 0 L 18 0 L 18 20 L 12 20 Z";
+    fill: root.tint;
 }
 
 // 喇叭图标：壳体填充 + 波纹 / 静音斜线描边。用 Path 画，不依赖字体里的字形。
+// 官方 `.svg-icon-volumeLow/Medium/Max/Muted{width:1.33333333em;height:1.11111111em}`；
+// 内部图形沿用原来的 20×18 归一化坐标，等比缩进官方盒子里居中。
 component VolumeGlyph inherits Rectangle {
     in property <bool> muted: false;
     in property <color> tint: Theme.text;
 
-    // 原始图形 20×18，宽度归一到 24px；内层坐标统一乘 u。
-    property <length> u: Theme.player-icon-glyph / 20;
-    width: Theme.player-icon-glyph;
-    height: 18 * root.u;
+    property <length> box-w: Theme.player-unit * Theme.player-icon-volume-w;
+    property <length> box-h: Theme.player-unit * Theme.player-icon-volume-h;
+    property <length> u: min(root.box-w / 20, root.box-h / 18);
+    property <length> ox: (root.box-w - 20 * root.u) / 2;
+    property <length> oy: (root.box-h - 18 * root.u) / 2;
+
+    width: root.box-w;
+    height: root.box-h;
     background: transparent;
 
-    // 喇叭壳体（bbox 9x18）。
+    // 喇叭壳体（20×18 归一后的 bbox 9×18）。
     Path {
-        x: 0;
-        y: 0;
+        x: root.ox;
+        y: root.oy;
         width: 9 * root.u;
         height: 18 * root.u;
         fill: root.tint;
         commands: "M 0 6 L 4 6 L 9 0 L 9 18 L 4 12 L 0 12 Z";
     }
 
-    // 有声：一道向外扩散的弧（bbox 5x10）。
+    // 有声：一道向外扩散的弧（bbox 5×10）。
     Path {
-        x: 10 * root.u;
-        y: 3 * root.u;
+        x: root.ox + 10 * root.u;
+        y: root.oy + 3 * root.u;
         width: 5 * root.u;
         height: 10 * root.u;
         stroke: root.tint;
-        stroke-width: 2px;
+        stroke-width: 2 * root.u;
+        stroke-line-cap: round;
         fill: transparent;
         commands: "M 0 1 Q 5 6 0 11";
         visible: !root.muted;
     }
 
-    // 静音：一道斜线（bbox 8x12）。
+    // 静音：一道斜线（bbox 8×12）。
     Path {
-        x: 10 * root.u;
-        y: 2 * root.u;
+        x: root.ox + 10 * root.u;
+        y: root.oy + 2 * root.u;
         width: 8 * root.u;
         height: 12 * root.u;
         stroke: root.tint;
-        stroke-width: 2px;
+        stroke-width: 2 * root.u;
+        stroke-line-cap: round;
         fill: transparent;
         commands: "M 0 0 L 8 12";
         visible: root.muted;
     }
 }
 
-// 音量按钮：点击静音 / 取消静音。数字文本不在按钮里面（只短时显示）。
-component VolumeButton inherits Rectangle {
+// 返回箭头（左上）。官方 `.player-exit{width:1.4em;height:1.4em;opacity:.5}` 是个小图标钮；
+// 官方 SVG 的路径不在 CSS 里，这个箭头图形是我们自己画的（描边，末端圆头）。
+component BackGlyph inherits Path {
+    in property <color> tint: Theme.text;
+    width: Theme.player-back-size;
+    height: Theme.player-back-size;
+    stroke: root.tint;
+    stroke-width: Theme.player-back-size / 14 * 1.8;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    commands: "M 13 7 L 1.5 7 M 6.5 2 L 1.5 7 L 6.5 12";
+}
+
+// 音量控件：喇叭图标 + 悬停时向右展开的水平滑杆。
+//
+// 官方原文（`/tmp/live_akira.css`）：
+//   `.nfp .volume-controller .scrubber-target{height:1em;width:1em;transform:scale(1);transition:transform .2s ease}`
+//   `.nfp .volume-controller .scrubber-target:hover{transform:scale(1.2)}`
+//   `.nfp .volume-controller .scrubber-head{background:#e50914;border-radius:50%;height:100%;width:100%}`
+//   `.nfp .volume-controller .slider-bar-container{background:#5b5b5b;width:.4em}`
+//   `.nfp .volume-controller .slider-bar-percentage{background:#e50914}`
+// 官方那套是**垂直** popup（`.slider-container{width:1.5em;height:8em}`）；我们按任务书做水平内联展开，
+// 滑杆总宽 6em 是自定（官方没给）。颜色直接用进度条同一套 token：轨道 `#5B5B5B` / 已填充 `#E50914`。
+component VolumeControl inherits Rectangle {
+    in property <float> volume: 0;
     in property <bool> muted: false;
-    callback clicked();
+    callback mute-toggle();
+    callback volume-set(float);
 
-    width: Theme.player-control-size;
+    property <bool> dragging: false;
+    // 展开状态：鼠标进来 / 拖滑杆中（键盘焦点本应用同样展开，但播放页没有逐控件焦点，见 §11.6）。
+    property <bool> hot: area.has-hover || root.dragging;
+    property <length> track-inset: Theme.space-2;
+    // 已填充 / 手柄的归一位置。
+    property <float> ratio: clamp(root.volume, 0, 1);
+    property <length> slider-left: Theme.player-control-size + root.track-inset;
+    property <length> slider-travel: max(root.width - Theme.player-control-size - root.track-inset * 2, 1px);
+
+    width: root.hot ? Theme.player-control-size + Theme.player-volume-slider-width + Theme.space-2
+        : Theme.player-control-size;
     height: Theme.player-control-size;
-    border-radius: Theme.radius-pill;
-    background: volume-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
-    border-width: Theme.player-icon-border-width;
-    border-color: Theme.player-icon-border;
-    animate background {
-        // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
-        duration: Theme.motion-button;
-        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+    background: transparent;
+    // 展开 / 收起：`Theme.motion` + ease-out，不用定时器。
+    animate width {
+        duration: Theme.motion;
+        easing: ease-out;
     }
 
-    VolumeGlyph {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        muted: root.muted;
-        tint: root.muted ? Theme.text-faint : Theme.text;
+    // 喇叭（点击 = 静音 / 取消静音）。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: Theme.player-control-size;
+        height: parent.height;
+        border-radius: Theme.radius-pill;
+        background: root.hot ? Theme.player-control-hover : transparent;
+        animate background {
+            duration: Theme.motion-button;
+            easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+        }
+
+        VolumeGlyph {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            muted: root.muted;
+            tint: root.muted ? Theme.text-muted : Theme.text;
+        }
     }
 
-    volume-area := TouchArea {
+    // 滑杆（收起时 `opacity:0` 且不参与命中测试）。
+    Rectangle {
+        x: Theme.player-control-size;
+        y: 0;
+        width: parent.width - Theme.player-control-size;
+        height: parent.height;
+        background: transparent;
+        opacity: root.hot ? 1 : 0;
+        visible: self.opacity > 0.01;
+        animate opacity {
+            duration: Theme.motion;
+            easing: ease-out;
+        }
+
+        // 轨道：官方 `.slider-bar-container{background:#5b5b5b}`
+        Rectangle {
+            x: root.track-inset;
+            y: (parent.height - self.height) / 2;
+            width: parent.width - root.track-inset * 2;
+            height: Theme.player-volume-bar;
+            background: Theme.player-track;
+        }
+
+        // 已填充：官方 `.slider-bar-percentage{background:#e50914}`
+        Rectangle {
+            x: root.track-inset;
+            y: (parent.height - self.height) / 2;
+            width: root.slider-travel * root.ratio;
+            height: Theme.player-volume-bar;
+            background: Theme.player-progress;
+        }
+
+        // 手柄：官方 `scrubber-target` 1em，hover 放大 1.2（拖动中也算 hot）。
+        Rectangle {
+            x: root.track-inset + root.slider-travel * root.ratio - self.width / 2;
+            y: (parent.height - self.height) / 2;
+            width: Theme.player-volume-knob * (root.hot ? Theme.player-bar-knob-scale : 1);
+            height: self.width;
+            border-radius: Theme.radius-pill;
+            background: Theme.player-progress;
+        }
+    }
+
+    // 整个控件一个命中区：左半（图标）点击 = 静音，右侧（滑杆）按下 / 拖动 = 设置音量。
+    area := TouchArea {
         mouse-cursor: pointer;
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                if (self.mouse-x > Theme.player-control-size) {
+                    root.dragging = true;
+                    root.volume-set(clamp((self.mouse-x - root.slider-left) / root.slider-travel, 0, 1));
+                }
+            } else if (event.kind == PointerEventKind.move) {
+                if (root.dragging) {
+                    root.volume-set(clamp((self.mouse-x - root.slider-left) / root.slider-travel, 0, 1));
+                }
+            } else if (event.kind == PointerEventKind.up) {
+                if (root.dragging) {
+                    root.dragging = false;
+                }
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.dragging = false;
+            }
+        }
+
         clicked => {
-            root.clicked();
+            // 点在图标上 = 静音开关；点在滑杆上已在 pointer-event 里处理。
+            if (area.mouse-x <= Theme.player-control-size) {
+                root.mute-toggle();
+            }
         }
     }
 }
 
 // 普通传输按钮（-15 / +15 / 音轨 / 字幕 / 倍速 / 全屏）。
+//
+// **统一控件语言**（官方底栏）：`background:transparent`、`border:3px solid transparent`、
+// 图标/文字 `#fff`、hover 只有极淡高亮（官方底栏 hover 只换 `fill`，没有底色；
+// 这里用弹层 hover 的 `hsla(0,0%,100%,.1)`）。边框只用于焦点环（官方 `:focus{outline:3px solid #fff}`）。
 component TransportButton inherits Rectangle {
     in property <string> label: "";
     in property <bool> active: false;
     callback clicked();
 
-    width: label-text.preferred-width + Theme.space-3 * 2;
+    width: label-text.preferred-width + Theme.player-control-padding * 2;
     height: Theme.player-control-size;
     border-radius: Theme.radius-pill;
-    background: area.has-hover ? Theme.surface-raised : (root.active ? Theme.player-menu-selected : Theme.player-icon-bg);
-    border-width: Theme.player-icon-border-width;
-    border-color: root.active ? Theme.hairline-strong : Theme.player-icon-border;
+    background: area.has-hover ? Theme.player-control-hover : transparent;
+    border-width: Theme.player-focus-width;
+    // 官方 `:focus{outline:3px solid #fff}`。播放页目前没有逐控件的键盘焦点模型
+    // （键位由 app.slint 的全局 FocusScope 分派给 Rust），所以把官方焦点环画在
+    // “这个按钮当前被打开 / 选中”的状态上（最接近的可见状态）。
+    border-color: root.active ? Theme.player-focus-color : Theme.player-icon-border;
     animate background {
         // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
         duration: Theme.motion-button;
@@ -163,19 +275,24 @@ component TransportButton inherits Rectangle {
 
     label-text := Text {
         text: root.label;
-        color: root.active ? Theme.accent : Theme.text;
+        // 统一为白色（官方底栏图标/文字都是 `fill:#fff`）；active 时靠焦点环区分，不换色。
+        color: Theme.text;
         font-family: Theme.font-family;
         font-size: Theme.font-12;
         horizontal-alignment: center;
         vertical-alignment: center;
-        x: Theme.space-3;
-        width: parent.width - Theme.space-3 * 2;
+        x: Theme.player-control-padding;
+        width: parent.width - Theme.player-control-padding * 2;
         height: parent.height;
         overflow: elide;
     }
 }
 
 // 播放 / 暂停主按钮。
+//
+// 官方底栏里播放钮就是一枚白色图标按钮：`.nfp-button-control{background:transparent;fill:#fff}`
+// （`circle-control-button:before` 的深色圆底只用于别的场景；hero 视频圆钮的
+// `rgba(22,22,22,.7)` + 描边是另一处来源，**不要混用**，见 §7 / §11.6）。
 component PlayButton inherits Rectangle {
     in property <bool> playing: true;
     callback clicked();
@@ -183,15 +300,12 @@ component PlayButton inherits Rectangle {
     width: Theme.player-play-size;
     height: Theme.player-play-size;
     border-radius: Theme.radius-pill;
-    // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed。
-    background: area.pressed ? Theme.accent-pressed
-        : (area.has-hover ? Theme.accent-hover : Theme.accent);
-    border-width: Theme.player-icon-border-width;
+    background: area.has-hover ? Theme.player-control-hover : transparent;
+    border-width: Theme.player-focus-width;
     border-color: Theme.player-icon-border;
     animate background {
-        // Button-Duration 250ms / Button-DurationPressed 0ms。
-        duration: area.pressed ? Theme.motion-press : Theme.motion-button;
-        easing: area.has-hover ? cubic-bezier(0.32, 0.94, 0.6, 1) : cubic-bezier(0.4, 0, 0.68, 0.06);
+        duration: Theme.motion-button;
+        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
     }
 
     area := TouchArea {
@@ -204,13 +318,13 @@ component PlayButton inherits Rectangle {
     if !root.playing : PlayGlyph {
         x: (parent.width - self.width) / 2 + self.width / 8;
         y: (parent.height - self.height) / 2;
-        tint: Theme.accent-contrast;
+        tint: Theme.text;
     }
 
     if root.playing : PauseGlyph {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        tint: Theme.accent-contrast;
+        tint: Theme.text;
     }
 }
 
@@ -220,7 +334,7 @@ component TrackRow inherits Rectangle {
     in property <bool> selected: root.track.selected;
     callback activated();
 
-    height: 52px;
+    height: Theme.player-control-size;
     border-radius: Theme.radius-poster;
     background: area.has-hover ? Theme.surface-raised : (root.selected ? Theme.player-menu-selected : transparent);
 
@@ -276,7 +390,7 @@ component OffRow inherits Rectangle {
     in property <bool> selected;
     callback activated();
 
-    height: 52px;
+    height: Theme.player-control-size;
     border-radius: Theme.radius-poster;
     background: area.has-hover ? Theme.surface-raised : (root.selected ? Theme.player-menu-selected : transparent);
 
@@ -310,6 +424,9 @@ component OffRow inherits Rectangle {
 }
 
 // 菜单里的动作行（字幕延迟 ±0.5s / 加载外挂字幕）：不是选中项，不画选中圆点。
+// 层级低于轨道行：字号 14 → **12**、行高 `player-menu-row`(44px) < 轨道行 51.6px，
+// 上面还有一道 `Theme.hairline` 分隔线（官方弹层里没有这些动作，它们是我们的真功能，
+// 不能删；降层级是为了让“轨道列表”仍然是菜单主体，见 docs §11.6）。
 component ActionRow inherits Rectangle {
     in property <string> label: "";
     callback activated();
@@ -333,7 +450,7 @@ component ActionRow inherits Rectangle {
         text: root.label;
         color: Theme.text-muted;
         font-family: Theme.font-family;
-        font-size: Theme.font-14;
+        font-size: Theme.font-12;
         vertical-alignment: center;
         overflow: elide;
     }
@@ -358,7 +475,8 @@ component TrackMenu inherits Rectangle {
         : 0px;
 
     width: Theme.player-menu-width;
-    height: Theme.space-4 + 24px + 52px * root.row-count + root.actions-height;
+    // 行高跟控制层一致（`Theme.player-control-size` = 官方 3.2222em），标题条 24px。
+    height: Theme.space-4 + Theme.space-5 + Theme.player-control-size * root.row-count + root.actions-height;
     background: Theme.player-panel-solid;
     border-radius: Theme.radius-panel;
     border-width: 1px;
@@ -372,7 +490,7 @@ component TrackMenu inherits Rectangle {
         spacing: 0;
 
         Text {
-            height: 24px;
+            height: Theme.space-5;
             text: root.heading;
             color: Theme.text-muted;
             font-family: Theme.font-family;
@@ -385,7 +503,7 @@ component TrackMenu inherits Rectangle {
             // 用 `visible` + 高度归零代替 `if` 条件元素：布局数学一致，
             // 也不会在 software renderer 下让紧随其后的行留下合成接缝。
             visible: root.show-close;
-            height: root.show-close ? 52px : 0px;
+            height: root.show-close ? Theme.player-control-size : 0px;
             selected: root.close-selected;
 
             activated => {
@@ -446,33 +564,39 @@ component PlayerProgress inherits Rectangle {
     callback bar-cancel();
 
     property <bool> dragging: false;
+    // 官方 `.nfp .scrubber-container{height:3.3em}`：可点区就是这 3.3em（16px 基数 ≈ 53px）。
     height: Theme.player-hit-height;
     background: transparent;
 
-    // 悬停 / 拖动：轨道变粗、拖动头放大（Netflix 的 scrubber hover 规则）。
+    // 官方 `.scrubber-container:hover .track` / `.nfp .is-scrubbing .track{height:1em}`（静息 `.5em`），
+    // 两条都是 `transition:height .2s ease`。
     property <bool> hot: bar-area.has-hover || root.scrubbing;
     property <length> bar-height: root.hot ? Theme.player-bar-height-hover : Theme.player-bar-height;
+    // 官方 `.scrubber-head{height:2.3em;width:2.3em;margin:-1.15em;transition:transform .2s ease}`，
+    // `:hover` 与 `.is-scrubbing` 都 `scale(1.2)`。
     property <length> knob-size: Theme.player-bar-knob * (root.hot ? Theme.player-bar-knob-scale : 1);
     animate bar-height {
-        duration: Theme.motion;
-        easing: ease-out;
+        duration: Theme.motion-zoom;
+        easing: cubic-bezier(0.25, 0.1, 0.25, 1);
     }
     animate knob-size {
-        duration: Theme.motion;
-        easing: ease-out;
+        duration: Theme.motion-zoom;
+        easing: cubic-bezier(0.25, 0.1, 0.25, 1);
     }
 
     property <float> buffered-ratio: max(root.buffered, root.played);
-    // 已缓冲的那一段占比（剩余部分才画轨道）。
+    // 已缓冲的那一段占比。
     property <float> buffered-part: clamp(root.buffered-ratio, 0, 1);
 
-    // 轨道只画在"未缓冲"的那一段：缓冲段**替换**轨道，而不是叠画在上面。
+    // 轨道整条铺满：官方 `.track{background:#5b5b5b}` 是不透明灰，
+    // `.buffered{background:hsla(0,0%,100%,.2)}` 是**叠在轨道上**的半透明白，
+    // 所以不能在缓冲段把轨道挖空（旧实现挖空了，缓冲段会比官方暗）。
+    // 官方 `.track` / `.buffered` / `.current-progress` 都没有 border-radius：方头。
     Rectangle {
-        x: parent.width * root.buffered-part;
+        x: 0;
         y: (parent.height - root.bar-height) / 2;
-        width: parent.width - parent.width * root.buffered-part;
+        width: parent.width;
         height: root.bar-height;
-        border-radius: Theme.radius-pill;
         background: Theme.player-track;
     }
 
@@ -481,31 +605,31 @@ component PlayerProgress inherits Rectangle {
         y: (parent.height - root.bar-height) / 2;
         width: parent.width * root.buffered-part;
         height: root.bar-height;
-        border-radius: Theme.radius-pill;
         background: Theme.player-buffered;
     }
 
+    // `.current-progress{background:#e50914}`
     Rectangle {
         x: 0;
         y: (parent.height - root.bar-height) / 2;
         width: parent.width * clamp(root.played, 0, 1);
         height: root.bar-height;
-        border-radius: Theme.radius-pill;
-        background: Theme.accent;
+        background: Theme.player-progress;
     }
 
-    // 拖动头：悬停或拖动时出现，
-    // 拖动时放大到 1.2 倍（实测 `.scrubber-head:hover { transform: scale(1.2) }`）。
-    if root.hot : Rectangle {
+    // 拖动头：官方 `.scrubber-head{opacity:1}` 是**常驻**的红色圆点（不是 hover 才出现），
+    // 直径 2.3em，hover / 拖动中放大到 1.2 倍。
+    Rectangle {
         x: parent.width * clamp(root.played, 0, 1) - self.width / 2;
         y: (parent.height - self.height) / 2;
         width: root.knob-size;
         height: root.knob-size;
         border-radius: Theme.radius-pill;
-        background: Theme.accent;
+        background: Theme.player-progress;
     }
 
     // 时间气泡：跟随把手，靠近两端时夹住不越界。
+    // （官方没有文字气泡，只有 trickplay 缩略图；气泡是我们自加的，见 docs §11）
     if root.scrubbing && root.bubble != "" : Rectangle {
         x: clamp(
             parent.width * clamp(root.played, 0, 1) - self.width / 2,
@@ -514,7 +638,7 @@ component PlayerProgress inherits Rectangle {
         );
         y: -self.height - Theme.space-2;
         width: bubble-text.preferred-width + Theme.space-3 * 2;
-        height: 28px;
+        height: Theme.player-bubble-height;
         border-radius: Theme.radius-poster;
         background: Theme.player-panel-solid;
         border-width: 1px;
@@ -582,6 +706,7 @@ export component PlayerOverlay inherits Rectangle {
     callback rate-cycle();
     callback time-toggle();
     callback mute-toggle();
+    callback volume-set(float);
     callback subtitle-delay(float);
     callback subtitle-external();
 
@@ -602,9 +727,12 @@ export component PlayerOverlay inherits Rectangle {
     property <float> drag-ratio: 0;
     property <float> shown-ratio: root.scrubbing ? root.drag-ratio : root.data.progress;
     property <bool> show-center-play: !root.data.playing && !root.data.buffering && !root.data.has-error;
-    // 传输行底边到进度条顶的距离由这几个量反推（菜单锤点也用它，不能侵入命中区）。
-    property <length> progress-top: Theme.player-controls-bottom + Theme.player-play-size
+    // 传输行底边到进度条顶的距离由这几个量反推（菜单锚点也用它，不能侵入命中区）。
+    property <length> progress-top: Theme.player-gutter + Theme.player-play-size
         + Theme.space-4 + Theme.player-hit-height;
+    // 底部渐变高度：官方 `PlayerControlsNeo__gradient-bottom{height:20%}`；
+    // 20%（1080 下 216px）装不下我们的控制块，所以取“20% 与最小高”的较大者。
+    property <length> scrim-height: max(root.height * 0.2, Theme.player-scrim-min-height);
 
     // 真实窗口：每 250ms 把时间增量交给视图模型（`pages::player::TICK_INTERVAL`）。
     // testing backend 不跑 Timer，测试直接调 `App::tick_player`。
@@ -633,34 +761,46 @@ export component PlayerOverlay inherits Rectangle {
         }
     }
 
-    // ---- 左上返回 ----
+    // ---- 顶部渐变（官方 loading 层 `.gradient`：高 11.11111111em、rgba(0,0,0,.651)）----
     Rectangle {
         visible: root.controls-fade > 0.01;
         opacity: root.controls-fade;
-        x: Theme.gutter;
-        y: Theme.space-5;
-        width: 44px;
-        height: 44px;
-        border-radius: Theme.radius-pill;
-        background: back-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
-        border-width: Theme.player-icon-border-width;
-        border-color: Theme.player-icon-border;
-        animate background {
-            duration: Theme.motion-button;
-            easing: cubic-bezier(0.32, 0.94, 0.6, 1);
-        }
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: Theme.player-top-scrim-height;
+        background: Theme.player-top-gradient;
+    }
 
-        back-text := Text {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            height: parent.height;
-            text: "←";
-            color: Theme.text;
-            font-family: Theme.font-family;
-            font-size: Theme.player-icon-glyph;
-            vertical-alignment: center;
-            horizontal-alignment: center;
+    // ---- 整屏压暗：**没有**采用 ----
+    //
+    // 官方确实有一条 `.PlayerControlsNeo__layout--dimmed{background-color:rgba(0,0,0,.5)}`，
+    // 但同一个逗号组里还写着 `--dimmed .PlayerControlsNeo__core-controls{opacity:0}`：
+    // 即“压暗”时控制层本身是**隐藏**的，它是另一个状态（我们无法登录确认是哪个场景）。
+    // 所以这里不把它当成“控制层可见就压暗整帧”用，只保留官方两条渐变。§11 有记录。
+
+    // ---- 左上返回（官方 `.player-exit{width:1.4em;height:1.4em;opacity:.5;
+    //      transition:opacity .2s ease-out}` + hover `opacity:1`）----
+    // 命中区比图标大一圈（图标 1.4em ≈ 22px，单靠它点不中）。
+    Rectangle {
+        visible: root.controls-fade > 0.01;
+        opacity: root.controls-fade;
+        x: Theme.player-gutter - Theme.space-3;
+        y: Theme.player-gutter - Theme.space-3;
+        width: Theme.player-back-size + Theme.space-3 * 2;
+        height: Theme.player-back-size + Theme.space-3 * 2;
+        background: transparent;
+
+        BackGlyph {
+            x: Theme.space-3;
+            y: Theme.space-3;
+            tint: Theme.text;
+            opacity: back-area.has-hover ? 1 : Theme.player-back-opacity;
+            animate opacity {
+                // 官方 `transition:opacity .2s ease-out`。
+                duration: Theme.motion-zoom;
+                easing: ease-out;
+            }
         }
 
         back-area := TouchArea {
@@ -674,10 +814,10 @@ export component PlayerOverlay inherits Rectangle {
     // ---- 缓冲角标（不随控制层隐藏）----
     Rectangle {
         visible: root.data.buffering;
-        x: root.width - self.width - Theme.gutter;
-        y: Theme.space-5;
+        x: root.width - self.width - Theme.player-gutter;
+        y: Theme.player-gutter;
         width: buffering-text.preferred-width + Theme.space-4 * 2;
-        height: 36px;
+        height: Theme.player-badge-height;
         border-radius: Theme.radius-pill;
         background: Theme.player-panel-solid;
         border-width: 1px;
@@ -696,22 +836,26 @@ export component PlayerOverlay inherits Rectangle {
         }
     }
 
-    // ---- 中央大播放图标（暂停时，半透明，不挡字幕）----
+    // ---- 中央大播放图标（暂停时）----
+    //
+    // 官方 `.nf-big-play-pause button .svg-icon-nfplayerOpticalCenterPlay{opacity:.7}`：
+    // **一枚半透明的大图标，没有底色也没有描边**。这里去掉原来的深色圆底 + 1px 描边
+    // （那是 hero 视频圆钮的实测样式，不属于播放器，见 §7 / §11.6）。
     if root.show-center-play && root.controls-fade > 0.01 : Rectangle {
         opacity: root.controls-fade;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: Theme.player-icon-size;
         height: Theme.player-icon-size;
-        border-radius: Theme.radius-pill;
-        background: Theme.player-icon-bg;
-        border-width: Theme.player-icon-border-width;
-        border-color: Theme.player-icon-border;
+        background: transparent;
 
         PlayGlyph {
-            x: (parent.width - self.width) / 2 + self.width / 4;
+            width: Theme.player-unit * Theme.player-icon-play-w * 3;
+            height: Theme.player-unit * Theme.player-icon-play-h * 3;
+            x: (parent.width - self.width) / 2 + self.width / 8;
             y: (parent.height - self.height) / 2;
             tint: Theme.text;
+            opacity: 0.7;
         }
     }
 
@@ -790,29 +934,55 @@ export component PlayerOverlay inherits Rectangle {
         }
     }
 
-    // ---- 底部遮罩 ----
-    // 两段式渐变：底部到 60% 高度是 0.85 的不透明平台，60% → 100% 才淡出。
+    // ---- 底部渐变 ----
+    // 官方（`/tmp/live_akira.css`）：`.PlayerControlsNeo__gradient-bottom{background-image:
+    // linear-gradient(0deg,rgba(0,0,0,.7) 0,transparent);bottom:0;height:20%}`，激活时整层
+    // 再乘 `opacity:.75`。不是我们原来的两段式（0.94 不透明平台）。
     Rectangle {
         visible: root.controls-fade > 0.01;
+        // 官方 `--active` 的 `.75` 已预乘进 `player-scrim-bottom`（否则会把子控件也变半透明）。
         opacity: root.controls-fade;
         x: 0;
         y: root.height - self.height;
         width: 100%;
-        height: Theme.player-scrim-height;
-        background: @linear-gradient(0deg, Theme.player-scrim-bottom 0%, Theme.player-scrim-mid 60%, Theme.player-scrim-top 100%);
+        height: root.scrim-height;
+        // 底部 75% 是官方那条 `rgba(0,0,0,.7)` 不降的 plateau，上面 25% 才淡出：
+        // 官方是纯线性 ramp，但我们的控制块（标题在顶、进度条、按钮）装不下 20% 的渐变，
+        // 标题会落在几乎透明的顶端 → 亮画面上直接糊掉。颜色 / 叠层仍是官方两个值，
+        // 只把 stop 位置往下拉（见 docs §11 的偏差记录）。
+        background: @linear-gradient(0deg, Theme.player-scrim-bottom 0%, Theme.player-scrim-bottom 75%, Theme.player-scrim-top 100%);
+
+        // 第二层（官方另一条同区渐变）：`.watch-video--bottom-controls-container-scrim{
+        // background-image:linear-gradient(0deg,rgba(0,0,0,.3) 0,transparent)}`。
+        // 两层叠起来底部 = 1-(1-.525)*(1-.3) ≈ .67，纯白画面上白字实测 8.3:1。
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(0deg, Theme.player-scrim-floor 0%, Theme.player-scrim-floor 75%, Theme.player-scrim-top 100%);
+        }
 
         VerticalLayout {
-            x: Theme.gutter;
-            width: parent.width - Theme.gutter * 2;
-            height: parent.height - Theme.player-controls-bottom * 2;
-            y: Theme.player-controls-bottom;
+            // 左右留白与控制层同一个 token（官方 `.top-left-controls{margin:4.5em}`）。
+            x: Theme.player-gutter;
+            width: parent.width - Theme.player-gutter * 2;
+            // 底部只留 player-gutter；顶部剩余空间全归渐变的淡出区。
+            y: 0;
+            height: parent.height - Theme.player-gutter;
             // 内容全部贴底，多余空间留在遮罩顶部的淡出区（不会把控件撕成两坨）。
             alignment: end;
             spacing: 0;
 
-            // 第一行：标题 + 副标题 + 状态（诊断行默认收起）。
+            // 第一行：标题 + 副标题。
+            //
+            // Netflix 播放器在这行只有标题（loading 层是“返回 + 标题 + 副标题”），
+            // **没有**任何常驻诊断/状态文字。引擎诊断（直连/转码、hwdec、1080p60）已经从画面上
+            // 整块拿掉：数据仍在 `PlayerData.transport-mode / engine-line / hwdec-notice`，
+            // 由 `--debug-socket` 的 `view` 读（见 docs/ui-netflix-1to1.md §11.6）。
+            // 标题字号/字重照官方 loading 层 `.title{font-size:2em;font-weight:500}`。
             HorizontalLayout {
-                height: 34px;
+                height: Theme.player-title-row-height;
                 spacing: Theme.space-3;
                 cross-axis-alignment: center;
 
@@ -820,17 +990,18 @@ export component PlayerOverlay inherits Rectangle {
                     text: root.data.title;
                     color: Theme.text;
                     font-family: Theme.font-family;
-                    font-size: Theme.font-22;
-                    font-weight: Theme.weight-semibold;
+                    font-size: Theme.player-title-size;
+                    font-weight: Theme.player-title-weight;
                     overflow: elide;
                     vertical-alignment: center;
                 }
 
+                // 官方 `video-title span{color:#adadad;font-size:2em}` / loading `.subtitle{1.33em}`。
                 Text {
                     text: root.data.subtitle;
-                    color: Theme.text-muted;
+                    color: Theme.player-subtitle-color;
                     font-family: Theme.font-family;
-                    font-size: Theme.font-14;
+                    font-size: Theme.player-subtitle-size;
                     overflow: elide;
                     vertical-alignment: center;
                     visible: self.text != "";
@@ -840,39 +1011,6 @@ export component PlayerOverlay inherits Rectangle {
                     horizontal-stretch: 1;
                     background: transparent;
                 }
-
-                // 常驻的只有短标签：直连 / 转码。
-                Text {
-                    text: root.data.transport-mode;
-                    color: Theme.text-faint;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-12;
-                    overflow: elide;
-                    vertical-alignment: center;
-                    visible: self.text != "";
-                }
-
-                // 硬解未生效：用户可行动的偏差，warning 色、完整文案。
-                Text {
-                    text: root.data.hwdec-notice;
-                    color: Theme.warning;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-12;
-                    overflow: elide;
-                    vertical-alignment: center;
-                    visible: self.text != "";
-                }
-
-                // 完整诊断行只由 Ctrl+D 展开。
-                Text {
-                    text: root.data.engine-line;
-                    color: Theme.text-muted;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-12;
-                    overflow: elide;
-                    vertical-alignment: center;
-                    visible: root.data.show-engine-detail && self.text != "";
-                }
             }
 
             // 标题 → 进度条：固定 12px。
@@ -881,7 +1019,7 @@ export component PlayerOverlay inherits Rectangle {
                 background: transparent;
             }
 
-            // 第二行：进度条（28px 命中区）。
+            // 第二行：进度条（3.3em = 53px 命中区）。
             PlayerProgress {
                 height: Theme.player-hit-height;
                 played: root.shown-ratio;
@@ -917,12 +1055,18 @@ export component PlayerOverlay inherits Rectangle {
                 background: transparent;
             }
 
-            // 第三行：传输控件。
+            // 第三行：传输控件（官方底栏的分组）。
+            //
+            // 左组：播放/暂停、音量、-15s、+15s；右组：字幕、音轨、倍速、全屏；
+            // **剩余时间**在最右（官方 `.time-remaining`；数据层默认已改成剩余）。
+            // 组间只放**一个** `horizontal-stretch: 1`——弹性间距在组与组之间，不在组内
+            // （旧实现把时间文本和弹性间距混在组内，才出现"中间一个大空档"）。
             HorizontalLayout {
                 height: Theme.player-play-size;
-                spacing: Theme.space-3;
+                spacing: Theme.space-2;
                 cross-axis-alignment: center;
 
+                // ---- 左组 ----
                 PlayButton {
                     playing: root.data.playing;
                     clicked => {
@@ -930,6 +1074,21 @@ export component PlayerOverlay inherits Rectangle {
                     }
                 }
 
+                VolumeControl {
+                    volume: root.data.volume;
+                    muted: root.data.muted;
+
+                    mute-toggle => {
+                        root.mute-toggle();
+                    }
+
+                    volume-set(volume) => {
+                        root.volume-set(volume);
+                    }
+                }
+
+                // 官方图标是 ±10s（`nfplayerBackTen` / `nfplayerFastForward`）；我们是 ±15s
+                // （与键盘 ←/→ 一致），形态统一但步长是我们的选择，见 §11.6。
                 TransportButton {
                     label: "-15s";
                     clicked => {
@@ -944,59 +1103,18 @@ export component PlayerOverlay inherits Rectangle {
                     }
                 }
 
-                // 时间行：点击在"已播/总长"与"剩余"之间切换，不同时渲染两份。
-                Rectangle {
-                    width: time-label.preferred-width + Theme.space-4;
-                    height: Theme.player-control-size;
-                    border-radius: Theme.radius-poster;
-                    background: time-area.has-hover ? Theme.player-menu-selected : transparent;
-
-                    time-label := Text {
-                        x: Theme.space-2;
-                        y: 0;
-                        width: parent.width - Theme.space-4;
-                        height: parent.height;
-                        text: root.data.time-text;
-                        color: Theme.text;
-                        // 时间码用等宽：秒数跳动时不会左右抖。
-                        font-family: Theme.font-mono;
-                        font-size: Theme.font-14;
-                        vertical-alignment: center;
-                        horizontal-alignment: left;
-                    }
-
-                    time-area := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.time-toggle();
-                        }
-                    }
-                }
-
+                // ---- 组间弹性间距（唯一一个）----
                 Rectangle {
                     horizontal-stretch: 1;
                     background: transparent;
                 }
 
-                // 音量：喇叭图标按钮（点击静音 / 取消），数字只在调节时短时出现。
-                HorizontalLayout {
-                    spacing: Theme.space-1;
-                    cross-axis-alignment: center;
-
-                    VolumeButton {
-                        muted: root.data.muted;
-                        clicked => {
-                            root.mute-toggle();
-                        }
-                    }
-
-                    Text {
-                        text: root.data.volume-text;
-                        color: Theme.text-muted;
-                        font-family: Theme.font-family;
-                        font-size: Theme.font-12;
-                        vertical-alignment: center;
-                        visible: root.data.volume-hint;
+                // ---- 右组 ----
+                TransportButton {
+                    label: "字幕";
+                    active: root.data.subtitle-menu-open;
+                    clicked => {
+                        root.subtitle-toggle();
                     }
                 }
 
@@ -1008,14 +1126,8 @@ export component PlayerOverlay inherits Rectangle {
                     }
                 }
 
-                TransportButton {
-                    label: "字幕";
-                    active: root.data.subtitle-menu-open;
-                    clicked => {
-                        root.subtitle-toggle();
-                    }
-                }
-
+                // 倍速：官方有对应控件（`.PlayerControlsNeo__core-controls .button-nfplayerSpeed` +
+                // `.speed-controller` 弹层），不是我们自加的。
                 TransportButton {
                     label: root.data.rate-text;
                     clicked => {
@@ -1029,14 +1141,50 @@ export component PlayerOverlay inherits Rectangle {
                         root.fullscreen-toggle();
                     }
                 }
+
+                // 右组与时间之间留一个固定间隔，避免时间码贴住"全屏"。
+                Rectangle {
+                    width: Theme.space-4;
+                    background: transparent;
+                }
+
+                // 剩余时间（最右）：点击在"剩余"与"已播/总长"之间切换，不同时渲染两份。
+                Rectangle {
+                    width: time-label.preferred-width + Theme.space-2 * 2;
+                    height: Theme.player-control-size;
+                    border-radius: Theme.radius-poster;
+                    background: time-area.has-hover ? Theme.player-control-hover : transparent;
+
+                    time-label := Text {
+                        x: Theme.space-2;
+                        y: 0;
+                        width: parent.width - Theme.space-2 * 2;
+                        height: parent.height;
+                        text: root.data.time-text;
+                        color: Theme.text;
+                        // 时间码用等宽：秒数跳动时不会左右抖。
+                        // 字号照官方 `.time-remaining__time{font-size:1.8em}`。
+                        font-family: Theme.font-mono;
+                        font-size: Theme.player-time-size;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
+
+                    time-area := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.time-toggle();
+                        }
+                    }
+                }
             }
         }
     }
 
     // ---- 音轨弹出层 ----
-    // 锚点：进度条顶 − 16px − 菜单高（不侵入 28px 命中区，也不遮时间行）。
+    // 锚点：进度条顶 − 16px − 菜单高（不侵入 3.3em 命中区，也不遮时间行）。
     if root.data.audio-menu-open : TrackMenu {
-        x: root.width - self.width - Theme.gutter;
+        x: root.width - self.width - Theme.player-gutter;
         y: root.height - root.progress-top - Theme.space-4 - self.height;
         heading: "音轨";
         tracks: root.data.audio-tracks;
@@ -1048,7 +1196,7 @@ export component PlayerOverlay inherits Rectangle {
 
     // ---- 字幕弹出层（顶部是"关闭"，图形字幕标注样式不可改，底部是延迟 / 外挂字幕）----
     if root.data.subtitle-menu-open : TrackMenu {
-        x: root.width - self.width - Theme.gutter;
+        x: root.width - self.width - Theme.player-gutter;
         y: root.height - root.progress-top - Theme.space-4 - self.height;
         heading: "字幕";
         tracks: root.data.subtitle-tracks;
