@@ -24,11 +24,11 @@ Nova 是面向个人媒体库与家庭媒体服务器的开源跨平台桌面媒
 
 ```
 nova-app ──┬─> nova-ui
-           ├─> nova-library
-           ├─> nova-playback ──> nova-playback-gst (或 -mpv / -vlc)
-           ├─> nova-provider ──┬─> nova-provider-emby
-           │                   └─> nova-provider-jellyfin
-           └─> nova-storage
+           ├─> nova-playback ──> nova-playback-mpv
+           ├─> nova-provider
+           ├─> nova-images
+           ├─> nova-storage
+           └─> nova-secrets
                       所有层 ──> nova-core
 ```
 
@@ -39,10 +39,9 @@ nova-app ──┬─> nova-ui
 | `nova-provider` | Provider trait、请求重试、地址校验、Emby/Jellyfin 统一映射 | 已建立 |
 | `nova-storage` | SQLite：服务器/条目/资源/偏好/同步状态/图片缓存 | 已建立 |
 | `nova-cli` | 阶段 2 的验证入口：登录、媒体库、条目、播放地址、进度上报 | 已建立 |
-| `nova-library` | 多个服务器的聚合、搜索、排序、增量同步 | 计划 |
-| `nova-playback` | 播放会话、轨道切换、进度上报、`FrameSource` 抽象 | 计划 |
-| `nova-playback-mpv` | libmpv 引擎实现（ADR-0001 结论） | 计划 |
-| `nova-ui` | Slint 组件（11 个 `.slint`）与纯 Rust 视图模型；不碰网络/DB | 已建立 |
+| `nova-playback` | 播放会话、轨道切换、进度上报、`FrameSource` 抽象（引擎无关） | 已建立 |
+| `nova-playback-mpv` | libmpv 引擎实现（ADR-0001 结论，OpenGL 零拷贝） | 已建立 |
+| `nova-ui` | Slint 界面（18 个 `.slint`）与纯 Rust 视图模型；不碰网络/DB | 已建立 |
 | `nova-images` | 图片获取、解码、磁盘缓存（sha256(url+tag)、LRU、并发去重） | 已建立 |
 | `nova-app` | 装配：DB 缓存 → 视图模型 → Slint；tokio 后台刷新；`--snapshot` 无头出图 | 已建立 |
 
