@@ -537,6 +537,12 @@ impl Shell {
     ///
     /// 必须在**放下** `player` 借用之后调用：`App::set_player` 会同步回调 nova-ui 的
     /// 播放页处理器（字幕安全区），那里会再次借用播放器。
+    /// 调试通道用：读播放器的即时视图（若有播放会话）。
+    fn live_player_view(&self) -> Option<nova_ui::PlayerView> {
+        let mut slot = self.player.borrow_mut();
+        slot.as_mut().map(Player::live_view)
+    }
+
     fn apply_pending_view(&self) {
         let view = {
             let mut slot = self.player.borrow_mut();
@@ -623,7 +629,9 @@ impl Shell {
                     })),
                     // 播放页状态：以前 `view` 读不到它，导致"点播放器按钮到底有没有
                     // 生效"没法在运行中的进程里验证（审计里专门指出过这个缺口）。
-                    "player": shell.state.borrow().player.as_ref().map(|view| serde_json::json!({
+                    // 用**即时**视图，不要读 `state.player`：后者受 `VIEW_INTERVAL`
+                    // 节流，会把"正在播放"读成"暂停"，据它下结论会得到完全相反的判断。
+                    "player": shell.live_player_view().map(|view| serde_json::json!({
                         "playing": view.playing,
                         "buffering": view.buffering,
                         "volume": view.volume,

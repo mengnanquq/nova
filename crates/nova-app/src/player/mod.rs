@@ -1413,6 +1413,17 @@ impl Player {
         self.pending_view.take()
     }
 
+    /// 当前播放状态的一份**即时**视图（不走 `pending_view` 的节流）。
+    ///
+    /// 调试通道读状态必须用它：`UiState.player` 只有在 `set_player` 被调用时才更新，
+    /// 而 `set_player` 受 `VIEW_INTERVAL` 节流，读它会把"正在播放"读成"暂停"——
+    /// 我就因为这个误判过"播放器按钮点不动"。
+    pub(crate) fn live_view(&mut self) -> PlayerView {
+        let mut view = self.app.player_view();
+        self.fill_view(&mut view);
+        view
+    }
+
     fn fill_view(&mut self, view: &mut PlayerView) {
         let state = self.session.state();
         view.position = self.session.position();

@@ -190,3 +190,38 @@ printf '{"cmd":"open","item":"196390"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 sleep 1
 printf '{"cmd":"screenshot","path":"/tmp/detail.png"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 ```
+
+## 用 `click` / `sweep` 排查"按钮点了没反应"
+
+### 先唤醒，再点
+
+播放页的控制层 **3 秒无输入就自动隐藏**，隐藏后 `targets` 是空的——这时候去
+`click {"target":"player.play-pause"}` 会得到 `unknown target`，看起来像"按钮不存在"。
+先发一个按键把控制层叫醒，再点：
+
+```bash
+printf '{"cmd":"key","key":"Down"}\n{"cmd":"targets"}\n' | socat - UNIX-CONNECT:$SOCK
+printf '{"cmd":"click","x":101,"y":619}\n'                            | socat - UNIX-CONNECT:$SOCK
+```
+
+### 判断"有没有生效"要用即时状态，不要读 `state.player`
+
+`view` 里的 `player` 字段现在读的是**即时视图**（`Player::live_view`）。
+它以前读的是 `UiState.player`，而那个值受 `VIEW_INTERVAL` 节流、只在
+`set_player` 时更新——播放中读它会得到 `playing: false`，据此下结论会得到
+**完全相反**的判断（我就因此误判过"播放器所有按钮点不动"）。
+
+判断播放是否真的在跑，两个可靠信号：
+
+1. `view` 的 `player.position_ms` 在两秒后是否增长（暂停时不增长）；
+2. `targets` 里 `player.progress` 的 `label`（形如 `"0:07 / 1:54:57"`）是否在走。
+
+### 已验证的一次完整点击链
+
+```
+playing=True  pos=6   → 点 play-pause
+playing=False pos=6   → 两秒后 pos 仍是 6（确实暂停了）
+playing=False pos=6   → 再点一次
+playing=True  pos=8   → 恢复播放
+                      → 点 back：route 从 Player 变回 Home
+```
