@@ -275,6 +275,16 @@ impl Local {
         Ok(views::detail_view(&self.db, &server.info.id, item_id)?)
     }
 
+    /// 切换「我的列表」的本地状态，返回切换后的状态。
+    pub fn toggle_mylist(&self, item_id: &str) -> Result<bool, AppError> {
+        let Some(server) = self.server() else {
+            return Err(AppError::Config("还没有连接服务器".to_string()));
+        };
+        Ok(self
+            .db
+            .toggle_mylist(&server.info.id, &nova_core::ItemId::new(item_id))?)
+    }
+
     /// 用缓存构建播放外壳。
     pub fn player(&self, item_id: &str) -> Result<Option<PlayerShellView>, AppError> {
         let Some(server) = self.server() else {

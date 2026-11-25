@@ -273,7 +273,9 @@ pub fn detail_view(
         return Ok(None);
     };
     let sources = db.sources(server_id, &id)?;
-    Ok(Some(detail_from_item(&item, &sources)))
+    let mut view = detail_from_item(&item, &sources);
+    view.in_my_list = db.in_mylist(server_id, &id)?;
+    Ok(Some(view))
 }
 
 /// 用本地缓存构建播放外壳；条目不在缓存里时返回 `None`。

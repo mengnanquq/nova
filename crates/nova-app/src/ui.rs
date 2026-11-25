@@ -1497,6 +1497,21 @@ impl Shell {
         }
     }
 
+    /// 详情页「我的列表」：写本地库 → 更新视图（持久化，重开详情仍生效）。
+    fn toggle_detail_mylist(&self) {
+        let Some(mut detail) = self.state.borrow().detail.clone() else {
+            return;
+        };
+        match self.local.toggle_mylist(&detail.item_id) {
+            Ok(state) => {
+                detail.in_my_list = state;
+                self.app.set_detail(&detail);
+                self.state.borrow_mut().detail = Some(detail);
+            }
+            Err(error) => tracing::warn!(%error, "切换「我的列表」失败"),
+        }
+    }
+
     fn select_source(&self, source_id: &str) {
         let Some(mut detail) = self.state.borrow().detail.clone() else {
             return;
@@ -1633,6 +1648,14 @@ fn install_callbacks(shell: &Rc<Shell>) {
         shell.app.on_sort(move || {
             if let Some(shell) = weak.upgrade() {
                 shell.cycle_library_sort();
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(shell);
+        shell.app.on_detail_my_list_toggle(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.toggle_detail_mylist();
             }
         });
     }

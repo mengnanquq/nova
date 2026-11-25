@@ -16,6 +16,8 @@ export component DetailPage inherits Rectangle {
     callback back();
     callback play();
     callback source-selected(string);
+    // 「+ 我的列表 / 已在列表」：切换本地列表状态（持久化在 Rust 侧）。
+    callback my-list-toggle();
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 返回 / 播放 / 我的列表 / 版本下拉是页面直接摆放的常驻控件 → 声明式列出；
@@ -75,7 +77,9 @@ export component DetailPage inherits Rectangle {
     background: Theme.detail-bg;
 
     // "我的列表"是纯视觉态：点击切换，不落数据。
-    in-out property <bool> in-my-list: false;
+    // 是否已在「我的列表」：由 Rust 侧根据本地数据库决定（`DetailView.in_my_list`），
+    // 界面只负责显示与发回调。以前这里是纯局部 bool，重开详情就归零。
+    in property <bool> in-my-list: false;
     in-out property <bool> drop-open: false;
 
     property <length> backdrop-height: self.height * Theme.detail-backdrop-ratio;
@@ -375,7 +379,7 @@ export component DetailPage inherits Rectangle {
 
                         list-area := TouchArea {
                             clicked => {
-                                root.in-my-list = !root.in-my-list;
+                                root.my-list-toggle();
                             }
                         }
                     }

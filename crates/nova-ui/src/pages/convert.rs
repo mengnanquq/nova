@@ -168,6 +168,7 @@ pub fn search_data(
 pub fn detail_data(view: &DetailView, images: &ImageStore) -> DetailData {
     DetailData {
         item_id: view.item_id.clone().into(),
+        in_my_list: view.in_my_list,
         title: view.title.clone().into(),
         original_title: view.original_title.clone().unwrap_or_default().into(),
         meta_line: view.meta_line.clone().into(),

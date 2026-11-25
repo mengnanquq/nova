@@ -482,7 +482,7 @@ fn migration_is_idempotent_across_opens() {
 
     for _ in 0..3 {
         let db = Database::open(&path).expect("打开");
-        assert_eq!(db.schema_version().expect("版本"), 1);
+        assert_eq!(db.schema_version().expect("版本"), 2);
         db.upsert_server(&server_info(), 1).expect("写入");
     }
 
@@ -491,7 +491,7 @@ fn migration_is_idempotent_across_opens() {
     let version: i64 = conn
         .pragma_query_one(None, "user_version")
         .expect("读取版本");
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
 
     // 文件库必须走 WAL。
     let journal: String = conn
@@ -517,7 +517,7 @@ fn schema_newer_than_supported_is_rejected() {
             error,
             StorageError::SchemaTooNew {
                 found: 99,
-                supported: 1
+                supported: 2
             }
         ),
         "错误的变体：{error:?}"
@@ -538,7 +538,7 @@ fn migration_failure_rolls_back() {
 
     let error = Database::open(&path).expect_err("迁移应失败");
     assert!(
-        matches!(error, StorageError::Migrate { from: 0, to: 1, .. }),
+        matches!(error, StorageError::Migrate { from: 0, to: 2, .. }),
         "错误的变体：{error:?}"
     );
 

@@ -10,7 +10,7 @@
 //! - 本模块的语句都是静态字面量，不存在运行期拼装。
 
 /// 当前 schema 版本，写入 `PRAGMA user_version`。
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+pub(crate) const SCHEMA_VERSION: i64 = 2;
 
 /// `preferences` 表里 [`nova_core::UserPreferences`] 的键名。
 pub(crate) const PREFERENCES_KEY: &str = "user_preferences";
@@ -286,6 +286,20 @@ ORDER BY last_used, rowid
 
 /// 淘汰一条记录。
 pub(crate) const SQL_DELETE_IMAGE: &str = "DELETE FROM image_cache WHERE url_hash = ?1";
+
+/// v2：本地「我的列表」。
+///
+/// 只存"这台服务器上的哪个条目被用户加入列表"以及加入时间，不同步到服务端
+/// （服务端收藏要走 provider 的写接口，尚未实现）。放在本地的好处是它**真的
+/// 会持久化**，而不是详情页里一个刷新就归零的开关。
+pub(crate) const MIGRATION_V2: &str = "
+CREATE TABLE mylist (
+    server_id TEXT    NOT NULL,
+    item_id   TEXT    NOT NULL,
+    added_at  INTEGER NOT NULL,
+    PRIMARY KEY (server_id, item_id)
+);
+";
 
 #[cfg(test)]
 mod tests {

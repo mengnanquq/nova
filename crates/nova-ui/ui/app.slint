@@ -176,6 +176,8 @@ export component AppWindow inherits Window {
     callback sort();
     callback tab-activated(string);
     callback source-selected(string);
+    // 「我的列表」切换（本地持久化，Rust 侧处理）。
+    callback detail-my-list-toggle();
     // 1 ← / 2 → / 3 ↑ / 4 ↓ / 5 Enter·Space / 6 Esc·Backspace / 7 Ctrl+F
     callback key-intent(int);
 
@@ -417,7 +419,12 @@ export component AppWindow inherits Window {
                 height: parent.height;
                 visible: root.page == 2;
                 data: root.detail;
+                // 「我的列表」的真实状态来自 Rust（本地数据库），界面不再自己改。
+                in-my-list: root.detail.in-my-list;
                 focus-index <=> root.detail-focus;
+                my-list-toggle => {
+                    root.detail-my-list-toggle();
+                }
                 back => {
                     root.back();
                 }

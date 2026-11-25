@@ -67,6 +67,7 @@ mod database;
 mod errors;
 mod image_cache;
 mod items;
+mod mylist;
 mod prefs;
 mod schema;
 mod servers;

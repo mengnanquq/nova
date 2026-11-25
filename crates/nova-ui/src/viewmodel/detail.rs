@@ -57,6 +57,8 @@ pub struct DetailView {
     pub overview: Option<String>,
     /// 播放按钮文案：`"播放"` / `"从 12:34 继续"`。
     pub play_label: String,
+    /// 是否已在「我的列表」（本地持久化，不同步服务端）。
+    pub in_my_list: bool,
     /// 可播放版本。
     pub sources: Vec<SourceOption>,
     /// 类型标签（详情页单独展示为胶囊）。
@@ -74,6 +76,7 @@ impl Default for DetailView {
             meta_line: String::new(),
             overview: None,
             play_label: "播放".to_string(),
+            in_my_list: false,
             sources: Vec::new(),
             genres: Vec::new(),
             badge: None,

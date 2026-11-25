@@ -159,6 +159,8 @@ type MarginHandler = Rc<dyn Fn(i64)>;
 struct Callbacks {
     open_detail: Option<StrHandler>,
     play: Option<StrHandler>,
+    /// 详情页「我的列表」切换。
+    detail_my_list_toggle: Option<VoidHandler>,
     back: Option<VoidHandler>,
     search: Option<VoidHandler>,
     search_changed: Option<StrHandler>,
@@ -998,6 +1000,11 @@ impl App {
     }
 
     /// 版本选择回调。
+    /// 详情页「我的列表」切换。
+    pub fn on_detail_my_list_toggle(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.detail_my_list_toggle = Some(Rc::new(handler));
+    }
+
     pub fn on_source_selected(&self, handler: impl Fn(&str) + 'static) {
         self.state.borrow_mut().callbacks.source = Some(Rc::new(handler));
     }
@@ -1395,6 +1402,15 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             let handler = state.borrow().callbacks.source.clone();
             if let Some(handler) = handler {
                 handler(id.as_str());
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_detail_my_list_toggle(move || {
+            let handler = state.borrow().callbacks.detail_my_list_toggle.clone();
+            if let Some(handler) = handler {
+                handler();
             }
         });
     }

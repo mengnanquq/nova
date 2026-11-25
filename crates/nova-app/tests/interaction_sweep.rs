@@ -219,6 +219,26 @@ fn build_app(local: &Rc<Local>, page: Page, billboard_ratio: f32) -> Rc<App> {
             handler_app.set_search_text("");
         });
     }
+    {
+        // 「我的列表」：真实实现（`Shell::toggle_detail_mylist`）写本地库再重建详情。
+        // 这里用同一个本地库做替身，验证点击确实会改状态。
+        let handler_app = Rc::clone(&app);
+        let local = Rc::clone(local);
+        let item = home
+            .hero
+            .as_ref()
+            .map(|card| card.item_id.clone())
+            .unwrap_or_default();
+        app.on_detail_my_list_toggle(move || {
+            if item.is_empty() {
+                return;
+            }
+            let _ = local.toggle_mylist(&item);
+            if let Ok(Some(view)) = local.detail(&item) {
+                handler_app.set_detail(&view);
+            }
+        });
+    }
 
     app.ui().set_billboard_ratio(billboard_ratio);
     if page == Page::Detail {

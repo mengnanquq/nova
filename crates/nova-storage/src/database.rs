@@ -139,6 +139,10 @@ fn migrate(conn: &mut Connection, path: Option<&Path>) -> Result<()> {
         tx.execute_batch(schema::MIGRATION_V1)
             .map_err(|source| StorageError::Migrate { from, to, source })?;
     }
+    if from < 2 {
+        tx.execute_batch(schema::MIGRATION_V2)
+            .map_err(|source| StorageError::Migrate { from, to, source })?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|source| StorageError::Migrate { from, to, source })?;
     tx.commit()
