@@ -85,6 +85,8 @@ pub(crate) enum Command {
     /// 一个按键（命名键或单字符）。
     Key {
         key: String,
+        ctrl: bool,
+        shift: bool,
     },
     /// 逐字符输入文本。
     Type {
@@ -182,6 +184,16 @@ impl Command {
             }
             "key" => Ok(Self::Key {
                 key: text("key").ok_or_else(|| "key 需要 key".to_owned())?,
+                // 修饰键：`"ctrl":true` / `"shift":true`。只有全局快捷键需要它们
+                // （Ctrl+F 聚焦搜索、Ctrl+N 打开添加服务器）。
+                ctrl: value
+                    .get("ctrl")
+                    .and_then(|flag| flag.as_bool())
+                    .unwrap_or(false),
+                shift: value
+                    .get("shift")
+                    .and_then(|flag| flag.as_bool())
+                    .unwrap_or(false),
             }),
             "type" => Ok(Self::Type {
                 text: text("text").ok_or_else(|| "type 需要 text".to_owned())?,
@@ -344,7 +356,17 @@ mod tests {
         assert_eq!(
             Command::parse(r#"{"cmd":"key","key":"Enter"}"#),
             Ok(Command::Key {
-                key: "Enter".to_owned()
+                key: "Enter".to_owned(),
+                ctrl: false,
+                shift: false,
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"key","key":"n","ctrl":true}"#),
+            Ok(Command::Key {
+                key: "n".to_owned(),
+                ctrl: true,
+                shift: false,
             })
         );
         assert_eq!(

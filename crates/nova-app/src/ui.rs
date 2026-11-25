@@ -683,6 +683,11 @@ impl Shell {
                         None => serde_json::json!({ "ok": false, "error": "没有可用的媒体库标签" }),
                     }
                 }
+                "search" => {
+                    // 搜索页：打开并聚焦页内搜索框（调试通道要能逐页扫描）。
+                    shell.show_search(nova_ui::SearchView::new(""), true);
+                    serde_json::json!({ "ok": true, "route": "search" })
+                }
                 "detail" | "player" => match item {
                     Some(item) if value == "detail" => {
                         // 走界面的导航入口：它会 push 路由并回调 `open_detail` 加载数据。
@@ -775,9 +780,9 @@ impl Shell {
                 },
                 Err(reply) => reply,
             },
-            Cmd::Key { key } => match key_event_text(&key) {
+            Cmd::Key { key, ctrl, shift } => match key_event_text(&key) {
                 Some(text) => {
-                    let result = shell.dispatch_key(text.clone());
+                    let result = shell.dispatch_key_with_modifiers(&text, ctrl, shift);
                     match result {
                         Ok(()) => serde_json::json!({ "ok": true, "key": key }),
                         Err(error) => serde_json::json!({ "ok": false, "error": error }),
@@ -848,6 +853,42 @@ impl Shell {
     fn dispatch_key(&self, text: slint::SharedString) -> Result<(), String> {
         self.dispatch(WindowEvent::KeyPressed { text: text.clone() })?;
         self.dispatch(WindowEvent::KeyReleased { text })
+    }
+
+    /// 带修饰键的按键注入。
+    ///
+    /// `WindowEvent::KeyPressed{ text }` 本身不带修饰位——Slint 的修饰状态是后端
+    /// 根据"修饰键字符"的按下/抬起维护的（`key_codes::Control` 就是 `\u{11}`）。
+    /// 所以要先发修饰键的按下、再发目标键、最后抬起修饰键，全局快捷键
+    /// （Ctrl+F / Ctrl+N）才会命中。这一点是实测定下来的：发 `<Control>` 或
+    /// `"Control"` 字符串都不生效，只有发送该控制字符可以。
+    fn dispatch_key_with_modifiers(
+        &self,
+        text: &str,
+        ctrl: bool,
+        shift: bool,
+    ) -> Result<(), String> {
+        // `key_codes::Shift` / `key_codes::Control` 对应的控制字符。
+        const SHIFT: &str = "\u{10}";
+        const CONTROL: &str = "\u{11}";
+        let mut held: Vec<&str> = Vec::new();
+        if ctrl {
+            self.dispatch(WindowEvent::KeyPressed {
+                text: CONTROL.into(),
+            })?;
+            held.push(CONTROL);
+        }
+        if shift {
+            self.dispatch(WindowEvent::KeyPressed { text: SHIFT.into() })?;
+            held.push(SHIFT);
+        }
+        let result = self.dispatch_key(text.into());
+        for modifier in held.into_iter().rev() {
+            let _ = self.dispatch(WindowEvent::KeyReleased {
+                text: modifier.into(),
+            });
+        }
+        result
     }
 
     /// 把命令里的 `target` / `x,y` 解析成一个可以点的点。
