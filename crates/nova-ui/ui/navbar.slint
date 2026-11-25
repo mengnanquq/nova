@@ -5,7 +5,7 @@
 //! 滚动 40px 后渐变为 surface 实底。
 //!
 //! 左：NOVA 字标（红点 + 白字）；中：库标签——纯文字态（当前白、其余 text-secondary），
-//! 无胶囊无下划线；右：搜索图标按钮（聚焦展开 240px 输入框）+ 圆形头像。
+//! 无胶囊无下划线；右侧只有搜索图标按钮（聚焦展开 240px 输入框）。
 
 import { Theme } from "theme.slint";
 import { TabData, Target, TargetBus } from "models.slint";
@@ -427,22 +427,11 @@ export component Navbar inherits Rectangle {
             }
         }
 
-        // 用户头像：32px 圆，红底 + 白色首字母 14px bold。
-        Rectangle {
-            width: 32px;
-            height: 32px;
-            border-radius: Theme.radius-pill;
-            background: Theme.accent;
-
-            Text {
-                text: "N";
-                color: Theme.accent-contrast;
-                font-family: Theme.font-family;
-                font-size: Theme.font-14;
-                font-weight: Theme.weight-bold;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
+        // 这里原来有一个 32px 的红色圆形"头像"（白色 N）。
+        //
+        // 已移除：它没有 TouchArea、也没有账号/设置页可去，却长得像个可点的按钮——
+        // 用户点它什么都不会发生（审计把它记为"连点击入口都没有"）。项目没有账号
+        // 体系，留一个假头头像比没有更糟。将来做多用户/档案时再加回来，
+        // 那时它应该是一个真的下拉菜单。
     }
 }
