@@ -187,9 +187,11 @@ fn write_all_snapshots() {
     // （show 过的 testing 窗口再 resize 不会重排）。
     let wide = App::new_with(AppWindow::new().unwrap());
     wide.ui().set_window_w(1920.0);
+    wide.ui().set_window_h(1080.0);
     wide.ui()
         .window()
         .set_size(slint::LogicalSize::new(1920.0, 1080.0));
+    wide.ui().show().unwrap();
     let wide_home = home_filled();
     install_posters(&wide, &home_image_ids(&wide_home));
     install_backdrops(&wide, &["dune"]);

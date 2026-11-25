@@ -32,6 +32,7 @@ nova-desktop — Nova 桌面应用（SQLite 缓存 + provider + 图片缓存 + S
   --capture <path.png>                  --play 的捕获模式（退出码 0 通过 / 3 不通过）
   --screenshot <path.png>               窗口自截：回读自己的 back buffer 写 PNG 后退出
   --screenshot-delay <ms>               自截前等多久（默认 1500；要看刷新后的标签就给 8000）
+  --window-size <WxH>                   窗口逻辑尺寸（如 1920x1080；默认 1280x800）
   --debug-socket <path>                 本地调试通道（Unix socket，行分隔 JSON；见 docs/debugging.md）
   --seconds <n>                         捕获前播放多少秒（默认 5）
   --server <id>                         本机有多台服务器时指定一台
@@ -135,6 +136,8 @@ pub struct Cli {
     pub screenshot: Option<PathBuf>,
     /// `--screenshot-delay <ms>`：等待多久再截（等首帧/数据加载）。
     pub screenshot_delay_ms: u64,
+    /// `--window-size <WxH>`：窗口逻辑尺寸（默认 1280×800）。
+    pub window_size: Option<(u32, u32)>,
     /// `--debug-socket <path>`：本地调试通道（行分隔 JSON，见 `debug.rs`）。
     pub debug_socket: Option<PathBuf>,
 }
@@ -157,6 +160,7 @@ impl Cli {
             max_first_frame: 1.5,
             screenshot: None,
             screenshot_delay_ms: 1500,
+            window_size: None,
             debug_socket: None,
         };
         let mut snapshot: Option<PathBuf> = None;
@@ -213,6 +217,14 @@ impl Cli {
                 }
                 "--capture" => {
                     cli.capture = Some(PathBuf::from(next_value(argv, index, "--capture")?));
+                    index += 1;
+                }
+                "--window-size" => {
+                    cli.window_size = Some(parse_window_size(next_value(
+                        argv,
+                        index,
+                        "--window-size",
+                    )?)?);
                     index += 1;
                 }
                 "--debug-socket" => {
@@ -331,6 +343,20 @@ impl Cli {
             .map(str::trim)
             .filter(|term| !term.is_empty())
     }
+}
+
+/// 解析 `WxH`（也接受大写 `X`）。
+fn parse_window_size(raw: &str) -> Result<(u32, u32), AppError> {
+    let invalid = || AppError::Usage(format!("--window-size 需要 `宽x高`，收到 `{raw}`"));
+    let (w, h) = raw.split_once(['x', 'X']).ok_or_else(invalid)?;
+    let w: u32 = w.trim().parse().map_err(|_| invalid())?;
+    let h: u32 = h.trim().parse().map_err(|_| invalid())?;
+    if w < 320 || h < 240 {
+        return Err(AppError::Usage(format!(
+            "--window-size 太小（至少 320x240），收到 `{raw}`"
+        )));
+    }
+    Ok((w, h))
 }
 
 fn next_value<'a>(argv: &'a [String], index: usize, flag: &str) -> Result<&'a str, AppError> {

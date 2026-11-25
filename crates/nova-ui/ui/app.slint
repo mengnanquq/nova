@@ -14,12 +14,15 @@ import { PlayerShellPage } from "player_shell.slint";
 import { Banner } from "components/banner.slint";
 import { AddServerDialog } from "components/add_server.slint";
 
+export { Theme }
+
 export component AppWindow inherits Window {
     // 窗口初始逻辑宽（真实启动 1280×800）。绑定只作初始值：用户手动缩窗时
     // 窗口系统会直接写 width（覆盖本绑定）；测试可改 window-w 验证 vw 缩放。
     in-out property <length> window-w: 1280px;
+    in-out property <length> window-h: 800px;
     width: root.window-w;
-    height: 800px;
+    height: root.window-h;
     background: Theme.bg;
     default-font-family: Theme.font-family;
     forward-focus: keyboard;
@@ -31,6 +34,12 @@ export component AppWindow inherits Window {
     changed width => {
         Theme.viewport-width = self.width;
     }
+    // 代码/测试直接设逻辑宽时（testing 后端不会为 Window.width 发 changed），
+    // 也必须同步——否则整棵树按旧 vw 算尺寸，塞进新窗口里就是压扁的布局。
+    changed window-w => {
+        Theme.viewport-width = root.window-w;
+    }
+    out property <length> probe-card-h: Theme.card-landscape-h;
 
     // 测试用：继续观看行的放大覆盖层几何（「放大不跳布局」断言）。
     out property <length> zoom-rect-x: home-page.zoom-rect-x;

@@ -162,8 +162,17 @@ pub fn run_window(
     start: Option<StartPlay>,
     screenshot: Option<(std::path::PathBuf, u64)>,
     debug_socket: Option<std::path::PathBuf>,
+    window_size: Option<(u32, u32)>,
 ) -> Result<(), AppError> {
     let ui = AppWindow::new()?;
+    // 逻辑尺寸必须在 show 之前定好：窗口映射后再改会触发一次整体重排，
+    // 而 `--screenshot` 只有一次机会拍稳定帧。
+    if let Some((w, h)) = window_size {
+        ui.set_window_w(w as f32);
+        ui.set_window_h(h as f32);
+        ui.window()
+            .set_size(slint::LogicalSize::new(w as f32, h as f32));
+    }
     let app = Rc::new(App::new_with(ui));
     let status = local.status();
     // 离线优先：先用 SQLite 里的缓存建好首页，再启动后台刷新；状态由顶部横幅表达。
