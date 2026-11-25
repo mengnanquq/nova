@@ -69,16 +69,27 @@ export global Theme {
     in property <length> gutter: root.viewport-width >= 1920px ? 60px : root.viewport-width * 0.04;
     in property <length> block-gap: 40px;
     in property <length> section-gap: 40px;
-    // 行内卡间距（清单：8px，之前是 12px）。
-    in property <length> card-gap: 8px;
+    // 行内卡间距：Netflix 实测常量 12px（`margin-right: .75rem`，首末项归零）。
+    in property <length> card-gap: 12px;
     // 首行距 billboard 底 24px。
     in property <length> first-row-gap: 24px;
 
-    // ---- 行内卡尺寸（vw 驱动：16.6vw 的 16:9 卡 / 14.2vw 的 2:3 卡）----
-    in property <length> card-landscape-w: root.viewport-width * 0.166;
+    // ---- 行内卡尺寸：断点常量，不随视口线性缩放 ----
+    //
+    // Netflix 实测（netflix.com 详情页，同一套 row 组件；1920 视口）：
+    // - 横版卡容器 `width: 20.4375rem` = 327px（`@media (min-width:1280px)`），
+    //   图片 `aspect-ratio: 1.77515/1`，即 307×173。
+    // - 竖版卡 `width: 15rem; height: 21rem` = 240×336（1920 断点），5:7。
+    // - 卡间距 `margin-right: .75rem` = 12px，首末项归零。
+    // 之前用「视口宽 × 0.166」线性缩放，1280→1920 之间会与 Netflix 明显偏离。
+    in property <length> card-landscape-w: root.viewport-width >= 1920px ? 447px
+        : root.viewport-width >= 1280px ? 327px
+        : min(root.viewport-width * 0.25, 283px);
     in property <length> card-landscape-h: root.card-landscape-w * 9 / 16;
-    in property <length> card-portrait-w: root.viewport-width * 0.142;
-    in property <length> card-portrait-h: root.card-portrait-w * 3 / 2;
+    in property <length> card-portrait-w: root.viewport-width >= 1920px ? 240px
+        : root.viewport-width >= 1280px ? 184px
+        : min(root.viewport-width * 0.16, 130px);
+    in property <length> card-portrait-h: root.card-portrait-w * 7 / 5;
 
     // ---- 卡片放大（清单：1.35 倍、延迟 400ms、200ms ease-out、上移 12px）----
     in property <float> zoom-factor: 1.35;
@@ -89,6 +100,10 @@ export global Theme {
     in property <length> zoom-info-height: 56px;
     in property <color> zoom-panel-bg: #181818;
     // 行高里为放大卡下探预留的空间（覆盖 2:3 卡放大的最大下探量 ≈92px）。
+    //
+    // Netflix 的做法更含蓄：放大上限只有 scale(1.05)，余量预留在卡片容器的
+    // padding 里（上下 10.4px ≥ 5% 放大所需的 8.4px），行高本身由内容撑开。
+    // 我们放大到 1.35，余量必须显式留，否则会压到下一行。
     in property <length> zoom-allowance: 96px;
     // 行左右箭头：48×48 半透明黑圆角块。
     in property <length> arrow-size: 48px;
@@ -120,7 +135,8 @@ export global Theme {
     in property <length> font-48: 48px;
 
     // ---- 圆角（4 / 6）----
-    in property <length> radius-poster: 4px;
+    // 卡片圆角：Netflix 实测 1rem = 16px（图片与容器一致）。
+    in property <length> radius-poster: 16px;
     in property <length> radius-panel: 6px;
     in property <length> radius-pill: 999px;
     in property <length> radius-badge: 4px;
