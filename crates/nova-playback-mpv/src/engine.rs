@@ -308,7 +308,7 @@ impl MpvEngine {
     /// 当前视频帧纹理：`(texture_id, width, height)`。
     ///
     /// 交给 `nova-app` 的 `BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(..)
-    /// .origin(BorrowedOpenGLTextureOrigin::BottomLeft)`。纹理 id 会在视频尺寸变化
+    /// .origin(BorrowedOpenGLTextureOrigin::TopLeft)`。纹理 id 会在视频尺寸变化
     /// （`texture_serial` 变化）后失效。
     pub fn texture(&self) -> Option<(u32, u32, u32)> {
         let target = self.target.as_ref()?;

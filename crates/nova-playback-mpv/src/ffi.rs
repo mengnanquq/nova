@@ -801,7 +801,8 @@ impl RenderContext {
             internal_format: crate::gl::GL_RGBA8,
         };
         // 0 = 不翻转。mpv 的 FLIP_Y 只对"渲染到默认帧缓冲"有意义；我们渲染进自己的 FBO，
-        // 纹理按 Slint 的 BorrowedOpenGLTextureOrigin::BottomLeft 采样。
+        // 纹理按 Slint 的 `BorrowedOpenGLTextureOrigin::TopLeft` 采样（见 `nova-app`
+        // 的 `borrowed_texture`：`FLIP_Y = 0` 时纹理第 0 行就是画面顶部）。
         let mut flip: c_int = 0;
         let mut block: c_int = if block_for_target_time { 1 } else { 0 };
         let mut params = [

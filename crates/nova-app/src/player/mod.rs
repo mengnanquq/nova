@@ -507,7 +507,13 @@ fn borrowed_texture(texture: u32, width: u32, height: u32) -> Option<slint::Imag
     // SAFETY: 见函数文档——纹理与当前上下文同源，且引擎的存活期覆盖所有使用点。
     Some(unsafe {
         slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(texture, size)
-            .origin(slint::BorrowedOpenGLTextureOrigin::BottomLeft)
+            // 实测结论（同一个 FBO 用两条路径交叉验证）：
+            // - 回读路径（`player/gl.rs` 里把行序反转后写 PNG）得到的是**正立**画面；
+            // - 交给 Slint 时声明 `BottomLeft` 的快照是**上下颠倒**的（字幕倒着）。
+            // 说明 mpv 在 `FLIP_Y = 0` 下写进 FBO 的纹理第 0 行就是画面顶部，
+            // 且 `BorrowedOpenGLTextureOrigin` 描述的是"图像数据的原点在哪个角"，
+            // 传 `BottomLeft` 会让 Slint 再翻一次。故必须用 `TopLeft`。
+            .origin(slint::BorrowedOpenGLTextureOrigin::TopLeft)
             .build()
     })
 }
