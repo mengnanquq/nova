@@ -340,6 +340,16 @@ pub struct App {
     /// Slint 1.19 的数组属性没有推导与拼接，这类目标没法写进父组件的
     /// `targets` 数组，只能经 `TargetBus` 报到 Rust（见 `docs/ui-architecture.md`）。
     targets: Rc<RefCell<BTreeMap<String, TargetInfo>>>,
+    /// 上一代的登记结果（双缓冲的另一半）。
+    ///
+    /// 登记发生在**下一个事件循环回合**，而 `refresh_targets` 会推进代次让所有
+    /// 元素重新上报。如果推进时把注册表直接清空，中间就有一段"清单是空的"的
+    /// 空窗期——这时候按 id 点任何东西都会得到 `unknown target`（调试通道的
+    /// 定时刷新每 50ms 就制造一次这种空窗，表现为"点一会儿行一会儿不行"）。
+    ///
+    /// 所以改成双缓冲：推进代次时把上一代结果留在 `targets`，新一代写进 `staging`，
+    /// 读取时两者合并（新一代优先）。这样任何时刻清单都是"至少有上一帧的完整内容"。
+    staging: Rc<RefCell<BTreeMap<String, TargetInfo>>>,
 }
 
 impl App {
@@ -357,9 +367,11 @@ impl App {
         wire(&ui, &state);
         let targets: Rc<RefCell<BTreeMap<String, TargetInfo>>> =
             Rc::new(RefCell::new(BTreeMap::new()));
+        let staging: Rc<RefCell<BTreeMap<String, TargetInfo>>> =
+            Rc::new(RefCell::new(BTreeMap::new()));
         {
             // 登记回调：只存下来，不做任何界面操作（调试通道取清单时才读）。
-            let sink = Rc::clone(&targets);
+            let sink = Rc::clone(&staging);
             ui.global::<TargetBus>().on_register(move |target| {
                 let info = TargetInfo::from(target);
                 sink.borrow_mut().insert(info.id.clone(), info);
@@ -370,6 +382,7 @@ impl App {
             state,
             images,
             targets,
+            staging,
         }
     }
 
@@ -379,9 +392,16 @@ impl App {
     /// 依赖它的绑定并触发登记回调——调用方必须等一帧（真实窗口是调试定时器的
     /// 下一拍，测试是 `mock_elapsed_time`）再读 [`App::targets`]。
     ///
-    /// 先清空再推进：删掉的卡片 / 关闭的菜单不会留在清单里。
+    /// 双缓冲：把上一代的结果推进 `targets`，清空 `staging` 收新一代，
+    /// 再推进 `TargetBus.gen` 触发表达式重新求值。**不清空 `targets`**——
+    /// 空窗期会让按 id 的点击随机失败（原因见 `staging` 字段的注释）。
     pub fn refresh_targets(&self) {
-        self.targets.borrow_mut().clear();
+        {
+            let mut staging = self.staging.borrow_mut();
+            if !staging.is_empty() {
+                *self.targets.borrow_mut() = std::mem::take(&mut *staging);
+            }
+        }
         let bus = self.ui.global::<TargetBus>();
         bus.set_gen(bus.get_gen().wrapping_add(1));
     }
@@ -403,6 +423,10 @@ impl App {
         // 先放登记总线（重复元素 / 条件子树），再用声明式清单覆盖同 id：
         // 声明式清单是活绑定，标签与坐标永远是最新的；登记上来的是一次快照。
         for (id, info) in self.targets.borrow().iter() {
+            merged.insert(id.clone(), info.clone());
+        }
+        // 新一代（上一帧推进代次后回填的）覆盖旧值——它反映最新的可见性与坐标。
+        for (id, info) in self.staging.borrow().iter() {
             merged.insert(id.clone(), info.clone());
         }
         let declared = self.ui.get_targets();
