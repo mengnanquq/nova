@@ -76,6 +76,9 @@ export global Theme {
     in property <length> gutter: root.viewport-width >= 1920px ? 60px : root.viewport-width * 0.04;
     // 详情页正文左右留白：1920 实测各 200px（正文列宽 1520px）。
     in property <length> detail-gutter: root.viewport-width >= 1920px ? 200px : root.gutter;
+    /// 正文列留白：Netflix 1920 视口实测左右各 200px（`main` 48 + 内容 padding 152），
+    /// 正文列宽 1520px。每行 6 张 240 宽海报 + 12 间距正好铺满 1520。
+    in property <length> content-gutter: root.viewport-width >= 1920px ? 200px : root.gutter;
     in property <length> block-gap: 40px;
     in property <length> section-gap: 40px;
     // 行内卡间距：Netflix 实测常量 12px（`margin-right: .75rem`，首末项归零）。

@@ -129,11 +129,12 @@ component CardRow inherits Rectangle {
         width: parent.width;
         height: root.card-height;
         interactive: true;
-        content-width: Theme.gutter * 2 + row.preferred-width;
+        content-width: Theme.content-gutter * 2 + row.preferred-width;
         content-height: root.card-height;
 
         row := HorizontalLayout {
-            x: Theme.gutter;
+            // 行内容与正文列对齐（≥1920 为 200px，与 Netflix 实测列宽 1520 一致）。
+            x: Theme.content-gutter;
             spacing: root.gap;
             height: root.card-height;
 

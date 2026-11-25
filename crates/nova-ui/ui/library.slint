@@ -36,9 +36,11 @@ export component LibraryPage inherits Rectangle {
 
     background: Theme.bg;
 
-    // 网格几何：6 列（≥1440 用 7 列），2:3 卡片，12px 间距。
-    property <int> columns: root.width < Theme.library-breakpoint ? 6 : 7;
-    property <length> card-width: (root.width - Theme.gutter * 2 - Theme.card-gap * (root.columns - 1))
+    // 网格几何：用 `content-gutter`（≥1920 为 200px），列数按实测反推
+    // ——Netflix 1920 下正文列宽 1520，6 张 240 宽海报 + 12px 间距正好铺满，
+    // 所以 1920 是 6 列而不是 7 列；更窄的视口沿用 6 列，仅靠列宽自适应。
+    property <int> columns: 6;
+    property <length> card-width: (root.width - Theme.content-gutter * 2 - Theme.card-gap * (root.columns - 1))
         / root.columns;
     // 竖版海报 5:7（Netflix 实测 240×336 = 5:7，与 Theme.card-portrait-h 一致）。
     property <length> card-height: root.card-width * 7 / 5;
@@ -97,9 +99,9 @@ export component LibraryPage inherits Rectangle {
 
                 // 标题 + 数量 + 排序。
                 HorizontalLayout {
-                    x: Theme.gutter;
+                    x: Theme.content-gutter;
                     y: Theme.navbar-height + Theme.space-5;
-                    width: parent.width - Theme.gutter * 2;
+                    width: parent.width - Theme.content-gutter * 2;
                     height: Theme.font-34;
                     spacing: Theme.space-4;
 
@@ -152,7 +154,7 @@ export component LibraryPage inherits Rectangle {
 
                 // 网格：手工定位（列数固定，位置可计算），行高含放大信息区。
                 for card[i] in root.data.cards : PosterCard {
-                    x: Theme.gutter + mod(i, root.columns) * (root.card-width + Theme.card-gap);
+                    x: Theme.content-gutter + mod(i, root.columns) * (root.card-width + Theme.card-gap);
                     y: grid-y + floor(i / root.columns) * row-height;
                     card: card;
                     card-width: root.card-width;
@@ -173,7 +175,7 @@ export component LibraryPage inherits Rectangle {
                     CardZoom {
                         property <length> zw: root.card-width * root.zoom-factor;
                         property <length> zh: root.card-height * root.zoom-factor;
-                        property <length> center-x: Theme.gutter
+                        property <length> center-x: Theme.content-gutter
                             + mod(root.zoom-index, root.columns) * (root.card-width + Theme.card-gap)
                             + root.card-width / 2;
                         property <length> center-y: grid-y
