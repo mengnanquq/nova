@@ -9,8 +9,7 @@
 import { Theme } from "theme.slint";
 import { LibraryData } from "models.slint";
 import { Navbar } from "navbar.slint";
-import { PosterCard } from "poster_card.slint";
-import { CardZoom } from "card_zoom.slint";
+import { PosterGrid } from "poster_grid.slint";
 import { EmptyState } from "empty_state.slint";
 
 export component LibraryPage inherits Rectangle {
@@ -39,40 +38,10 @@ export component LibraryPage inherits Rectangle {
     // 网格几何：用 `content-gutter`（≥1920 为 200px），列数按实测反推
     // ——Netflix 1920 下正文列宽 1520，6 张 240 宽海报 + 12px 间距正好铺满，
     // 所以 1920 是 6 列而不是 7 列；更窄的视口沿用 6 列，仅靠列宽自适应。
+    // 卡宽 / 卡高 / 行高 / 列起点由 `PosterGrid` 统一计算（搜索页共用同一套）。
     property <int> columns: 6;
-    property <length> card-width: (root.width - Theme.content-gutter * 2 - Theme.card-gap * (root.columns - 1))
-        / root.columns;
-    // 竖版海报 5:7（Netflix 实测 240×336 = 5:7，与 Theme.card-portrait-h 一致）。
-    property <length> card-height: root.card-width * 7 / 5;
-    property <int> card-count: root.data.cards.length;
-    // 放大后浮出的信息区高度。
-    property <length> zoom-info: Theme.zoom-info-height;
-    property <float> zoom-factor: 1.0;
-    property <int> zoom-index: root.focus-index;
     // 网格几何：行高含放大信息区。
     property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.font-34 + Theme.space-4;
-    property <int> grid-rows: (root.card-count + root.columns - 1) / root.columns;
-    property <length> row-height: root.card-height + root.zoom-info;
-    property <length> grid-height: root.grid-rows * root.row-height;
-
-    states [
-        zoomed when root.zoom-index >= 0 && root.zoom-index < root.card-count : {
-            zoom-factor: Theme.zoom-factor;
-            in {
-                animate zoom-factor {
-                    duration: Theme.zoom-duration;
-                    delay: Theme.zoom-delay;
-                    easing: ease-out;
-                }
-            }
-            out {
-                animate zoom-factor {
-                    duration: Theme.zoom-duration;
-                    easing: ease-out;
-                }
-            }
-        }
-    ]
 
     if (root.data.empty) :
         EmptyState {
@@ -152,49 +121,22 @@ export component LibraryPage inherits Rectangle {
                     }
                 }
 
-                // 网格：手工定位（列数固定，位置可计算），行高含放大信息区。
-                for card[i] in root.data.cards : PosterCard {
-                    x: Theme.content-gutter + mod(i, root.columns) * (root.card-width + Theme.card-gap);
-                    y: grid-y + floor(i / root.columns) * row-height;
-                    card: card;
-                    card-width: root.card-width;
-                    card-height: root.card-height;
-                    clicked => {
-                        root.open-item(card.id);
-                    }
-                    hover-changed(has) => {
-                        // 网格的放大跟随键盘焦点；悬停时移过去。
-                        if (has) {
-                            root.focus-index = i;
-                        }
+                // 网格（与搜索页共用 `PosterGrid`：6 列 / content-gutter / 5:7 卡 /
+                // card-gap / 放大覆盖层都在那一个组件里）。
+                grid := PosterGrid {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    columns: root.columns;
+                    grid-top: root.grid-y;
+                    cards: root.data.cards;
+                    focus-index <=> root.focus-index;
+                    open(id) => {
+                        root.open-item(id);
                     }
                 }
 
-                // 放大覆盖层。
-                if (root.zoom-index >= 0 && root.zoom-index < root.card-count) :
-                    CardZoom {
-                        property <length> zw: root.card-width * root.zoom-factor;
-                        property <length> zh: root.card-height * root.zoom-factor;
-                        property <length> center-x: Theme.content-gutter
-                            + mod(root.zoom-index, root.columns) * (root.card-width + Theme.card-gap)
-                            + root.card-width / 2;
-                        property <length> center-y: grid-y
-                            + floor(root.zoom-index / root.columns) * row-height
-                            + root.card-height / 2;
-                        // 放大卡可以穿出左右 gutter（钳到窗口边缘）。
-                        x: clamp(center-x - zw / 2, 0px, parent.width - zw);
-                        y: clamp(center-y - zh / 2, Theme.navbar-height, parent.height - zh);
-                        width: zw;
-                        card: root.data.cards[root.zoom-index];
-                        base-width: root.card-width;
-                        base-height: root.card-height;
-                        zoom-factor: root.zoom-factor;
-                        clicked => {
-                            root.open-item(root.data.cards[root.zoom-index].id);
-                        }
-                    }
-
-                height: grid-y + grid-height + Theme.space-8;
+                height: grid.content-height;
             }
         }
 

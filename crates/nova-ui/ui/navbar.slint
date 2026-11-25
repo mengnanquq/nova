@@ -16,6 +16,9 @@ export component Navbar inherits Rectangle {
     in property <bool> search-focused: false;
     // 页面滚动是否已超过 40px：驱动透明 → surface 实底的过渡。
     in property <bool> scrolled: false;
+    // 搜索页把顶栏的胶囊搜索框藏起来：页内已经有更大的搜索框，
+    // 两个输入框同屏会互相抢焦点。
+    in property <bool> show-search: true;
     // 搜索框文本：与 AppWindow 双向同步（TextInput ⇄ 这里 ⇄ 上层）。
     in-out property <string> search-text;
 
@@ -155,6 +158,7 @@ export component Navbar inherits Rectangle {
 
         // 搜索：图标按钮，聚焦时展开为 240px 输入框。
         Rectangle {
+            visible: root.show-search;
             width: root.search-focused ? Theme.search-box-width : 36px;
             height: Theme.search-box-height;
             border-radius: Theme.radius-poster;

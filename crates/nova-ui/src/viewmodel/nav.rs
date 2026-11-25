@@ -20,6 +20,11 @@ pub enum Route {
         /// 条目标识。
         item_id: String,
     },
+    /// 搜索页（独立结果页）。
+    Search {
+        /// 发起这次搜索的查询词。
+        term: String,
+    },
     /// 播放外壳。
     Player {
         /// 条目标识。

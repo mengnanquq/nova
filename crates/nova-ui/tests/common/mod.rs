@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use i_slint_core::graphics::{Rgba8Pixel, SharedPixelBuffer};
 use nova_ui::{
     App, CardView, DetailView, HomeView, LibraryRowView, LibraryTab, LibraryView, PlayerView,
-    SourceOption, TrackItem,
+    SearchView, SourceOption, TrackItem,
 };
 
 /// 初始化 testing backend，内嵌软件光栅器（真实字体，可 `take_snapshot()`）。
@@ -336,6 +336,35 @@ pub fn library_view() -> LibraryView {
         CardView::new("l12", "沙丘").with_subtitle("2021 · 科幻"),
     ];
     view
+}
+
+/// 搜索页：固定中文查询词 + 6 张结果（正好一行 6 列网格）。
+///
+/// `total` 故意大于本页卡片数：验证结果头用的是"命中数"（服务端总数），
+/// 而不是本页卡片数。
+pub fn search_view() -> SearchView {
+    let mut view = SearchView::from_cards(
+        "沙丘",
+        vec![
+            CardView::new("s01", "沙丘：第二部")
+                .with_subtitle("2024 · 科幻")
+                .with_badge("4K"),
+            CardView::new("s02", "沙丘")
+                .with_subtitle("2021 · 科幻")
+                .with_badge("HDR"),
+            CardView::new("s03", "沙丘：预言").with_subtitle("2024 · 剧集"),
+            CardView::new("s04", "沙丘之子").with_subtitle("2003 · 剧集"),
+            CardView::new("s05", "沙海").with_subtitle("2018 · 剧集"),
+            CardView::new("s06", "沙丘魔堡").with_subtitle("2000 · 剧集"),
+        ],
+    );
+    view.total = 12;
+    view
+}
+
+/// 搜索页空态（查询词没有命中）。
+pub fn search_empty() -> SearchView {
+    SearchView::from_cards("没有这部片", Vec::new())
 }
 
 /// 详情页。

@@ -5,11 +5,12 @@
 
 use crate::pages::assets::ImageStore;
 use crate::viewmodel::{
-    CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerView, SourceOption, TrackItem,
+    CardView, DetailView, HomeView, LibraryTab, LibraryView, PlayerView, SearchView, SourceOption,
+    TrackItem,
 };
 use crate::{
-    CardData, DetailData, HomeData, LibraryData, PlayerData, RowData, SourceData, TabData,
-    TrackData,
+    CardData, DetailData, HomeData, LibraryData, PlayerData, RowData, SearchData, SourceData,
+    TabData, TrackData,
 };
 
 fn image_or_empty(images: &ImageStore, key: &crate::viewmodel::ImageKey) -> slint::Image {
@@ -124,6 +125,39 @@ pub fn library_data(view: &LibraryView, images: &ImageStore) -> LibraryData {
                 .collect(),
         ),
         empty: view.cards.is_empty(),
+    }
+}
+
+/// 搜索页数据。
+///
+/// 结果头的两行文案在 Rust 侧拼好（`「沙丘」的搜索结果` / `共 5 部`），
+/// 与媒体库页的 `title + count-text` 同构。
+pub fn search_data(
+    view: &SearchView,
+    tabs: &[LibraryTab],
+    current_tab: usize,
+    images: &ImageStore,
+) -> SearchData {
+    // 没有查询词时不显示引号（空搜索框的 Idle 态）。
+    let title = if view.term.is_empty() {
+        "搜索结果".to_string()
+    } else {
+        format!("「{}」的搜索结果", view.term)
+    };
+    SearchData {
+        tabs: model(tabs.iter().map(tab_data).collect()),
+        current_tab: current_tab as i32,
+        term: view.term.clone().into(),
+        title: title.into(),
+        count_text: format!("共 {} 部", view.total).into(),
+        cards: model(
+            view.cards
+                .iter()
+                .map(|card| card_data(card, images))
+                .collect(),
+        ),
+        state: view.state.index(),
+        error: view.state.error_message().unwrap_or_default().into(),
     }
 }
 

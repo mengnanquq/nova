@@ -12,6 +12,7 @@ pub mod detail;
 pub mod home;
 pub mod library;
 pub mod player;
+pub mod search;
 
 pub use app::{App, KeyCommand, Page, PlayerKey};
 pub use assets::ImageStore;

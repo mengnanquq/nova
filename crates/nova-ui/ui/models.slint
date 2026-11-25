@@ -26,6 +26,26 @@ export struct TabData {
     title: string,
 }
 
+// 搜索页：结果头文案在 Rust 侧拼好（`「沙丘」的搜索结果` / `共 5 部`）。
+export struct SearchData {
+    // 顶栏标签：搜索页也要画顶栏（Netflix 所有页面都有 header），
+    // 标签数据从首页视图借来，避免再复制一份导航状态。
+    tabs: [TabData],
+    // 当前标签下标。
+    current-tab: int,
+    // 当前查询词（回填搜索框）。
+    term: string,
+    // 结果头主文案。
+    title: string,
+    // 命中数文案。
+    count-text: string,
+    cards: [CardData],
+    // 0 idle / 1 loading / 2 ready / 3 empty / 4 error（与 `SearchState::index` 一致）。
+    state: int,
+    // 失败说明（state == 4 时显示）。
+    error: string,
+}
+
 export struct SourceData {
     id: string,
     title: string,

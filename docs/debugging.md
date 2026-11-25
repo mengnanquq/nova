@@ -22,7 +22,8 @@ printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 | `{"cmd":"route","value":"home"\|"library"}` | 切到首页 / 第一个媒体库 |
 | `{"cmd":"route","value":"detail","item":"<id>"}` | 同上，直达详情 |
 | `{"cmd":"tab","library":"<id>"}` | 切媒体库标签（空串=首页） |
-| `{"cmd":"search","term":"..."}` | 用本地缓存过滤首页 |
+| `{"cmd":"search","term":"..."}` | 用本地缓存过滤首页（旧行为，兼容保留） |
+| `{"cmd":"search","term":"...","page":true}` | 进搜索页并把查询词填好（本地缓存立即出结果，同时打一次服务端搜索） |
 | `{"cmd":"screenshot","path":"/tmp/x.png"}` | 窗口自截（见下），**异步**：等 `view` 里看不到 pending 或直接等文件出现 |
 | `{"cmd":"quit"}` | 退出 |
 

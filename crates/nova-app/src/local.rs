@@ -26,7 +26,9 @@ use nova_secrets::CredentialStore;
 /// 「首页」标签的哨兵 id（与真实库 id 不会冲突）。
 pub const HOME_TAB_ID: &str = "@home";
 use nova_storage::{Database, StoredServer};
-use nova_ui::{DetailView, HomeView, ImageKey, LibraryTab, LibraryView, PlayerShellView};
+use nova_ui::{
+    DetailView, HomeView, ImageKey, LibraryTab, LibraryView, PlayerShellView, SearchView,
+};
 
 use crate::env::Env;
 use crate::error::AppError;
@@ -247,6 +249,14 @@ impl Local {
             tabs,
             search,
         )?)
+    }
+
+    /// 用缓存构建搜索结果页（离线可用；输入时的即时反馈也走这里）。
+    pub fn search_view(&self, term: &str, limit: usize) -> Result<SearchView, AppError> {
+        match self.server() {
+            Some(server) => Ok(views::search_view(&self.db, &server.info.id, term, limit)?),
+            None => Ok(SearchView::from_cards(term, Vec::new())),
+        }
     }
 
     /// 用缓存构建详情页。

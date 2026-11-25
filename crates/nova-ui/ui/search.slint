@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 搜索页（Netflix 式的独立结果页）。
+//!
+//! 与"在首页就地过滤"不同：输入即切到本页，结果是**独立路由**上的结果网格。
+//! 结构（自上而下）：
+//!
+//! 1. 顶部大搜索框：`navbar-height` 之下再留 `space-6`，左右 `content-gutter`，
+//!    高 `search-input-height`（48px）、字号 `font-22`、透明底 + 底部 1px `hairline`；
+//! 2. 结果头：`「{term}」的搜索结果` + `共 {total} 部`（与 `library.slint` 的标题行同构）；
+//! 3. 结果网格：`PosterGrid`（5:7 竖版卡、6 列、`content-gutter` / `card-gap`、
+//!    放大覆盖层）——与媒体库页是**同一个组件**，不是第二份公式；
+//! 4. 三态：`Loading` 文案 / `Empty` 空态 / `Error` 错误卡（带重试）。
+//!
+//! 页内不画顶栏：搜索框本身就是页头（避免出现两个搜索框）。`Esc` 清空并回首页，
+//! `Enter` 提交后把焦点还给全局键盘（方向键才能在结果网格里移动）。
+
+import { Theme } from "theme.slint";
+import { SearchData } from "models.slint";
+import { PosterGrid } from "poster_grid.slint";
+import { EmptyState } from "empty_state.slint";
+import { Navbar } from "navbar.slint";
+
+export component SearchPage inherits Rectangle {
+    in property <SearchData> data;
+    in-out property <int> focus-index: 0;
+    // 搜索框文本：与 AppWindow 双向同步（回填当前查询词）。
+    in-out property <string> search-text;
+
+    callback open-item(string);
+    // 顶栏标签被点击：交给 AppWindow 统一切路由。
+    callback tab-activated(string);
+    // 输入即时反馈（每次编辑都发，参数是当前全文）。
+    callback search-changed(string);
+    // Enter 提交。
+    callback search-submit();
+    // 清空按钮 / Esc：清空查询并回首页。
+    callback search-clear();
+    // Esc 或 Enter 之后把焦点还给全局键盘（方向键导航结果网格）。
+    callback search-blur();
+    // 错误态的"重试"。
+    callback search-retry();
+
+    /// 把焦点交给本页的搜索框（Ctrl+F / 从顶栏首次输入时由上层调到这里）。
+    public function focus-input() {
+        query.focus();
+    }
+
+    background: Theme.bg;
+
+    // ---- 几何 ----
+    property <int> columns: 6;
+    // 搜索框：navbar 高度之下再留 40px。
+    property <length> bar-y: Theme.navbar-height + Theme.space-6;
+    property <length> bar-height: Theme.search-input-height;
+    // 结果区起点：搜索框下沿 + 24px。
+    property <length> results-y: root.bar-y + root.bar-height + Theme.space-5;
+    // 结果头行高与网格起点（内容区坐标）。
+    property <length> header-height: Theme.font-22;
+    property <length> grid-top: root.header-height + Theme.space-4;
+
+    // ---- 探针（测试用：6 列 / 5:7 / 起点 = content-gutter）----
+    out property <int> probe-columns: root.columns;
+    out property <length> probe-card-w: grid.card-width;
+    out property <length> probe-card-h: grid.card-height;
+    out property <length> probe-card-step: grid.card-step;
+    out property <length> probe-gutter: grid.content-gutter;
+    out property <length> probe-first-x: grid.first-card-x;
+
+    // ---- 顶部大搜索框 ----
+    Rectangle {
+        x: Theme.content-gutter;
+        y: root.bar-y;
+        width: parent.width - Theme.content-gutter * 2;
+        height: root.bar-height;
+        background: transparent;
+
+        // 下划线（Netflix 搜索页的输入框只有底边一条 1px 线）。
+        Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: parent.width;
+            height: 1px;
+            background: query.has-focus ? Theme.hairline-strong : Theme.hairline;
+        }
+
+        // 占位文案（TextInput 在 1.19 没有 placeholder 属性，与顶栏同做法）。
+        Text {
+            x: 0;
+            y: 0;
+            width: parent.width - clear-button.width - Theme.space-4;
+            height: parent.height;
+            text: "搜索影片、剧集…";
+            color: Theme.text-faint;
+            font-family: Theme.font-family;
+            font-size: Theme.font-22;
+            vertical-alignment: center;
+            visible: root.search-text == "";
+        }
+
+        query := TextInput {
+            x: 0;
+            y: 0;
+            width: parent.width - clear-button.width - Theme.space-4;
+            height: parent.height;
+            text <=> root.search-text;
+            color: Theme.text;
+            font-family: Theme.font-family;
+            font-size: Theme.font-22;
+            vertical-alignment: center;
+            single-line: true;
+
+            edited => {
+                root.search-changed(root.search-text);
+            }
+            accepted => {
+                root.search-submit();
+                // 焦点还给全局键盘：方向键/Enter 才能在结果网格里用。
+                query.clear-focus();
+                root.search-blur();
+            }
+            key-pressed(event) => {
+                // Esc：清空并回首页（不需要先进文本框再退聚焦）。
+                if (event.text == Key.Escape) {
+                    root.search-clear();
+                    return accept;
+                }
+                return reject;
+            }
+        }
+
+        // 清空按钮：有输入时出现。
+        clear-button := Rectangle {
+            visible: root.search-text != "";
+            x: parent.width - self.width;
+            y: (parent.height - self.height) / 2;
+            width: 28px;
+            height: 28px;
+            border-radius: Theme.radius-pill;
+            background: clear-area.has-hover ? Theme.wash : transparent;
+
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: "×";
+                color: Theme.text-muted;
+                font-family: Theme.font-family;
+                font-size: Theme.font-20;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            clear-area := TouchArea {
+                clicked => {
+                    root.search-clear();
+                }
+            }
+        }
+    }
+
+    // ---- Loading：不转圈（零依赖），只给一行文案 ----
+    if (root.data.state == 1) :
+        Text {
+            x: Theme.content-gutter;
+            y: root.results-y;
+            width: parent.width - Theme.content-gutter * 2;
+            height: Theme.font-22;
+            text: "搜索中…";
+            color: Theme.text-muted;
+            font-family: Theme.font-family;
+            font-size: Theme.font-14;
+            vertical-alignment: center;
+        }
+
+    // ---- 结果网格（Ready 态可见；其余状态隐藏，但组件始终存在，
+    //      这样探针属性与焦点索引在四态之间不会失效）----
+    results := Flickable {
+        visible: root.data.state == 2;
+        x: 0;
+        y: root.results-y;
+        width: parent.width;
+        height: parent.height - root.results-y;
+        interactive: true;
+        content-width: self.width;
+        content-height: content.height;
+
+        content := Rectangle {
+            width: parent.width;
+            height: grid.content-height;
+
+            // 结果头：「{term}」的搜索结果 + 共 N 部。
+            HorizontalLayout {
+                x: Theme.content-gutter;
+                y: 0;
+                width: parent.width - Theme.content-gutter * 2;
+                height: root.header-height;
+                spacing: Theme.space-4;
+
+                Text {
+                    text: root.data.title;
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-22;
+                    font-weight: Theme.weight-bold;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: root.data.count-text;
+                    color: Theme.text-muted;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-12;
+                    vertical-alignment: center;
+                }
+
+                // 占满剩余宽度：标题与数量保持各自的自然宽度（与 media 库标题行同构）。
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 1px;
+                    background: transparent;
+                }
+            }
+
+            // 结果网格：与媒体库页共用 `PosterGrid`（唯一一套 5:7 网格几何）。
+            grid := PosterGrid {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                columns: root.columns;
+                grid-top: root.grid-top;
+                // 放大覆盖层不许盖住结果头：上边界就是第一行卡片的顶边
+                // （媒体库页是顶栏下沿，本页没有顶栏，改用结果头下沿）。
+                overlay-clamp-top: root.grid-top;
+                cards: root.data.cards;
+                focus-index <=> root.focus-index;
+                open(id) => {
+                    root.open-item(id);
+                }
+            }
+        }
+    }
+
+    // ---- Empty：没有命中 ----
+    if (root.data.state == 3) :
+        EmptyState {
+            y: root.results-y;
+            width: parent.width;
+            height: parent.height - root.results-y;
+            title: "没有找到相关内容";
+            message: "换个关键词试试";
+        }
+
+    // ---- Error：失败原因 + 重试 ----
+    if (root.data.state == 4) :
+        EmptyState {
+            y: root.results-y;
+            width: parent.width;
+            height: parent.height - root.results-y;
+            title: "搜索失败";
+            message: root.data.error;
+            primary-label: "重试";
+            primary => {
+                root.search-retry();
+            }
+        }
+
+    // ---- 顶栏 ----
+    // Netflix 任何页面都有 header（logo / 导航 / 头像），搜索页也不例外。
+    // 但顶栏的胶囊搜索框藏起来（`show-search: false`）——页内已经有一个更大的
+    // 搜索框，两个输入框同屏会互相抢焦点。
+    nav := Navbar {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Theme.navbar-height;
+        tabs: root.data.tabs;
+        current-index: root.data.current-tab;
+        scrolled: false;
+        show-search: false;
+        search-focused: false;
+        search-text <=> root.search-text;
+        tab-activated(id) => {
+            root.tab-activated(id);
+        }
+    }
+}

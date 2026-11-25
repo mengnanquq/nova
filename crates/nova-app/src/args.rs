@@ -36,7 +36,8 @@ nova-desktop — Nova 桌面应用（SQLite 缓存 + provider + 图片缓存 + S
   --debug-socket <path>                 本地调试通道（Unix socket，行分隔 JSON；见 docs/debugging.md）
   --seconds <n>                         捕获前播放多少秒（默认 5）
   --server <id>                         本机有多台服务器时指定一台
-  --search <text>                        只用本地缓存过滤标题（不联网）
+  --search <text>                        窗口模式：启动后直接进搜索页（本地缓存 + 一次服务端搜索）；
+                                         print-view / snapshot：只用本地缓存过滤标题
   --refresh                             print-view 也先做一次联网刷新
   --no-refresh                          snapshot 不做联网刷新（默认会做一次）
   -h, --help                            显示本帮助
@@ -116,7 +117,7 @@ pub struct Cli {
     pub item: Option<String>,
     /// 指定的服务器 id。
     pub server: Option<String>,
-    /// 本地缓存里的标题过滤词。
+    /// 搜索词：窗口模式直接进搜索页；`print-view` / `snapshot` 用它过滤本地缓存。
     pub search: Option<String>,
     /// `--refresh`（`print-view` 用）。
     pub refresh: bool,

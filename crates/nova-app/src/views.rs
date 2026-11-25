@@ -14,7 +14,7 @@ use nova_storage::Database;
 use nova_ui::viewmodel::{detail_meta_line, format_duration, meta_line};
 use nova_ui::{
     CardView, DetailView, HomeView, LibraryRowView, LibraryTab, LibraryView, PlayerShellView,
-    SourceOption,
+    SearchView, SourceOption,
 };
 
 use crate::status::Status;
@@ -127,6 +127,53 @@ pub fn library_view(
         library_tabs: tabs,
         current_tab,
     })
+}
+
+/// 搜索页一次最多展示的结果数（与服务端的 `limit` 一致）。
+pub const SEARCH_LIMIT: usize = 60;
+
+/// 「找片」页只收这两种类型。
+///
+/// 集（Episode）/ 季（Season）是播放层级，只应出现在详情页的选集里；
+/// 混进搜索结果会让"找片"变成"找某一集"，所以这里明确过滤掉。
+pub fn is_search_kind(kind: MediaKind) -> bool {
+    matches!(kind, MediaKind::Movie | MediaKind::Series)
+}
+
+/// 媒体条目 → 搜索结果卡片。
+///
+/// 复用 [`card_view`]（首页/媒体库同一个映射函数），只额外过滤类型。
+pub fn search_cards(items: &[MediaItem]) -> Vec<CardView> {
+    items
+        .iter()
+        .filter(|item| is_search_kind(item.kind))
+        .map(card_view)
+        .collect()
+}
+
+/// 由已经拿到的条目构建搜索结果视图（服务端搜索回来后用这个）。
+pub fn search_view_from_items(term: &str, items: &[MediaItem]) -> SearchView {
+    SearchView::from_cards(term, search_cards(items))
+}
+
+/// 用本地缓存构建搜索结果页（离线可用，也是输入时的即时反馈）。
+///
+/// 缓存里没有服务端的搜索索引，这里按"标题包含关键字"做与首页/媒体库一致的
+/// 本地过滤；联网结果回来后界面会被服务端结果替换。
+pub fn search_view(
+    db: &Database,
+    server_id: &ServerId,
+    term: &str,
+    limit: usize,
+) -> Result<SearchView, nova_storage::StorageError> {
+    let mut items = db.children(server_id, None)?;
+    let needle = term.trim().to_lowercase();
+    if !needle.is_empty() {
+        items.retain(|item| matches(&item.title, &needle));
+    }
+    items.retain(|item| is_search_kind(item.kind));
+    items.truncate(limit);
+    Ok(search_view_from_items(term, &items))
 }
 
 /// 用本地缓存构建详情页；条目不在缓存里时返回 `None`。
@@ -583,6 +630,119 @@ mod tests {
         assert_eq!(player.engine_line.as_deref(), Some(PLAYER_STATUS));
         assert_eq!(player.position, Duration::from_secs(754));
         assert_eq!(player.duration, Some(Duration::from_secs(8280)));
+    }
+
+    #[test]
+    fn search_keeps_only_movies_and_series() {
+        let items = vec![
+            item(
+                "mv",
+                "沙丘",
+                MediaKind::Movie,
+                Duration::from_secs(0),
+                Some(6000),
+            ),
+            item(
+                "sr",
+                "沙丘：预言",
+                MediaKind::Series,
+                Duration::from_secs(0),
+                None,
+            ),
+            // 集 / 季是播放层级，不能出现在"找片"结果里。
+            item(
+                "ep",
+                "沙丘 第 1 集",
+                MediaKind::Episode,
+                Duration::from_secs(0),
+                None,
+            ),
+            item(
+                "se",
+                "沙丘 第 1 季",
+                MediaKind::Season,
+                Duration::from_secs(0),
+                None,
+            ),
+        ];
+        let view = search_view_from_items("沙丘", &items);
+        assert_eq!(view.state, nova_ui::SearchState::Ready);
+        assert_eq!(view.total, 2, "命中数只算电影 / 剧集");
+        let ids: Vec<&str> = view
+            .cards
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["mv", "sr"]);
+        // 卡片映射与首页/媒体库共用 `card_view`：副标题同样带年份/类型。
+        assert_eq!(view.cards[0].subtitle.as_deref(), Some("2024 · 科幻"));
+    }
+
+    #[test]
+    fn search_without_hits_is_empty_not_error() {
+        let view = search_view_from_items("没有这部片", &[]);
+        assert_eq!(view.state, nova_ui::SearchState::Empty);
+        assert_eq!(view.total, 0);
+        assert!(view.is_empty());
+    }
+
+    #[test]
+    fn cached_search_matches_titles_and_skips_episodes() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        db.upsert_items(
+            &server.info.id,
+            &[
+                item(
+                    "a",
+                    "Dune",
+                    MediaKind::Movie,
+                    Duration::from_secs(0),
+                    Some(6000),
+                ),
+                item(
+                    "b",
+                    "Arrival",
+                    MediaKind::Movie,
+                    Duration::from_secs(0),
+                    Some(6000),
+                ),
+                item(
+                    "c",
+                    "Dune Prophecy",
+                    MediaKind::Series,
+                    Duration::from_secs(0),
+                    None,
+                ),
+                item(
+                    "d",
+                    "Dune 第 1 集",
+                    MediaKind::Episode,
+                    Duration::from_secs(0),
+                    None,
+                ),
+            ],
+            1,
+        )
+        .expect("写条目");
+
+        let view = search_view(&db, &server.info.id, "dune", SEARCH_LIMIT).expect("本地搜索");
+        assert_eq!(view.state, nova_ui::SearchState::Ready);
+        let ids: Vec<&str> = view
+            .cards
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "c"], "大小写不敏感，且不含集");
+
+        // limit 生效。
+        let limited = search_view(&db, &server.info.id, "dune", 1).expect("本地搜索");
+        assert_eq!(limited.total, 1);
+
+        // 没有命中 → Empty（不是 Error）。
+        let none = search_view(&db, &server.info.id, "zzz", SEARCH_LIMIT).expect("本地搜索");
+        assert_eq!(none.state, nova_ui::SearchState::Empty);
     }
 
     #[test]

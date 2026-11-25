@@ -9,7 +9,7 @@ use common::{
     SUBTITLE_BAND_TOP, bright_frame, detail_view, home_empty, home_filled, home_image_ids,
     init_backend, install_backdrops, install_posters, library_view, player_audio_menu,
     player_buffering, player_controls_hidden, player_error, player_subtitle_menu, player_view,
-    snapshots_dir, write_png,
+    search_empty, search_view, snapshots_dir, write_png,
 };
 use nova_ui::{App, AppWindow, BannerData, BannerLevel, KeyCommand, Page};
 use slint::ComponentHandle;
@@ -128,6 +128,23 @@ fn write_all_snapshots() {
     app.ui().set_library_focus(4);
     capture(&app, "library.png");
     capture(&app, "netflix-library.png");
+
+    // 3b. 搜索页：独立结果页（固定中文查询词 + 6 张结果 / 一行 6 列网格）。
+    let search = search_view();
+    let search_ids: Vec<&str> = search
+        .cards
+        .iter()
+        .map(|card| card.item_id.as_str())
+        .collect();
+    // 最后一格同样不推图片：搜索页的占位也要能和媒体库一样看。
+    install_posters(&app, &search_ids[..search_ids.len().saturating_sub(1)]);
+    app.set_search(&search);
+    app.show_page(Page::Search);
+    capture(&app, "search-results.png");
+
+    // 3c. 搜索页空态（没有命中时的文案）。
+    app.set_search(&search_empty());
+    capture(&app, "search-empty.png");
 
     // 4. 详情页
     let detail = detail_view();

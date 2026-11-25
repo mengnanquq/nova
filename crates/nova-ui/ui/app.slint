@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 应用窗口：组合四个页面、把按键意图交给 Rust 绑定层。
+//! 应用窗口：组合五个页面、把按键意图交给 Rust 绑定层。
 //!
 //! .slint 只做“按键 → 意图编号”的映射与页面切换；焦点索引、导航栈都在 Rust 里。
 
 import { Theme } from "theme.slint";
-import { HomeData, LibraryData, DetailData, PlayerData } from "models.slint";
+import { HomeData, LibraryData, DetailData, PlayerData, SearchData } from "models.slint";
 import { HomePage } from "home.slint";
 import { LibraryPage } from "library.slint";
 import { DetailPage } from "detail.slint";
 import { PlayerShellPage } from "player_shell.slint";
+import { SearchPage } from "search.slint";
 import { Banner } from "components/banner.slint";
 import { AddServerDialog } from "components/add_server.slint";
 
@@ -50,16 +51,27 @@ export component AppWindow inherits Window {
     out property <length> row0-y: home-page.row0-y;
     out property <length> row0-arrow-y: home-page.row0-arrow-y;
 
+    // 测试用：搜索页结果网格几何（6 列 / 5:7 / 起点 = content-gutter）。
+    out property <int> search-columns: search-page.probe-columns;
+    out property <length> search-card-w: search-page.probe-card-w;
+    out property <length> search-card-h: search-page.probe-card-h;
+    out property <length> search-card-step: search-page.probe-card-step;
+    out property <length> search-content-gutter: search-page.probe-gutter;
+    out property <length> search-first-card-x: search-page.probe-first-x;
+
     in property <HomeData> home;
     in property <LibraryData> library;
     in property <DetailData> detail;
     in property <PlayerData> player;
+    // 注意：不能叫 `search`——那会和下面的 `search()` 回调重名。
+    in property <SearchData> search-data;
 
-    // 0 = 首页，1 = 媒体库，2 = 详情，3 = 播放页。
+    // 0 = 首页，1 = 媒体库，2 = 详情，3 = 播放页，4 = 搜索页。
     in-out property <int> page: 0;
     in-out property <int> home-focus: 0;
     in-out property <int> library-focus: 0;
     in-out property <int> detail-focus: 0;
+    in-out property <int> search-focus: 0;
     in-out property <bool> search-focused: false;
     // 搜索框文本：与导航栏的 TextInput 双向同步，Rust 侧读写这里。
     in-out property <string> search-text: "";
@@ -88,7 +100,10 @@ export component AppWindow inherits Window {
     // 拖动进度条时的气泡文本（Rust 侧用视图模型格式化）。
     in-out property <string> player-scrub-text: "";
     in-out property <bool> player-fullscreen: false;
-    out property <int> grid-columns: self.width < Theme.library-breakpoint ? 6 : 7;
+    // 网格列数：与 `PosterGrid` 实际绘制保持一致——Netflix 1920 实测正文列宽 1520，
+    // 6 张 240 宽海报 + 12px 间距正好铺满，所以 1920 也是 6 列（不是 7）。
+    // 媒体库 / 搜索页 / 键盘焦点数学必须用同一个数，否则方向键步长与画面不符。
+    out property <int> grid-columns: 6;
     // testing 快照用：压缩首页 billboard，让行区进入首屏。
     in-out property <float> billboard-ratio: 0.88;
 
@@ -99,8 +114,12 @@ export component AppWindow inherits Window {
     callback back();
     callback search();
     callback search-changed(string);
+    // 搜索页自己的大输入框（与顶栏的 search-changed 同一套行为，单独一条便于区分来源）。
+    callback search-input(string);
     callback search-submit();
     callback search-clear();
+    // 搜索页错误态的“重试”。
+    callback search-retry();
     callback banner-action();
     callback connect-server();
     callback add-server-close();
@@ -361,6 +380,37 @@ export component AppWindow inherits Window {
                 }
             }
 
+            search-page := SearchPage {
+                width: parent.width;
+                height: parent.height;
+                visible: root.page == 4;
+                data: root.search-data;
+                focus-index <=> root.search-focus;
+                search-text <=> root.search-text;
+                open-item(id) => {
+                    root.open-item(id);
+                }
+                tab-activated(id) => {
+                    root.tab-activated(id);
+                }
+                search-changed(text) => {
+                    root.search-input(text);
+                }
+                search-submit => {
+                    root.search-submit();
+                }
+                search-clear => {
+                    root.search-clear();
+                }
+                search-blur => {
+                    keyboard.focus();
+                    root.search-focused = false;
+                }
+                search-retry => {
+                    root.search-retry();
+                }
+            }
+
             PlayerShellPage {
                 width: parent.width;
                 height: parent.height;
@@ -463,6 +513,9 @@ export component AppWindow inherits Window {
         }
         if (root.page == 1) {
             lib-page.focus-input();
+        }
+        if (root.page == 4) {
+            search-page.focus-input();
         }
     }
 

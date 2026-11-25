@@ -23,15 +23,16 @@
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nova_core::ItemId;
+use nova_core::{ItemId, MediaKind};
 use nova_images::DecodedImage;
-use nova_provider::MediaProvider;
+use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
 use nova_ui::{
     AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
-    LibraryView, PlayerShellView, Route,
+    LibraryView, PlayerShellView, Route, SearchView,
 };
 use slint::ComponentHandle;
 use tokio::runtime::Handle;
@@ -43,9 +44,16 @@ use crate::local::Local;
 use crate::player::{self, Message, Player, Post, StartPlay};
 use crate::refresh;
 use crate::status::{STATUS_ITEM_ID, Status};
+use crate::views;
 
 /// 队列上限：界面长期不处理（最小化/锁屏）时不无限积压。
 const MAX_QUEUED_MESSAGES: usize = 4096;
+
+/// 搜索输入的防抖：停手 300ms 后才打服务端（本地缓存是即时的）。
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 一次服务端搜索最多取多少条（与 `views::SEARCH_LIMIT` 一致）。
+const SEARCH_LIMIT: u32 = 60;
 
 thread_local! {
     /// 主线程上的 Shell；只在 UI 线程（包括 `invoke_from_event_loop` 的回调）访问。
@@ -58,6 +66,13 @@ enum UiMessage {
     Refreshed(Box<Refreshed>),
     /// 详情页数据（按需从服务端取回后重建）。
     Detail(Box<DetailView>),
+    /// 一次搜索的结果；`generation` 用来丢弃过期（乱序到达）的响应。
+    Search {
+        /// 发起这次查询时的代次。
+        generation: u64,
+        /// 重建好的搜索结果页。
+        view: Box<SearchView>,
+    },
     /// 一张图片解码完成。
     Image {
         /// 图片键。
@@ -85,6 +100,7 @@ struct UiState {
     library: Option<LibraryView>,
     detail: Option<DetailView>,
     player: Option<PlayerShellView>,
+    search: Option<SearchView>,
 }
 
 /// 主线程上的装配体。
@@ -111,6 +127,11 @@ pub(crate) struct Shell {
     pending_source: RefCell<Option<String>>,
     /// 捕获结果槽（与 `Player` 共享）。
     capture_out: player::CaptureSlot,
+    /// 搜索代次：每次输入 +1，晚到的旧结果按它丢弃（避免乱序覆盖）。
+    ///
+    /// 用 `Arc<AtomicU64>` 而不是普通 `Cell`：防抖与服务端请求都在 tokio 线程上，
+    /// 它们需要在**发请求前**就知道自己是否已经过期。
+    search_generation: Arc<AtomicU64>,
 }
 
 /// 跨线程消息通道：队列 + 唤醒事件循环用的弱窗口句柄。
@@ -163,6 +184,7 @@ pub fn run_window(
     screenshot: Option<(std::path::PathBuf, u64)>,
     debug_socket: Option<std::path::PathBuf>,
     window_size: Option<(u32, u32)>,
+    initial_search: Option<String>,
 ) -> Result<(), AppError> {
     let ui = AppWindow::new()?;
     // 逻辑尺寸必须在 show 之前定好：窗口映射后再改会触发一次整体重排，
@@ -212,6 +234,7 @@ pub fn run_window(
             library: None,
             detail: None,
             player: None,
+            search: None,
         }),
         host,
         pending_shot: RefCell::new(None),
@@ -220,6 +243,7 @@ pub fn run_window(
         pending_capture: RefCell::new(None),
         pending_source: RefCell::new(None),
         capture_out: Rc::clone(&capture_out),
+        search_generation: Arc::new(AtomicU64::new(0)),
     });
     SHELL.with(|slot| {
         *slot.borrow_mut() = Some(Rc::clone(&shell));
@@ -229,6 +253,12 @@ pub fn run_window(
     shell.request_images(home.image_keys());
     if start.is_none() {
         shell.spawn_refresh();
+    }
+    // `--search <term>`：启动后直接进搜索页（本地缓存立即出结果，同时打一次服务端）。
+    if let Some(term) = initial_search.as_deref().map(str::trim) {
+        if !term.is_empty() {
+            shell.begin_search(term, false);
+        }
     }
 
     app.ui().window().on_close_requested(|| {
@@ -511,6 +541,12 @@ impl Shell {
                         "current_tab": view.current_tab,
                     })),
                     "detail": state.detail.as_ref().map(|view| view.title.clone()),
+                    "search": state.search.as_ref().map(|view| serde_json::json!({
+                        "term": view.term,
+                        "state": format!("{:?}", view.state),
+                        "count": view.cards.len(),
+                        "total": view.total,
+                    })),
                 })
             }
             Cmd::Route { value, item } => match value.as_str() {
@@ -558,9 +594,17 @@ impl Shell {
                 shell.activate_tab(&library);
                 serde_json::json!({ "ok": true, "library": library })
             }
-            Cmd::Search { term } => {
-                shell.apply_search(&term);
-                serde_json::json!({ "ok": true, "term": term })
+            Cmd::Search { term, page } => {
+                if page {
+                    // 进搜索页并把查询词填好（本地缓存立即出结果 + 打一次服务端）。
+                    shell.app.ui().set_search_text(term.as_str().into());
+                    shell.begin_search(&term, false);
+                    serde_json::json!({ "ok": true, "term": term, "route": "search" })
+                } else {
+                    // 兼容旧行为：只用本地缓存过滤首页。
+                    shell.apply_search(&term);
+                    serde_json::json!({ "ok": true, "term": term, "route": "home" })
+                }
             }
             Cmd::Screenshot { path } => {
                 *shell.pending_shot.borrow_mut() = Some(path.clone());
@@ -640,6 +684,145 @@ impl Shell {
             }
             Err(error) => tracing::warn!(%error, "搜索过滤本地缓存失败"),
         }
+    }
+
+    /// 一次搜索的入口：本地缓存立刻出结果，需要时再打服务端。
+    ///
+    /// `debounce` 为真时（用户正在输入）会先等 [`SEARCH_DEBOUNCE`] 再联网；
+    /// 每次调用都把"代次"加一，晚到的旧结果由 [`Shell::apply_search_message`] 丢弃。
+    fn begin_search(&self, term: &str, debounce: bool) {
+        let term = term.trim();
+        if term.is_empty() {
+            self.clear_search();
+            return;
+        }
+        let generation = self.search_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let online = self.local.provider_dyn();
+        // 1) 本地缓存即时反馈：命中就立刻是一屏结果；本地没有命中时先显示
+        //    “搜索中…”，避免先闪一下“没有结果”再被服务端结果替换。
+        match self.local.search_view(term, views::SEARCH_LIMIT) {
+            Ok(view) => {
+                let view = if view.is_empty() && online.is_some() {
+                    SearchView::new(term)
+                } else {
+                    view
+                };
+                // 输入焦点跟着页面走：在顶栏敲第一个字符时，焦点落到搜索页的大输入框。
+                self.show_search(view, true);
+            }
+            Err(error) => tracing::warn!(%error, term, "本地缓存搜索失败"),
+        }
+        // 2) 服务端：离线时本地结果就是最终结果。
+        if let Some(provider) = online {
+            self.spawn_search(term.to_owned(), generation, provider, debounce);
+        }
+    }
+
+    /// 把搜索结果页推到界面（切页 + 粘图片）。
+    ///
+    /// `focus_input` 只在**同步**路径上为真（用户刚敲字）；异步结果到达时不动焦点，
+    /// 否则用户按过 Enter 之后焦点会被拽回输入框。
+    fn show_search(&self, view: SearchView, focus_input: bool) {
+        let keys = view.image_keys();
+        self.app.open_search(&view);
+        self.state.borrow_mut().search = Some(view);
+        if focus_input {
+            self.app.ui().invoke_focus_search_input();
+        }
+        self.request_images(keys);
+    }
+
+    /// 后台打一次服务端搜索：成功/失败都回一条 [`UiMessage::Search`]。
+    fn spawn_search(
+        &self,
+        term: String,
+        generation: u64,
+        provider: Arc<dyn MediaProvider>,
+        debounce: bool,
+    ) {
+        let local = Arc::clone(&self.local);
+        let channel = Arc::clone(&self.channel);
+        let counter = Arc::clone(&self.search_generation);
+        self.runtime.spawn(async move {
+            if debounce {
+                tokio::time::sleep(SEARCH_DEBOUNCE).await;
+                // 防抖窗口里又敲了新字符：这次请求已经过期，连网络都不用发。
+                if counter.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+            }
+            let query = ItemQuery {
+                kinds: vec![MediaKind::Movie, MediaKind::Series],
+                search: Some(term.clone()),
+                limit: Some(SEARCH_LIMIT),
+                ..ItemQuery::default()
+            };
+            let view = match provider.items(query).await {
+                Ok(page) => {
+                    let total = usize::try_from(page.total).unwrap_or(page.items.len());
+                    let items = page.items;
+                    let build_local = Arc::clone(&local);
+                    let view_term = term.clone();
+                    // 写缓存后再建视图：海报下载要按 `ImageKey` 回查条目。
+                    let built = tokio::task::spawn_blocking(move || {
+                        if let Err(error) = build_local.cache_items(&items) {
+                            tracing::warn!(%error, "搜索结果写缓存失败");
+                        }
+                        views::search_view_from_items(&view_term, &items).with_total(total)
+                    })
+                    .await;
+                    match built {
+                        Ok(view) => view,
+                        Err(error) => {
+                            tracing::warn!(%error, "搜索结果构建任务失败");
+                            SearchView::error(&term, "搜索失败，请稍后重试")
+                        }
+                    }
+                }
+                Err(nova_provider::ProviderError::Unauthorized) => {
+                    local.mark_expired();
+                    SearchView::error(&term, "登录已过期，请重新登录")
+                }
+                Err(error) => {
+                    tracing::warn!(%error, term, "服务端搜索失败");
+                    SearchView::error(&term, "搜索失败，请稍后重试")
+                }
+            };
+            // 请求期间用户又改了查询词：丢掉这次结果，别乱序覆盖新结果。
+            if counter.load(Ordering::Relaxed) != generation {
+                tracing::debug!(generation, "丢弃过期的搜索结果");
+                return;
+            }
+            channel.post(UiMessage::Search {
+                generation,
+                view: Box::new(view),
+            });
+        });
+    }
+
+    /// 搜索结果回到主线程：代次对得上、且仍停在搜索页时才应用。
+    ///
+    /// 两个丢弃条件都是必需的：代次拦"旧查询"，路由拦"用户已经从结果里点进了
+    /// 详情页"——否则晚到的响应会把界面从详情页拽回搜索页。
+    fn apply_search_message(&self, generation: u64, view: SearchView) {
+        if self.search_generation.load(Ordering::Relaxed) != generation {
+            tracing::debug!(generation, "丢弃过期的搜索结果");
+            return;
+        }
+        if !matches!(self.app.current_route(), Some(Route::Search { .. })) {
+            tracing::debug!("已离开搜索页，丢弃搜索结果");
+            return;
+        }
+        self.show_search(view, false);
+    }
+
+    /// 清空搜索：回首页并恢复未过滤的首页（与清除前的行为一致）。
+    fn clear_search(&self) {
+        // 代次加一：清空后到达的旧结果不能再把界面掀回搜索页。
+        self.search_generation.fetch_add(1, Ordering::Relaxed);
+        self.state.borrow_mut().search = None;
+        self.apply_search("");
+        self.app.show_home();
     }
 
     /// 最近使用记忆：最近登录的一台服务器的地址与用户名（对话框预填用）。
@@ -782,12 +965,13 @@ impl Shell {
         };
         self.app.set_image(&key, image);
         // 重新应用当前持有的视图，让新图片进入 Slint 模型。
-        let (home, library, detail) = {
+        let (home, library, detail, search) = {
             let state = self.state.borrow();
             (
                 state.home.clone(),
                 state.library.clone(),
                 state.detail.clone(),
+                state.search.clone(),
             )
         };
         self.app.set_home(&home);
@@ -796,6 +980,9 @@ impl Shell {
         }
         if let Some(detail) = detail {
             self.app.set_detail(&detail);
+        }
+        if let Some(search) = search {
+            self.app.set_search(&search);
         }
     }
 
@@ -962,24 +1149,38 @@ fn install_callbacks(shell: &Rc<Shell>) {
         });
     }
     {
-        // 阶段 3 遗留债清理：搜索框已可输入，每次编辑都用本地缓存过滤重建首页。
+        // 搜索改为独立结果页：顶栏与搜索页的两个输入框走同一条链路。
+        // 输入即切页 + 本地缓存即时出结果，停手 300ms 后再打服务端（防抖 + 代次）。
         let weak = Rc::downgrade(shell);
         shell.app.on_search_changed(move |text| {
             if let Some(shell) = weak.upgrade() {
-                shell.apply_search(text);
+                shell.begin_search(text, true);
+            }
+        });
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_input(move |text| {
+            if let Some(shell) = weak.upgrade() {
+                shell.begin_search(text, true);
             }
         });
         let weak = Rc::downgrade(shell);
         shell.app.on_search_submit(move || {
             if let Some(shell) = weak.upgrade() {
                 let text = shell.app.search_text();
-                shell.apply_search(&text);
+                shell.begin_search(&text, false);
+            }
+        });
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_retry(move || {
+            if let Some(shell) = weak.upgrade() {
+                let text = shell.app.search_text();
+                shell.begin_search(&text, false);
             }
         });
         let weak = Rc::downgrade(shell);
         shell.app.on_search_clear(move || {
             if let Some(shell) = weak.upgrade() {
-                shell.apply_search("");
+                shell.clear_search();
             }
         });
         shell.app.on_search(|| {
@@ -1191,6 +1392,7 @@ fn apply_message(message: UiMessage) {
     match message {
         UiMessage::Refreshed(payload) => shell.apply_refresh(*payload),
         UiMessage::Detail(detail) => shell.apply_detail(*detail),
+        UiMessage::Search { generation, view } => shell.apply_search_message(generation, *view),
         UiMessage::Image { key, decoded } => shell.apply_image(key, &decoded),
         UiMessage::Playback(message) => shell.apply_playback(message),
         UiMessage::AddServer(outcome) => shell.apply_add_server(*outcome),

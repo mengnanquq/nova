@@ -38,8 +38,13 @@ pub(crate) enum Command {
     Open { item: String },
     /// 切换媒体库标签（`library` 为空串表示首页）。
     Tab { library: String },
-    /// 用本地缓存过滤首页。
-    Search { term: String },
+    /// 搜索：默认只用本地缓存过滤首页；`page` 为真时进搜索页并填好查询词。
+    Search {
+        /// 查询词。
+        term: String,
+        /// 是否进独立搜索页（`true`）还是沿用旧的"过滤首页"（`false`）。
+        page: bool,
+    },
     /// 自截窗口到 PNG（回读自己的 back buffer）。
     Screenshot { path: PathBuf },
     /// 退出进程。
@@ -74,6 +79,11 @@ impl Command {
             }),
             "search" => Ok(Self::Search {
                 term: text("term").unwrap_or_default(),
+                // 可选参数：缺省保持旧行为（只过滤首页），`"page":true` 进搜索页。
+                page: value
+                    .get("page")
+                    .and_then(|page| page.as_bool())
+                    .unwrap_or(false),
             }),
             "screenshot" => Ok(Self::Screenshot {
                 path: PathBuf::from(text("path").ok_or_else(|| "screenshot 需要 path".to_owned())?),
@@ -173,6 +183,20 @@ mod tests {
             Command::parse(r#"{"cmd":"tab","library":"abc"}"#),
             Ok(Command::Tab {
                 library: "abc".to_owned()
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"search","term":"沙丘"}"#),
+            Ok(Command::Search {
+                term: "沙丘".to_owned(),
+                page: false
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"search","term":"沙丘","page":true}"#),
+            Ok(Command::Search {
+                term: "沙丘".to_owned(),
+                page: true
             })
         );
         assert_eq!(

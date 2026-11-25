@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 竖版海报网格（5:7）：媒体库页与搜索页共用的**唯一**一套网格几何。
+//!
+//! 几何（改一处两页同时生效）：
+//! - 列宽 = (`width` - 2×`content-gutter` - `card-gap`×(列数-1)) / 列数；
+//! - 卡高 = 列宽 × 7 / 5（Netflix 实测 240×336 = 5:7）；
+//! - 列起点 = `content-gutter` + 列号 × (列宽 + `card-gap`)；
+//! - 行高 = 卡高 + 放大信息面板高度，避免放大卡压到下一行。
+//!
+//! 网格放在页面（或页面 Flickable 的内容区）里，原点是内容区左上角：
+//! `grid-top` 给"内容区顶部到第一行卡片"的距离（媒体库是标题行高，
+//! 搜索页是结果头高度）。放大覆盖层由 `CardZoom` 后绘制，不参与网格布局。
+
+import { Theme } from "theme.slint";
+import { CardData } from "models.slint";
+import { PosterCard } from "poster_card.slint";
+import { CardZoom } from "card_zoom.slint";
+
+export component PosterGrid inherits Rectangle {
+    in property <[CardData]> cards;
+    // 网格列数（页面决定：媒体库/搜索页目前都用 6 列）。
+    in property <int> columns: 6;
+    // 左右留白：媒体库与搜索页都用 `Theme.content-gutter`。
+    in property <length> content-gutter: Theme.content-gutter;
+    // 内容区顶部到第一行卡片的距离。
+    in property <length> grid-top: 0px;
+    // 放大覆盖层的上边界（内容区坐标）：媒体库要在顶栏之下，搜索页可贴到内容区顶。
+    in property <length> overlay-clamp-top: Theme.navbar-height;
+    // 焦点/悬停索引（-1 表示网格里没有焦点）。
+    in-out property <int> focus-index: -1;
+
+    // 点开一张卡：参数是条目 id。
+    callback open(string);
+
+    // ---- 几何（媒体库与搜索页都只读这些）----
+    out property <length> card-width: (root.width - root.content-gutter * 2
+        - Theme.card-gap * (root.columns - 1)) / root.columns;
+    out property <length> card-height: root.card-width * 7 / 5;
+    out property <length> card-step: root.card-width + Theme.card-gap;
+    out property <length> first-card-x: root.content-gutter;
+    out property <int> row-count: (root.cards.length + root.columns - 1) / root.columns;
+    out property <length> row-height: root.card-height + Theme.zoom-info-height;
+    // 内容区需要的总高度（含底部留白），页面据此设置 Flickable 的 content-height。
+    out property <length> content-height: root.grid-top + root.row-count * root.row-height
+        + Theme.space-8;
+
+    // 宽度由页面给（本组件是普通 Rectangle，不是布局元素）。
+    height: root.content-height;
+    background: transparent;
+    // 放大卡可以穿出左右 gutter 与首行上沿（由 CardZoom 自己钳位）。
+    clip: false;
+
+    property <float> zoom-factor: 1.0;
+    property <int> zoom-index: root.focus-index;
+
+    states [
+        zoomed when root.zoom-index >= 0 && root.zoom-index < root.cards.length : {
+            zoom-factor: Theme.zoom-factor;
+            in {
+                animate zoom-factor {
+                    duration: Theme.zoom-duration;
+                    delay: Theme.zoom-delay;
+                    easing: ease-out;
+                }
+            }
+            out {
+                animate zoom-factor {
+                    duration: Theme.zoom-duration;
+                    easing: ease-out;
+                }
+            }
+        }
+    ]
+
+    // 网格：手工定位（列数固定，位置可计算），行高含放大信息区。
+    for card[i] in root.cards : PosterCard {
+        x: root.first-card-x + mod(i, root.columns) * root.card-step;
+        y: root.grid-top + floor(i / root.columns) * root.row-height;
+        card: card;
+        card-width: root.card-width;
+        card-height: root.card-height;
+        clicked => {
+            root.open(card.id);
+        }
+        hover-changed(has) => {
+            // 网格的放大跟随键盘焦点；悬停时移过去。
+            if (has) {
+                root.focus-index = i;
+            }
+        }
+    }
+
+    // 放大覆盖层。
+    if (root.zoom-index >= 0 && root.zoom-index < root.cards.length) :
+        CardZoom {
+            property <length> zw: root.card-width * root.zoom-factor;
+            property <length> zh: root.card-height * root.zoom-factor;
+            property <length> center-x: root.first-card-x
+                + mod(root.zoom-index, root.columns) * root.card-step
+                + root.card-width / 2;
+            property <length> center-y: root.grid-top
+                + floor(root.zoom-index / root.columns) * root.row-height
+                + root.card-height / 2;
+            // 放大卡可以穿出左右 gutter（钳到窗口边缘）。
+            x: clamp(center-x - zw / 2, 0px, parent.width - zw);
+            y: clamp(center-y - zh / 2, root.overlay-clamp-top, parent.height - zh);
+            width: zw;
+            card: root.cards[root.zoom-index];
+            base-width: root.card-width;
+            base-height: root.card-height;
+            zoom-factor: root.zoom-factor;
+            clicked => {
+                root.open(root.cards[root.zoom-index].id);
+            }
+        }
+}

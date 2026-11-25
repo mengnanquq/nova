@@ -171,6 +171,9 @@ export global Theme {
     // 顶栏搜索框：展开宽度 / 高度。
     in property <length> search-box-width: 240px;
     in property <length> search-box-height: 36px;
+    // 搜索页顶部的大搜索框：高 48px（比顶栏的 240×36 大一档，字号 font-22）。
+    // 页内无 navbar，输入框本身就是页面头，所以尺寸不跟顶栏联动。
+    in property <length> search-input-height: 48px;
     // 行左右箭头字形（‹ / ›）字号。
     in property <length> arrow-glyph-size: 26px;
 
@@ -191,7 +194,6 @@ export global Theme {
     in property <length> billboard-max: 720px;
     in property <length> billboard-left: root.gutter;
     // 媒体库列数断点：宽 ≥1440 用 7 列，否则 6 列。
-    in property <length> library-breakpoint: 1440px;
     // 行标题行高与"至少露出标题"的可见性约束。
     in property <length> section-title-height: 34px;
     in property <length> section-title-reveal: 96px;

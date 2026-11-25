@@ -107,6 +107,8 @@ pub fn run(argv: Vec<String>) -> Result<(), AppError> {
                             .map(|path| (path, cli.screenshot_delay_ms)),
                         cli.debug_socket.clone(),
                         cli.window_size,
+                        // `--play` 与搜索互斥：起播时不进搜索页。
+                        None,
                     )
                 }
                 Mode::PrintView => print::run_print_view(&local, &cli, &runtime),
@@ -122,6 +124,7 @@ pub fn run(argv: Vec<String>) -> Result<(), AppError> {
                         .map(|path| (path, cli.screenshot_delay_ms)),
                     cli.debug_socket.clone(),
                     cli.window_size,
+                    cli.search_term().map(str::to_owned),
                 ),
                 // 外层分支已经排除了 Help / Version；这里保留正常返回而不是 panic。
                 Mode::Help | Mode::Version => Ok(()),

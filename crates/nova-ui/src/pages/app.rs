@@ -13,10 +13,10 @@ use std::time::Duration;
 use slint::ComponentHandle;
 
 use crate::AppWindow;
-use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player};
+use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
 use crate::viewmodel::{
     AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
-    Navigator, PlayerView, Route, move_focus,
+    Navigator, PlayerView, Route, SearchView, move_focus,
 };
 
 /// 页面编号。
@@ -30,6 +30,8 @@ pub enum Page {
     Detail = 2,
     /// 播放外壳。
     Player = 3,
+    /// 搜索页（独立结果页）。
+    Search = 4,
 }
 
 impl Page {
@@ -44,6 +46,7 @@ impl Page {
             1 => Self::Library,
             2 => Self::Detail,
             3 => Self::Player,
+            4 => Self::Search,
             _ => Self::Home,
         }
     }
@@ -163,6 +166,9 @@ struct Callbacks {
     search_changed: Option<StrHandler>,
     search_submit: Option<VoidHandler>,
     search_clear: Option<VoidHandler>,
+    // 搜索页自己的输入框 / 重试按钮（顶栏的输入框仍走上面的 search_changed / submit）。
+    search_input: Option<StrHandler>,
+    search_retry: Option<VoidHandler>,
     banner_action: Option<VoidHandler>,
     sort: Option<VoidHandler>,
     tab: Option<StrHandler>,
@@ -192,6 +198,7 @@ struct FocusState {
     home: usize,
     library: usize,
     detail: usize,
+    search: usize,
 }
 
 impl FocusState {
@@ -200,6 +207,7 @@ impl FocusState {
             Page::Home => self.home,
             Page::Library => self.library,
             Page::Detail => self.detail,
+            Page::Search => self.search,
             Page::Player => 0,
         }
     }
@@ -209,6 +217,7 @@ impl FocusState {
             Page::Home => self.home = index,
             Page::Library => self.library = index,
             Page::Detail => self.detail = index,
+            Page::Search => self.search = index,
             Page::Player => {}
         }
     }
@@ -221,6 +230,7 @@ struct State {
     library: LibraryView,
     detail: DetailView,
     player: PlayerView,
+    search: SearchView,
     player_fullscreen: bool,
     // 当前顶部横幅；`None` 表示隐藏。
     banner: Option<BannerData>,
@@ -241,6 +251,7 @@ impl Default for State {
             library: LibraryView::default(),
             detail: DetailView::default(),
             player: PlayerView::default(),
+            search: SearchView::default(),
             player_fullscreen: false,
             banner: None,
             subtitle_margin: None,
@@ -345,6 +356,37 @@ impl App {
         let focus = state.focus.library;
         drop(state);
         self.ui.set_library_focus(focus as i32);
+    }
+
+    /// 设置搜索页视图并刷新界面。
+    ///
+    /// 查询词与搜索框文本保持一致（回填）：只有值真的不同才写，
+    /// 否则每次输入都会重置输入框光标。
+    pub fn set_search(&self, view: &SearchView) {
+        {
+            let images = self.images.borrow();
+            let (tabs, current_tab) = {
+                let state = self.state.borrow();
+                (state.home.library_tabs.clone(), 0usize)
+            };
+            search::apply(&self.ui, view, &tabs, current_tab, &images);
+        }
+        let mut state = self.state.borrow_mut();
+        state.search = view.clone();
+        if state.focus.search >= view.cards.len() {
+            state.focus.search = 0;
+        }
+        let focus = state.focus.search;
+        drop(state);
+        self.ui.set_search_focus(focus as i32);
+        if self.ui.get_search_text() != view.term {
+            self.ui.set_search_text(view.term.as_str().into());
+        }
+    }
+
+    /// 当前搜索页视图模型的快照（测试与上层读取用）。
+    pub fn search_view(&self) -> SearchView {
+        self.state.borrow().search.clone()
     }
 
     /// 设置详情页视图并刷新界面。换条目时把焦点收回播放按钮。
@@ -453,6 +495,28 @@ impl App {
         true
     }
 
+    /// 打开搜索页：刷新数据、压栈（已在搜索页时只更新栈顶查询词）、切页。
+    pub fn open_search(&self, view: &SearchView) -> bool {
+        self.set_search(view);
+        let mut state = self.state.borrow_mut();
+        match state.nav.current() {
+            Some(Route::Search { term }) if *term == view.term => {}
+            Some(Route::Search { .. }) => {
+                // 查询词变了：替换栈顶，不重复压栈（返回仍然只回一层）。
+                state.nav.pop();
+                state.nav.push(Route::Search {
+                    term: view.term.clone(),
+                });
+            }
+            _ => state.nav.push(Route::Search {
+                term: view.term.clone(),
+            }),
+        }
+        drop(state);
+        self.ui.set_page(Page::Search.index());
+        true
+    }
+
     /// 返回上一级；栈空时返回 `false`。
     pub fn go_back(&self) -> bool {
         go_back(&self.ui, &self.state)
@@ -512,6 +576,16 @@ impl App {
     /// Enter 提交搜索回调。
     pub fn on_search_submit(&self, handler: impl Fn() + 'static) {
         self.state.borrow_mut().callbacks.search_submit = Some(Rc::new(handler));
+    }
+
+    /// 搜索页输入框的编辑回调（与顶栏的 `search-changed` 同一套行为）。
+    pub fn on_search_input(&self, handler: impl Fn(&str) + 'static) {
+        self.state.borrow_mut().callbacks.search_input = Some(Rc::new(handler));
+    }
+
+    /// 搜索页错误态的“重试”回调。
+    pub fn on_search_retry(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.search_retry = Some(Rc::new(handler));
     }
 
     /// 清除搜索文本回调（导航栏的“×”按钮）。
@@ -698,6 +772,7 @@ fn page_of_route(route: Option<&Route>) -> Page {
         Some(Route::Library { .. }) => Page::Library,
         Some(Route::Detail { .. }) => Page::Detail,
         Some(Route::Player { .. }) => Page::Player,
+        Some(Route::Search { .. }) => Page::Search,
     }
 }
 
@@ -780,6 +855,33 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let state = state.clone();
         ui.on_search_submit(move || {
             let handler = state.borrow().callbacks.search_submit.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+        });
+    }
+    {
+        // 搜索页的大输入框：默认复用「输入变化」那一条链路（行为完全一致）。
+        let state = state.clone();
+        ui.on_search_input(move |text| {
+            let handler = {
+                let state = state.borrow();
+                state
+                    .callbacks
+                    .search_input
+                    .clone()
+                    .or_else(|| state.callbacks.search_changed.clone())
+            };
+            if let Some(handler) = handler {
+                handler(text.as_str());
+            }
+        });
+    }
+    {
+        // 搜索页错误态的“重试”。
+        let state = state.clone();
+        ui.on_search_retry(move || {
+            let handler = state.borrow().callbacks.search_retry.clone();
             if let Some(handler) = handler {
                 handler();
             }
@@ -1112,6 +1214,7 @@ fn focus_rows(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> Vec<usi
         Page::Home => home::focus_rows(&state.home, columns),
         Page::Library => library::focus_rows(&state.library, columns),
         Page::Detail => detail::focus_rows(&state.detail),
+        Page::Search => search::focus_rows(&state.search, columns),
         Page::Player => Vec::new(),
     }
 }
@@ -1122,6 +1225,7 @@ fn set_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, index: usiz
         Page::Home => ui.set_home_focus(index as i32),
         Page::Library => ui.set_library_focus(index as i32),
         Page::Detail => ui.set_detail_focus(index as i32),
+        Page::Search => ui.set_search_focus(index as i32),
         Page::Player => {}
     }
 }
@@ -1143,6 +1247,19 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
         KeyCommand::Up => move_focus_by(ui, state, page, 0, -1),
         KeyCommand::Down => move_focus_by(ui, state, page, 0, 1),
         KeyCommand::Accept => activate(ui, state),
+        // 搜索页的 Esc 与页内输入框里的 Esc 同义：清空查询并回首页。
+        // 只回上一级会让查询词留在框里、首页也还是未过滤的，两种入口行为不一致。
+        KeyCommand::Back if page == Page::Search => {
+            let handler = state.borrow().callbacks.search_clear.clone();
+            match handler {
+                Some(handler) => {
+                    ui.set_search_text("".into());
+                    handler();
+                    true
+                }
+                None => go_back(ui, state),
+            }
+        }
         KeyCommand::Back => go_back(ui, state),
         KeyCommand::Search => {
             focus_search(ui, state);
@@ -1186,6 +1303,7 @@ fn activate(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
                 .library
                 .card_at(index)
                 .map(|card| card.item_id.clone()),
+            Page::Search => state.search.card_at(index).map(|card| card.item_id.clone()),
             Page::Detail | Page::Player => None,
         }
     };

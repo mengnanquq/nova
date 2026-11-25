@@ -1,6 +1,6 @@
 # UI 架构与视觉规范（阶段 3）
 
-阶段 3 的目标是**能看**：首页、媒体库、详情页、播放页外壳，能一路点进去，图片有占位与失败退化，
+阶段 3 的目标是**能看**：首页、媒体库、搜索页、详情页、播放页外壳，能一路点进去，图片有占位与失败退化，
 键盘/遥控器能导航。不做播放（阶段 4）、不做设置页、不做浅色主题。
 
 ## 分层与接缝
@@ -48,14 +48,62 @@ pub struct DetailView {
 }
 
 pub struct PlayerShellView { title: String, position: f32, status: String }
+
+// 搜索页（独立结果页）。查询本身在上层，这里只装结果。
+pub struct SearchView {
+    pub term: String,          // 当前查询词（回填搜索框）
+    pub cards: Vec<CardView>,  // 只有电影 / 剧集
+    pub state: SearchState,    // Idle / Loading / Ready / Empty / Error(String)
+    pub total: usize,          // 命中数（服务端总数，或本页卡片数）
+}
 ```
 
 导航也是纯 Rust：
 
 ```rust
-pub enum Route { Home, Library { id: String, title: String }, Detail { item_id: String }, Player { item_id: String } }
+pub enum Route {
+    Home,
+    Library { id: String, title: String },
+    Detail { item_id: String },
+    Player { item_id: String },
+    Search { term: String },
+}
 pub struct Navigator { /* 栈 + back() */ }
 ```
+
+`.slint` 侧的页面编号：`0` 首页 / `1` 媒体库 / `2` 详情 / `3` 播放 / `4` 搜索
+（`AppWindow.page`，`Page::index()` 与之对应）。新页面**不重排已有编号**，只在末尾追加。
+
+## 搜索页（独立路由）
+
+搜索不再"就地过滤首页"：`Route::Search { term }` 是一个真正的页面
+（`ui/search.slint` + `pages/search.rs` + `viewmodel/search.rs`）。
+
+数据流（窗口模式）：
+
+```text
+输入（顶栏或页内大搜索框）
+  └─ AppWindow.search-changed / search-input ──> nova-ui 回调
+       └─ nova-app: Shell::begin_search(term, debounce=true)
+            ├─ 本地缓存：Local::search_view（SQLite，同步只读）→ App::open_search（立刻出结果）
+            └─ 服务端：runtime.spawn { sleep(300ms) 防抖 → provider.items(ItemQuery{search, kinds=[Movie,Series], limit:60})
+                         → cache_items → views::search_view_from_items → channel.post(UiMessage::Search{generation, view}) }
+```
+
+要点：
+
+- **代次丢弃**：`Shell.search_generation: Arc<AtomicU64>` 每次输入 +1。防抖任务在发请求前、
+  请求返回后各检查一次；主线程 `drain` 里也再检查一次，所以晚到的旧结果不会覆盖新结果；
+- **离线可用**：`Local::search_view` 直接读缓存（标题包含过滤 + 只留电影/剧集），
+  没有 provider 时本地结果就是最终结果；
+- **图片**：搜索页的图片与其他页走同一条 `ImageKey`/`request_images` 路径；`apply_image`
+  重新应用模型时把 `state.search` 也重贴一遍（否则海报晚到后不显示）；
+- **按钮/重试**：`UiMessage::Search` 只在主线程 `apply_message` 里落到
+  `App::set_search` + `Page::Search`，`SearchState::Error` 由页面的"重试"回调
+  （`on_search_retry`）再发一次同样的查询。
+
+网格几何只有一份：`ui/poster_grid.slint`（媒体库与搜索页共用 6 列 / `content-gutter` /
+`card-gap` / 5:7 卡 / `CardZoom` 覆盖层）。改列数或卡宽只改这一个文件。
 
 ## 图片契约
 
@@ -75,7 +123,9 @@ pub struct Navigator { /* 栈 + back() */ }
 | `↑` `↓` | 行/网格之间移动 |
 | `Enter` / `Space` | 打开详情 / 开始播放 |
 | `Esc` / `Backspace` | 返回上一级（栈空时无动作） |
-| `Ctrl+F` | 聚焦搜索框（阶段 3 只做输入与过滤本地缓存） |
+| `Ctrl+F` | 聚焦搜索框（首页/媒体库是顶栏胶囊，搜索页是页内大搜索框） |
+| 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
+| 搜索页 `Esc` | 清空查询并回首页 |
 
 焦点必须有**可见焦点环**（不是只靠颜色变化），并且焦点环与选中态要区分开。
 
