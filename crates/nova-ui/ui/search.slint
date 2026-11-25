@@ -27,16 +27,22 @@ export component SearchPage inherits Rectangle {
     in-out property <int> focus-index: 0;
     // 搜索框文本：与 AppWindow 双向同步（回填当前查询词）。
     in-out property <string> search-text;
+    // 搜索输入框的真实焦点状态（顶栏用；由 `app.slint` 绑定到 `root.search-focused`）。
+    in property <bool> search-focused: false;
 
     callback open-item(string);
     // 顶栏标签被点击：交给 AppWindow 统一切路由。
     callback tab-activated(string);
+    // 顶栏搜索入口（搜索页内胶囊框隐藏，但回调仍接到 root，避免键盘事件黑洞）。
+    callback search();
     // 输入即时反馈（每次编辑都发，参数是当前全文）。
     callback search-changed(string);
     // Enter 提交。
     callback search-submit();
     // 清空按钮 / Esc：清空查询并回首页。
     callback search-clear();
+    // 顶栏输入框里的 Esc：交给上层退出聚焦。
+    callback search-escape();
     // Esc 或 Enter 之后把焦点还给全局键盘（方向键导航结果网格）。
     callback search-blur();
     // 错误态的"重试"。
@@ -276,12 +282,28 @@ export component SearchPage inherits Rectangle {
         height: Theme.navbar-height;
         tabs: root.data.tabs;
         current-index: root.data.current-tab;
-        scrolled: false;
+        // 结果区滚动超过 40px 后顶栏变实底（与 `library.slint` 同一阈值）。
+        scrolled: results.content-y < -40px;
         show-search: false;
-        search-focused: false;
+        search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {
             root.tab-activated(id);
+        }
+        search => {
+            root.search();
+        }
+        search-changed(text) => {
+            root.search-changed(text);
+        }
+        search-submit => {
+            root.search-submit();
+        }
+        search-clear => {
+            root.search-clear();
+        }
+        search-escape => {
+            root.search-escape();
         }
     }
 }

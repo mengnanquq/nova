@@ -104,6 +104,8 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
         library_rows: model(library_rows),
         library_row_count,
         tabs: model(view.library_tabs.iter().map(tab_data).collect()),
+        // 首页顶栏常驻高亮第一个标签（「首页」）；搜索页的当前标签由
+        // `App::set_search` 从 `State::nav_current_tab` 传入，不从这里借。
         current_tab: 0,
         empty: view.is_empty(),
     }

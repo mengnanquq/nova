@@ -11,7 +11,7 @@ mod common;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use common::{init_backend, search_view};
+use common::{home_filled, init_backend, library_view, search_view};
 use nova_ui::{App, AppWindow, Page};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
@@ -95,4 +95,52 @@ fn escape_after_enter_still_clears_from_the_page() {
     press(&app, Key::Return);
     assert!(app.handle_key(nova_ui::KeyCommand::Back));
     assert_eq!(*clears.borrow(), 1, "搜索页的 Esc 必须是清空语义");
+}
+
+#[test]
+fn search_page_keeps_the_current_navbar_tab() {
+    let app = setup();
+
+    // 用户在媒体库切到第 2 个标签后进入搜索页：顶栏高亮必须沿用这个下标。
+    app.set_home(&home_filled());
+    let mut library = library_view();
+    library.current_tab = 2;
+    app.set_library(&library);
+    app.set_search(&search_view());
+
+    assert_eq!(app.ui().get_search_data().current_tab, 2);
+}
+
+#[test]
+fn set_search_does_not_overwrite_text_while_input_is_focused() {
+    let app = setup();
+
+    app.set_search_text("正在输入的词");
+    app.ui().set_search_focused(true);
+    let mut late = search_view();
+    late.term = "旧查询词".to_string();
+    app.set_search(&late);
+
+    assert_eq!(
+        app.search_text(),
+        "正在输入的词",
+        "输入框聚焦时晚到的视图不能把文本回填成旧查询词"
+    );
+}
+
+#[test]
+fn set_search_backfills_text_when_input_is_not_focused() {
+    let app = setup();
+
+    app.set_search_text("旧文本");
+    app.ui().set_search_focused(false);
+    let mut late = search_view();
+    late.term = "沙丘".to_string();
+    app.set_search(&late);
+
+    assert_eq!(
+        app.search_text(),
+        "沙丘",
+        "未聚焦时视图里的查询词仍应回填搜索框"
+    );
 }

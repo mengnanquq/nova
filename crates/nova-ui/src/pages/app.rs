@@ -231,6 +231,9 @@ struct State {
     detail: DetailView,
     player: PlayerView,
     search: SearchView,
+    // 当前顶栏标签下标：首页恒为 0，媒体库取 `LibraryView::current_tab`。
+    // 搜索页没有自己的标签数据，顶栏高亮沿用离开前的那一项。
+    nav_current_tab: usize,
     player_fullscreen: bool,
     // 当前顶部横幅；`None` 表示隐藏。
     banner: Option<BannerData>,
@@ -252,6 +255,7 @@ impl Default for State {
             detail: DetailView::default(),
             player: PlayerView::default(),
             search: SearchView::default(),
+            nav_current_tab: 0,
             player_fullscreen: false,
             banner: None,
             subtitle_margin: None,
@@ -334,6 +338,8 @@ impl App {
         }
         let mut state = self.state.borrow_mut();
         state.home = view.clone();
+        // 首页顶栏常驻高亮第一个标签（「首页」）。
+        state.nav_current_tab = 0;
         if state.focus.home >= view.card_count() {
             state.focus.home = 0;
         }
@@ -350,6 +356,8 @@ impl App {
         }
         let mut state = self.state.borrow_mut();
         state.library = view.clone();
+        // 顶栏高亮跟随媒体库当前选中的标签，供后续搜索页沿用。
+        state.nav_current_tab = view.current_tab;
         if state.focus.library >= view.cards.len() {
             state.focus.library = 0;
         }
@@ -363,12 +371,14 @@ impl App {
     /// 查询词与搜索框文本保持一致（回填）：只有值真的不同才写，
     /// 否则每次输入都会重置输入框光标。
     pub fn set_search(&self, view: &SearchView) {
+        // 先只读地取出顶栏数据：`state` 的 borrow 在进入 `apply` 之前结束，
+        // 保证这里不会同时持有 `state` 与 `images` 两个 borrow。
+        let (tabs, current_tab) = {
+            let state = self.state.borrow();
+            (state.home.library_tabs.clone(), state.nav_current_tab)
+        };
         {
             let images = self.images.borrow();
-            let (tabs, current_tab) = {
-                let state = self.state.borrow();
-                (state.home.library_tabs.clone(), 0usize)
-            };
             search::apply(&self.ui, view, &tabs, current_tab, &images);
         }
         let mut state = self.state.borrow_mut();
@@ -379,7 +389,9 @@ impl App {
         let focus = state.focus.search;
         drop(state);
         self.ui.set_search_focus(focus as i32);
-        if self.ui.get_search_text() != view.term {
+        // 用户正在输入框里打字时不回填：视图可能晚到一拍，回填会把
+        // 光标位置与已输入文本重置成旧查询词。
+        if !self.ui.get_search_focused() && self.ui.get_search_text() != view.term {
             self.ui.set_search_text(view.term.as_str().into());
         }
     }

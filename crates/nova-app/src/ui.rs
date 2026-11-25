@@ -36,6 +36,7 @@ use nova_ui::{
 };
 use slint::ComponentHandle;
 use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
 use crate::connect::{ConnectedServer, connect};
 use crate::error::AppError;
@@ -132,6 +133,10 @@ pub(crate) struct Shell {
     /// 用 `Arc<AtomicU64>` 而不是普通 `Cell`：防抖与服务端请求都在 tokio 线程上，
     /// 它们需要在**发请求前**就知道自己是否已经过期。
     search_generation: Arc<AtomicU64>,
+    /// 上一次防抖任务的句柄：新输入 / 清空 / 关窗时 `abort()`，避免 300ms 睡眠与
+    /// 后续网络请求、写缓存继续跑。任务正常结束后不主动清理（见
+    /// [`Shell::abort_search_debounce`]）。
+    search_debounce: RefCell<Option<JoinHandle<()>>>,
 }
 
 /// 跨线程消息通道：队列 + 唤醒事件循环用的弱窗口句柄。
@@ -244,6 +249,7 @@ pub fn run_window(
         pending_source: RefCell::new(None),
         capture_out: Rc::clone(&capture_out),
         search_generation: Arc::new(AtomicU64::new(0)),
+        search_debounce: RefCell::new(None),
     });
     SHELL.with(|slot| {
         *slot.borrow_mut() = Some(Rc::clone(&shell));
@@ -376,6 +382,8 @@ pub fn run_window(
     // 窗口关掉之前先把会话收尾（进度落盘），再摘掉 thread-local 的 Shell。
     if let Some(shell) = SHELL.with(|slot| slot.borrow().clone()) {
         shell.stop_playback();
+        // 退出时取消仍在防抖窗口里的搜索，别把任务留给 runtime 收尾。
+        shell.abort_search_debounce();
     }
     SHELL.with(|slot| {
         slot.borrow_mut().take();
@@ -691,6 +699,8 @@ impl Shell {
     /// `debounce` 为真时（用户正在输入）会先等 [`SEARCH_DEBOUNCE`] 再联网；
     /// 每次调用都把"代次"加一，晚到的旧结果由 [`Shell::apply_search_message`] 丢弃。
     fn begin_search(&self, term: &str, debounce: bool) {
+        // 先取消上一次防抖任务：快速输入时旧任务不再继续 sleep / 打网络。
+        self.abort_search_debounce();
         let term = term.trim();
         if term.is_empty() {
             self.clear_search();
@@ -743,11 +753,11 @@ impl Shell {
         let local = Arc::clone(&self.local);
         let channel = Arc::clone(&self.channel);
         let counter = Arc::clone(&self.search_generation);
-        self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(async move {
             if debounce {
                 tokio::time::sleep(SEARCH_DEBOUNCE).await;
                 // 防抖窗口里又敲了新字符：这次请求已经过期，连网络都不用发。
-                if counter.load(Ordering::Relaxed) != generation {
+                if !debounce_still_current(&counter, generation) {
                     return;
                 }
             }
@@ -789,7 +799,7 @@ impl Shell {
                 }
             };
             // 请求期间用户又改了查询词：丢掉这次结果，别乱序覆盖新结果。
-            if counter.load(Ordering::Relaxed) != generation {
+            if !debounce_still_current(&counter, generation) {
                 tracing::debug!(generation, "丢弃过期的搜索结果");
                 return;
             }
@@ -798,31 +808,54 @@ impl Shell {
                 view: Box::new(view),
             });
         });
+        if debounce {
+            // 只记录防抖任务：Enter / 重试的非防抖请求交给代次丢弃，不必 abort。
+            *self.search_debounce.borrow_mut() = Some(handle);
+        }
     }
 
-    /// 搜索结果回到主线程：代次对得上、且仍停在搜索页时才应用。
+    /// 搜索结果回到主线程：代次对得上、仍停在搜索页、查询词未被改过时才应用。
     ///
-    /// 两个丢弃条件都是必需的：代次拦"旧查询"，路由拦"用户已经从结果里点进了
-    /// 详情页"——否则晚到的响应会把界面从详情页拽回搜索页。
+    /// 三个丢弃条件都是必需的：代次拦“旧查询”与“清空后到达”；路由拦“用户已经从
+    /// 结果里点进了详情页”；查询词拦“输入框已经改了但新请求还没回来”——否则晚到
+    /// 的响应会把界面从别的页面拽回搜索页，或用旧词覆盖当前输入。
     fn apply_search_message(&self, generation: u64, view: SearchView) {
-        if self.search_generation.load(Ordering::Relaxed) != generation {
-            tracing::debug!(generation, "丢弃过期的搜索结果");
-            return;
-        }
-        if !matches!(self.app.current_route(), Some(Route::Search { .. })) {
-            tracing::debug!("已离开搜索页，丢弃搜索结果");
+        let current_generation = self.search_generation.load(Ordering::Relaxed);
+        let on_search_route = matches!(self.app.current_route(), Some(Route::Search { .. }));
+        let current_input = self.app.search_text();
+        if !accept_search_result(
+            current_generation,
+            generation,
+            on_search_route,
+            &view.term,
+            &current_input,
+        ) {
+            tracing::debug!(generation, "丢弃代次 / 路由 / 查询词不匹配的搜索结果");
             return;
         }
         self.show_search(view, false);
     }
 
-    /// 清空搜索：回首页并恢复未过滤的首页（与清除前的行为一致）。
+    /// 清空搜索：取消未完成的防抖请求，回首页并恢复未过滤的首页（与清除前的行为一致）。
     fn clear_search(&self) {
+        // 取消尚未发出（还在 300ms 睡眠里）的任务，别让它在清空后又联网。
+        self.abort_search_debounce();
         // 代次加一：清空后到达的旧结果不能再把界面掀回搜索页。
         self.search_generation.fetch_add(1, Ordering::Relaxed);
         self.state.borrow_mut().search = None;
         self.apply_search("");
         self.app.show_home();
+    }
+
+    /// 取消上一次防抖任务。
+    ///
+    /// 句柄在任务正常结束后**保留**到下一次 `begin_search` / 清空 / 关窗：
+    /// 对已结束的任务 `abort()` 是 no-op，所以不需要后台任务反过来持有
+    /// `Weak<Shell>` 来清理自身（否则要为这点清理额外维护一条反向引用）。
+    fn abort_search_debounce(&self) {
+        if let Some(handle) = self.search_debounce.borrow_mut().take() {
+            handle.abort();
+        }
     }
 
     /// 最近使用记忆：最近登录的一台服务器的地址与用户名（对话框预填用）。
@@ -982,7 +1015,11 @@ impl Shell {
             self.app.set_detail(&detail);
         }
         if let Some(search) = search {
-            self.app.set_search(&search);
+            // 晚到的图片只在仍停留在搜索页时重贴：用户可能已经点进详情 / 播放页，
+            // 这时 `set_search` 会把搜索页数据写回，并按旧查询词回填输入框。
+            if matches!(self.app.current_route(), Some(Route::Search { .. })) {
+                self.app.set_search(&search);
+            }
         }
     }
 
@@ -1399,8 +1436,73 @@ fn apply_message(message: UiMessage) {
     }
 }
 
+/// 一条搜索结果是否应当上屏。
+///
+/// “代次 / 路由 / 查询词”三重判定只在这里实现一份：调用方只负责把当前值读出来。
+/// 查询词比较前去掉首尾空白（`begin_search` 写视图时也是 trim 过的）。
+pub(crate) fn accept_search_result(
+    current_generation: u64,
+    message_generation: u64,
+    on_search_route: bool,
+    message_term: &str,
+    current_input: &str,
+) -> bool {
+    current_generation == message_generation
+        && on_search_route
+        && message_term.trim() == current_input.trim()
+}
+
+/// 防抖醒来 / 请求返回时，代次是否仍然是最新的。
+pub(crate) fn debounce_still_current(counter: &AtomicU64, generation: u64) -> bool {
+    counter.load(Ordering::Relaxed) == generation
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accept_search_result, debounce_still_current};
+    use std::sync::atomic::AtomicU64;
+
+    #[test]
+    fn stale_generation_is_rejected() {
+        assert!(!accept_search_result(2, 1, true, "沙丘", "沙丘"));
+    }
+
+    #[test]
+    fn result_arriving_after_clear_is_rejected() {
+        // 清空搜索会把代次加一：旧代次的结果不能把界面掀回搜索页。
+        assert!(!accept_search_result(3, 2, true, "沙丘", ""));
+    }
+
+    #[test]
+    fn result_off_the_search_route_is_rejected() {
+        assert!(!accept_search_result(1, 1, false, "沙丘", "沙丘"));
+    }
+
+    #[test]
+    fn result_with_a_different_term_is_rejected() {
+        assert!(!accept_search_result(1, 1, true, "沙丘", "沙丘：第二部"));
+    }
+
+    #[test]
+    fn matching_result_is_accepted() {
+        assert!(accept_search_result(7, 7, true, "沙丘", "沙丘"));
+    }
+
+    #[test]
+    fn first_search_with_zero_generation_is_accepted() {
+        assert!(accept_search_result(0, 0, true, "沙丘", "沙丘"));
+    }
+
+    #[test]
+    fn debounce_only_continues_for_the_current_generation() {
+        let counter = AtomicU64::new(3);
+        assert!(debounce_still_current(&counter, 3));
+        assert!(!debounce_still_current(&counter, 2));
+    }
 }

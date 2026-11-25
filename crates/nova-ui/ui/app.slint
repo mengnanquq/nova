@@ -387,11 +387,15 @@ export component AppWindow inherits Window {
                 data: root.search-data;
                 focus-index <=> root.search-focus;
                 search-text <=> root.search-text;
+                search-focused: root.search-focused;
                 open-item(id) => {
                     root.open-item(id);
                 }
                 tab-activated(id) => {
                     root.tab-activated(id);
+                }
+                search => {
+                    root.search();
                 }
                 search-changed(text) => {
                     root.search-input(text);
@@ -401,6 +405,10 @@ export component AppWindow inherits Window {
                 }
                 search-clear => {
                     root.search-clear();
+                }
+                search-escape => {
+                    keyboard.focus();
+                    root.search-focused = false;
                 }
                 search-blur => {
                     keyboard.focus();
