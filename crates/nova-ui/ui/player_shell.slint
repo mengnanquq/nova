@@ -36,7 +36,6 @@ export component PlayerShellPage inherits Rectangle {
     callback mute-toggle();
     callback volume-set(float);
     callback subtitle-delay(float);
-    callback subtitle-external();
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 播放页的控件全在 `PlayerOverlay` 里（子组件），本页自己不直接摆放控件，
@@ -180,10 +179,6 @@ export component PlayerShellPage inherits Rectangle {
 
         subtitle-delay(seconds) => {
             root.subtitle-delay(seconds);
-        }
-
-        subtitle-external => {
-            root.subtitle-external();
         }
     }
 }

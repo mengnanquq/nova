@@ -183,7 +183,6 @@ struct Callbacks {
     player_fullscreen: Option<BoolHandler>,
     player_exit: Option<SeekHandler>,
     player_subtitle_delay: Option<SecondsHandler>,
-    player_subtitle_external: Option<VoidHandler>,
     player_subtitle_margin: Option<MarginHandler>,
     connect_server: Option<VoidHandler>,
     // 添加服务器：参数是（地址，用户名，密码明文）——密码只在这一次函数调用里存在。
@@ -1061,10 +1060,6 @@ impl App {
     }
 
     /// "加载外挂字幕…"回调：文件选择在上层（界面不碰文件系统）。
-    pub fn on_player_subtitle_external(&self, handler: impl Fn() + 'static) {
-        self.state.borrow_mut().callbacks.player_subtitle_external = Some(Rc::new(handler));
-    }
-
     /// 空状态的“连接服务器”回调（真正的连接流程在上层）。
     pub fn on_connect_server(&self, handler: impl Fn() + 'static) {
         self.state.borrow_mut().callbacks.connect_server = Some(Rc::new(handler));
@@ -1595,15 +1590,6 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             }
         });
     }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        ui.on_player_subtitle_external(move || {
-            if let Some(ui) = weak.upgrade() {
-                player_subtitle_external(&ui, &state);
-            }
-        });
-    }
 }
 
 fn focus_rows(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> Vec<usize> {
@@ -1970,14 +1956,6 @@ fn player_subtitle_delay(ui: &AppWindow, state: &Rc<RefCell<State>>, seconds: f6
     let handler = state.borrow().callbacks.player_subtitle_delay.clone();
     if let Some(handler) = handler {
         handler(seconds);
-    }
-}
-
-fn player_subtitle_external(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    player_note_input(ui, state);
-    let handler = state.borrow().callbacks.player_subtitle_external.clone();
-    if let Some(handler) = handler {
-        handler();
     }
 }
 

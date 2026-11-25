@@ -404,6 +404,15 @@ impl Host {
         }
     }
 
+    /// 字幕延迟（秒，可为负）：`sub-delay`。
+    fn set_subtitle_delay(&mut self, _runtime: &Handle, seconds: f64) {
+        if let Some(engine) = self.engine.as_mut()
+            && let Err(error) = engine.set_subtitle_delay_seconds(seconds)
+        {
+            tracing::warn!(%error, "engine.set_subtitle_delay_seconds 失败");
+        }
+    }
+
     /// 字幕安全区：控制层可见时把字幕往上抬（`sub-margin-y`）。
     fn set_subtitle_margin(&mut self, runtime: &Handle, y: i64) {
         if let Some(engine) = self.engine.as_mut()
@@ -616,6 +625,8 @@ pub(crate) struct Player {
     rate: f32,
     /// 当前字幕抬升量（`sub-margin-y`，px）：避免重复下发。
     subtitle_margin: i64,
+    /// 当前字幕延迟（秒，可为负）：菜单显示用，同时下发给 mpv `sub-delay`。
+    subtitle_delay: f64,
 }
 
 /// 当前播放目标。
@@ -671,6 +682,7 @@ impl Player {
             muted: false,
             rate: 1.0,
             subtitle_margin: 0,
+            subtitle_delay: 0.0,
         }
     }
 
@@ -1106,6 +1118,15 @@ impl Player {
         self.dirty = true;
     }
 
+    /// 字幕延迟（秒，可为负）。`viewmodel` 侧记一份，界面菜单显示当前值。
+    pub(crate) fn set_subtitle_delay(&mut self, seconds: f64) {
+        let seconds = if seconds.is_finite() { seconds } else { 0.0 };
+        self.subtitle_delay = seconds;
+        let runtime = self.runtime.clone();
+        self.host.borrow_mut().set_subtitle_delay(&runtime, seconds);
+        self.dirty = true;
+    }
+
     /// 字幕安全区：控制层可见时把字幕抬起，隐藏时归零（只在数值变化时下发）。
     pub(crate) fn set_subtitle_margin(&mut self, y: i64) {
         if self.subtitle_margin == y {
@@ -1404,6 +1425,7 @@ impl Player {
         view.volume = self.volume;
         view.muted = self.muted;
         view.rate = self.rate;
+        view.subtitle_delay = self.subtitle_delay as f32;
         if let Some(target) = &self.target {
             view.title = target.title.clone();
             view.subtitle = target.subtitle.clone();

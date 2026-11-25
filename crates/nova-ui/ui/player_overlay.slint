@@ -512,19 +512,20 @@ component TrackMenu inherits Rectangle {
     in property <[TrackData]> tracks;
     in property <bool> show-close: false;
     in property <bool> close-selected: false;
-    // 字幕菜单底部多三行动作（延迟 -0.5s / +0.5s / 外挂字幕）。
+    // 字幕菜单底部多两行动作（延迟 -0.5s / +0.5s）。外挂字幕已下架，见文件末尾说明。
     in property <bool> show-subtitle-actions: false;
+    // 当前字幕延迟文案（"+0.5s" / "0.0s"），字幕菜单里显示，让用户知道挪了多少。
+    in property <string> delay-text: "";
     callback item-selected(int);
     callback close-activated();
     callback delay-step(float);
-    callback external-subtitle();
     // 调试通道：本菜单的目标 id 前缀（音轨 / 字幕两套）。
     in property <string> target-prefix: "";
     in property <bool> targets-visible: true;
 
     property <int> row-count: root.tracks.length + (root.show-close ? 1 : 0);
     property <length> actions-height: root.show-subtitle-actions
-        ? Theme.space-2 + 1px + Theme.player-menu-row * 3
+        ? Theme.space-2 + 1px + Theme.player-menu-row * 2
         : 0px;
 
     width: Theme.player-menu-width;
@@ -587,8 +588,11 @@ component TrackMenu inherits Rectangle {
             background: transparent;
         }
 
+        // Netflix 的字幕菜单只有轨道与"关闭"，没有延迟 / 外挂字幕。这两项是我们
+        // 额外提供的功能（对字幕对齐很实用），保留但降层级：字号更小、放在分隔线
+        // 之下，并且把**当前延迟值**显示在标签里，避免用户点了却不知道挪了多少。
         if root.show-subtitle-actions : ActionRow {
-            label: "字幕延迟 −0.5s";
+            label: "字幕延迟 " + root.delay-text + "（−0.5s）";
             target-id: root.target-prefix + "delay-down";
             targets-visible: root.targets-visible;
             activated => {
@@ -597,7 +601,7 @@ component TrackMenu inherits Rectangle {
         }
 
         if root.show-subtitle-actions : ActionRow {
-            label: "字幕延迟 +0.5s";
+            label: "字幕延迟 " + root.delay-text + "（+0.5s）";
             target-id: root.target-prefix + "delay-up";
             targets-visible: root.targets-visible;
             activated => {
@@ -605,14 +609,9 @@ component TrackMenu inherits Rectangle {
             }
         }
 
-        if root.show-subtitle-actions : ActionRow {
-            label: "加载外挂字幕…";
-            target-id: root.target-prefix + "external";
-            targets-visible: root.targets-visible;
-            activated => {
-                root.external-subtitle();
-            }
-        }
+        // 「加载外挂字幕…」已下架：仓库里没有文件选择对话框依赖（rfd / xdg-desktop-portal），
+        // 引擎侧也没有 `sub-add` 通路。留着一个点了没反应的按钮比没有更糟，
+        // 所以先移除；将来补上依赖与引擎通路后再加回来。
     }
 }
 
@@ -772,7 +771,6 @@ export component PlayerOverlay inherits Rectangle {
     callback mute-toggle();
     callback volume-set(float);
     callback subtitle-delay(float);
-    callback subtitle-external();
 
     background: transparent;
 
@@ -1023,7 +1021,10 @@ export component PlayerOverlay inherits Rectangle {
     // 官方 `.nf-big-play-pause button .svg-icon-nfplayerOpticalCenterPlay{opacity:.7}`：
     // **一枚半透明的大图标，没有底色也没有描边**。这里去掉原来的深色圆底 + 1px 描边
     // （那是 hero 视频圆钮的实测样式，不属于播放器，见 §7 / §11.6）。
-    if root.show-center-play && root.controls-fade > 0.01 : Rectangle {
+    // 条件只看 `show-center-play`（暂停且无错误）：控制层淡出时元素仍在，
+    // 只是 opacity 归零、触摸区禁用。这样它的调试目标不会因为淡入淡出的
+    // 中间帧而时有时无（清单抖动会让交互扫描得出错误结论）。
+    if root.show-center-play : Rectangle {
         opacity: root.controls-fade;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
@@ -1038,6 +1039,37 @@ export component PlayerOverlay inherits Rectangle {
             y: (parent.height - self.height) / 2;
             tint: Theme.text;
             opacity: 0.7;
+        }
+
+        // 点大播放图标 = 播放/暂停。
+        //
+        // 此前这里**没有 TouchArea**：点击会穿透到下面那层整屏命中层，
+        // 而那层只做"唤醒控制层"，于是用户点了这个硕大的播放图标什么都不发生
+        // （交互扫描会把它记成"死按钮"）。命中区比图标本身放大一圈，
+        // 方便鼠标随手点中。
+        center-play-area := TouchArea {
+            // 控制层隐藏时不接受点击：透明层吃掉点击是比"死按钮"更难查的 bug。
+            enabled: root.controls-fade > 0.01;
+            mouse-cursor: pointer;
+            clicked => {
+                root.play-pause();
+            }
+        }
+
+        // 调试通道要能看到它，否则"没反应"也没法被扫描出来。
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible) {
+                TargetBus.register({
+                    id: "player.center-play",
+                    kind: "button",
+                    label: "播放",
+                    x: root.absolute-position.x,
+                    y: root.absolute-position.y,
+                    width: root.width,
+                    height: root.height,
+                });
+            }
         }
     }
 
@@ -1404,6 +1436,7 @@ export component PlayerOverlay inherits Rectangle {
         show-close: true;
         close-selected: root.data.subtitles-off;
         show-subtitle-actions: true;
+        delay-text: root.data.subtitle-delay-text;
 
         item-selected(index) => {
             root.subtitle-selected(index);
@@ -1417,8 +1450,5 @@ export component PlayerOverlay inherits Rectangle {
             root.subtitle-delay(seconds);
         }
 
-        external-subtitle => {
-            root.subtitle-external();
-        }
     }
 }

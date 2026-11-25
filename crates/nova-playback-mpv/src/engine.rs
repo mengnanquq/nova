@@ -539,6 +539,11 @@ impl PlaybackEngine for MpvEngine {
         self.send(Command::SetSubtitleDelay(delay.as_secs_f64()))
     }
 
+    async fn set_subtitle_delay_seconds(&mut self, seconds: f64) -> Result<(), PlaybackError> {
+        // mpv 的 `sub-delay` 本身允许负值，直接透传（trait 默认实现会把负值丢掉）。
+        self.send(Command::SetSubtitleDelay(seconds))
+    }
+
     async fn set_subtitle_margin(&mut self, y: i64) -> Result<(), PlaybackError> {
         self.send(Command::SetSubtitleMargin(y))
     }

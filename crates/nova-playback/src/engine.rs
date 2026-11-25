@@ -200,6 +200,22 @@ pub trait PlaybackEngine: Send {
     /// 字幕延迟（正数表示字幕更晚出现）。
     async fn set_subtitle_delay(&mut self, delay: Duration) -> Result<(), PlaybackError>;
 
+    /// 字幕延迟，**允许负值**（负数表示字幕提前出现，即 mpv 的 `sub-delay` 为负）。
+    ///
+    /// [`Self::set_subtitle_delay`] 的签名是 `Duration`（只能非负），而实际调字幕
+    /// 对齐时用户经常需要把字幕往前挪，所以单独给一个 `f64` 秒的入口。
+    ///
+    /// 默认实现把非负值转成 `Duration` 转交、负值直接忽略（不认识负偏移的引擎
+    /// 至少不会因为"往前挪"这个动作报错）。
+    async fn set_subtitle_delay_seconds(&mut self, seconds: f64) -> Result<(), PlaybackError> {
+        if seconds.is_finite() && seconds >= 0.0 {
+            self.set_subtitle_delay(Duration::from_secs_f64(seconds))
+                .await
+        } else {
+            Ok(())
+        }
+    }
+
     /// 字幕底部安全区：把字幕往上抬 `y` 像素（mpv 的 `sub-margin-y`），`0` 表示归位。
     ///
     /// 用于控制层可见时避开传输行（`blend-subtitles=video` 时字幕烧在视频层，

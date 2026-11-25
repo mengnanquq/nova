@@ -202,9 +202,7 @@ export component AppWindow inherits Window {
     callback player-mute-toggle();
     callback player-volume-set(float);
     callback player-subtitle-delay(float);
-    callback player-subtitle-external();
     // 控制层显隐变化时把字幕应该抬多高（px）报出去（mpv 的 sub-margin-y）。
-    callback player-subtitle-margin(int);
 
     keyboard := FocusScope {
         width: 100%;
@@ -559,9 +557,6 @@ export component AppWindow inherits Window {
             root.player-subtitle-delay(seconds);
         }
 
-        subtitle-external => {
-            root.player-subtitle-external();
-        }
         }
     }
 

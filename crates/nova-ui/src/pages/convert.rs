@@ -243,6 +243,7 @@ pub fn player_data(view: &PlayerView, images: &ImageStore, item_id: &str) -> Pla
         volume_hint: view.volume_hint_visible(),
         muted: view.muted,
         rate_text: view.rate_text().into(),
+        subtitle_delay_text: view.subtitle_delay_text().into(),
         audio_tracks: model(view.audio_tracks.iter().map(track_data).collect()),
         subtitle_tracks: model(view.subtitle_tracks.iter().map(track_data).collect()),
         subtitles_off: view.selected_subtitle_track().is_none(),

@@ -114,6 +114,8 @@ pub struct PlayerView {
     pub muted: bool,
     /// 播放速率（`1.0` 为正常）。
     pub rate: f32,
+    /// 字幕延迟（秒，可为负：负数表示字幕提前出现）。
+    pub subtitle_delay: f32,
     /// 音轨列表。
     pub audio_tracks: Vec<TrackItem>,
     /// 字幕列表（"关闭"不在此列，界面上单独一条）。
@@ -150,6 +152,7 @@ impl PlayerView {
             title: title.into(),
             volume: 1.0,
             rate: 1.0,
+            subtitle_delay: 0.0,
             controls_visible: true,
             ..Self::default()
         }
@@ -575,6 +578,19 @@ impl PlayerView {
     ///
     /// `blend-subtitles=video` 时字幕烧在视频层，控制层的传输行会直接盖住底部常驻区，
     /// 所以控制层可见时把字幕抬到传输行上方，隐藏时归零。
+    /// 字幕延迟的菜单文案，例如 `"+0.5s"` / `"−1.0s"` / `"0.0s"`。
+    ///
+    /// 用真正的减号 `−`（U+2212）而不是连字符：负值在菜单里要一眼看出来。
+    pub fn subtitle_delay_text(&self) -> String {
+        if self.subtitle_delay.abs() < 0.05 {
+            "0.0s".to_string()
+        } else if self.subtitle_delay > 0.0 {
+            format!("+{:.1}s", self.subtitle_delay)
+        } else {
+            format!("−{:.1}s", -self.subtitle_delay)
+        }
+    }
+
     pub fn subtitle_margin(&self, viewport_height: f32) -> i64 {
         if !self.controls_visible || !viewport_height.is_finite() || viewport_height <= 0.0 {
             return 0;

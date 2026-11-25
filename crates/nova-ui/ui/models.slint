@@ -128,6 +128,8 @@ export struct PlayerData {
     volume-hint: bool,
     muted: bool,
     rate-text: string,
+    // 字幕延迟文案（例如 "+0.5s"），字幕菜单里显示当前值。
+    subtitle-delay-text: string,
     audio-tracks: [TrackData],
     subtitle-tracks: [TrackData],
     // 当前没有选中字幕（字幕菜单里"关闭"打勾）

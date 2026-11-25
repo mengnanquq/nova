@@ -621,6 +621,20 @@ impl Shell {
                         "count": view.cards.len(),
                         "total": view.total,
                     })),
+                    // 播放页状态：以前 `view` 读不到它，导致"点播放器按钮到底有没有
+                    // 生效"没法在运行中的进程里验证（审计里专门指出过这个缺口）。
+                    "player": shell.state.borrow().player.as_ref().map(|view| serde_json::json!({
+                        "playing": view.playing,
+                        "buffering": view.buffering,
+                        "volume": view.volume,
+                        "muted": view.muted,
+                        "rate": view.rate,
+                        "subtitle_delay": view.subtitle_delay,
+                        "audio_menu": view.audio_menu_open,
+                        "subtitle_menu": view.subtitle_menu_open,
+                        "position_ms": view.position.as_millis() as u64,
+                        "error": view.error,
+                    })),
                 })
             }
             Cmd::Route { value, item } => match value.as_str() {
@@ -1625,6 +1639,15 @@ fn install_callbacks(shell: &Rc<Shell>) {
         shell.app.on_player_rate(move |rate| {
             if let Some(shell) = weak.upgrade() {
                 shell.with_player(|player| player.set_rate(rate));
+            }
+        });
+    }
+    {
+        // 字幕延迟：界面上 ±0.5s 一行一按，引擎侧写 mpv 的 `sub-delay`（可负）。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_player_subtitle_delay(move |seconds| {
+            if let Some(shell) = weak.upgrade() {
+                shell.with_player(|player| player.set_subtitle_delay(seconds));
             }
         });
     }

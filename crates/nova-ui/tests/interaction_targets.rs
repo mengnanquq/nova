@@ -300,11 +300,23 @@ const TOUCH_AREAS: &[Case] = &[
         component: "ActionRow",
         entry: "action-area",
         pages: &["player-subtitle-menu"],
+        // 外挂字幕那一行已下架（缺文件选择依赖），所以只剩两条延迟行。
         coverage: Coverage::Targets(&[
             "player.menu.subtitle.delay-down",
             "player.menu.subtitle.delay-up",
-            "player.menu.subtitle.external",
         ]),
+    },
+    // 播放页中央大播放图标：点它 = 播放/暂停（`player.center-play`）。
+    //
+    // 它只在**暂停**时出现（`show-center-play = !playing`），而 `player_view()` 夹具
+    // 是播放中，所以不在这个场景里断言；由 `center_play_icon_is_clickable_when_paused`
+    // 单独覆盖"暂停时它真的出现在清单里"。
+    Case {
+        file: "player_overlay.slint",
+        component: "PlayerOverlay",
+        entry: "center-play-area",
+        pages: &[],
+        coverage: Coverage::Targets(&["player.center-play"]),
     },
     Case {
         file: "player_overlay.slint",
@@ -849,6 +861,28 @@ fn detail_targets_cover_buttons_and_source_rows() {
     }
 }
 
+/// 暂停时中央大播放图标必须出现在清单里、且能被点到（它此前没有 TouchArea，
+/// 点击会穿透到整屏命中层，只唤醒控制层——典型的"死按钮"）。
+#[test]
+fn center_play_icon_is_clickable_when_paused() {
+    let app = window();
+    app.set_player(&player_view().with_playing(false));
+    app.show_page(Page::Player);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    let targets = settle(&app, 80);
+    let target = app
+        .target("player.center-play")
+        .unwrap_or_else(|| panic!("暂停时必须有中央播放图标目标，实际：{targets:?}"));
+    assert_invariants("player-paused", &targets);
+    assert!(target.width > 0.0 && target.height > 0.0);
+
+    // 点它必须切到"播放"状态（暂停 → 播放）。
+    app.ui().invoke_player_play_pause();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    assert!(app.player_view().playing, "点中央图标后应开始播放");
+}
+
 #[test]
 fn player_targets_cover_transport_and_menus() {
     let app = window();
@@ -869,7 +903,7 @@ fn player_targets_cover_transport_and_menus() {
     assert_coverage("player-audio-menu", &targets);
     assert!(app.target("player.menu.audio.row.1").is_some());
 
-    // 字幕菜单（含「关闭」与三条动作行）。
+    // 字幕菜单（含「关闭」与两条延迟动作行；外挂字幕已下架）。
     app.set_player(&player_subtitle_menu());
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
     let targets = settle(&app, 80);
