@@ -31,6 +31,9 @@ export component PosterGrid inherits Rectangle {
     in property <length> overlay-clamp-top: Theme.navbar-height;
     // 焦点/悬停索引（-1 表示网格里没有焦点）。
     in-out property <int> focus-index: -1;
+    // 用户是否已开始导航（按过方向键 / 悬停）。未激活时不放大任何卡——
+    // 否则页面一创建 `focus-index` 默认 0 就会把第一张卡画成放大态。
+    in property <bool> nav-active: false;
 
     // 点开一张卡：参数是条目 id。
     callback open(string);
@@ -77,7 +80,7 @@ export component PosterGrid inherits Rectangle {
     opacity: root.reveal;
 
     property <float> zoom-factor: 1.0;
-    property <int> zoom-index: root.focus-index;
+    property <int> zoom-index: root.nav-active ? root.focus-index : -1;
 
     states [
         zoomed when root.zoom-index >= 0 && root.zoom-index < root.cards.length : {

@@ -86,7 +86,10 @@ fn zooming_a_card_does_not_move_other_cards() {
     let before = app.ui().window().take_snapshot().expect("基线快照");
 
     // 放大：焦点落在继续观看行第 2 张卡；推过 400ms 延迟 + 200ms 过渡。
+    // 先置 `nav-active`：程序刚启动时它默认 false，此时焦点卡**不该**放大
+    // （Netflix 也要等真的按了方向键或悬停才放大），所以这里模拟一次真实导航。
     app.ui().set_home_focus(1);
+    app.ui().set_nav_active(true);
     assert!(app.ui().get_row0_zoom_on(), "焦点落在行内后覆盖层必须可见");
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(700));
     let after = app.ui().window().take_snapshot().expect("放大后快照");

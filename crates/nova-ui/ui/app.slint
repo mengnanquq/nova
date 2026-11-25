@@ -85,6 +85,16 @@ export component AppWindow inherits Window {
     in-out property <int> detail-focus: 0;
     in-out property <int> search-focus: 0;
     in-out property <bool> search-focused: false;
+    // 用户是否已经真的在导航（按过方向键 / 悬停过卡片）。
+    //
+    // 页面一创建 `keyboard` FocusScope 就拿到焦点、`*-focus` 默认是 0，如果放大层
+    // 直接绑 `focus-index`，程序一打开第一张卡就是放大状态 —— Netflix 不会这样，
+    // 它只在指针悬停或真的按了方向键之后才放大。所以这里加一道"导航已激活"的门。
+    // 换页时复位，回到"没有放大"的干净状态。
+    in-out property <bool> nav-active: false;
+    changed page => {
+        root.nav-active = false;
+    }
     // 搜索框文本：与导航栏的 TextInput 双向同步，Rust 侧读写这里。
     in-out property <string> search-text: "";
     // 顶部横幅（通知位）：不遮挡导航栏，出现时内容整体下移。
@@ -178,6 +188,8 @@ export component AppWindow inherits Window {
         }
 
         key-pressed(event) => {
+            // 任何按键都算"用户开始操作"，之后才允许放大焦点卡。
+            root.nav-active = true;
             // 播放页有自己的快捷键表，且 Esc 必须先提交进度再退出。
             if (root.page == 3) {
                 // 任何键都算一次输入：立刻显示控制层并重置 3 秒计时。
@@ -307,6 +319,7 @@ export component AppWindow inherits Window {
                 data: root.home;
                 billboard-ratio: root.billboard-ratio;
                 focus-index <=> root.home-focus;
+                nav-active: root.nav-active;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
@@ -346,6 +359,7 @@ export component AppWindow inherits Window {
                 visible: root.page == 1;
                 data: root.library;
                 focus-index <=> root.library-focus;
+                nav-active: root.nav-active;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
@@ -398,6 +412,7 @@ export component AppWindow inherits Window {
                 visible: root.page == 4;
                 data: root.search-data;
                 focus-index <=> root.search-focus;
+                nav-active: root.nav-active;
                 search-text <=> root.search-text;
                 search-focused: root.search-focused;
                 open-item(id) => {

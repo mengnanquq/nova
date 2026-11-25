@@ -31,6 +31,8 @@ component CardRow inherits Rectangle {
     // 2:3 海报行（最近添加）；默认 16:9 横版行。
     in property <bool> portrait: false;
     in property <int> focused-index: -1;
+    // 用户是否已开始导航（见 `HomePage.nav-active`）：未激活时不放大焦点卡。
+    in property <bool> nav-active: false;
     callback open-item(string);
 
     // 图区宽 / 图区高（"图高"）：**不含**卡下标题。
@@ -49,7 +51,7 @@ component CardRow inherits Rectangle {
     }
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
-            ? root.latch : root.focused-index);
+            ? root.latch : (root.nav-active ? root.focused-index : -1));
     // 卡间距：官方 12px（`margin-right:.75rem`），且必须 ≥ 放大卡横向溢出（6px）。
     property <length> gap: max(Theme.card-gap, Theme.zoom-allowance-x);
     // 标题下沿到卡顶：官方 12px（`row-title-gap` 已含放大余量下限的校验）。
@@ -310,6 +312,8 @@ component CardRow inherits Rectangle {
 export component HomePage inherits Rectangle {
     in property <HomeData> data;
     in-out property <int> focus-index: 0;
+    // 用户是否已开始导航；未激活时行不放大任何卡（首屏保持"干净"，与 Netflix 一致）。
+    in property <bool> nav-active: false;
     in property <bool> search-focused: false;
     // 搜索框文本（与 AppWindow 双向同步）。
     in-out property <string> search-text;
@@ -698,6 +702,7 @@ export component HomePage inherits Rectangle {
                 title: "继续观看";
                 cards: root.data.continue-watching;
                 focused-index: root.continue-focus;
+                nav-active: root.nav-active;
                 open-item(id) => {
                     root.open-item(id);
                 }
@@ -711,6 +716,7 @@ export component HomePage inherits Rectangle {
                 portrait: true;
                 cards: root.data.recently-added;
                 focused-index: root.recent-focus;
+                nav-active: root.nav-active;
                 open-item(id) => {
                     root.open-item(id);
                 }
