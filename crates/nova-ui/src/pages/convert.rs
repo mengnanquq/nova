@@ -72,6 +72,7 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
         .library_rows
         .iter()
         .map(|row| RowData {
+            library_id: row.library_id.clone().into(),
             title: row.title.clone().into(),
             cards: model(
                 row.items

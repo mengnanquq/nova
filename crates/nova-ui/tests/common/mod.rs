@@ -287,6 +287,7 @@ pub fn home_filled() -> HomeView {
     // 各库前 20 条（16:9，标题 = 库名）。
     let library_rows = vec![
         LibraryRowView {
+            library_id: "lib-1".to_string(),
             title: "电影".to_owned(),
             items: vec![
                 CardView::new("m1", "银翼杀手").with_subtitle("1982 · 科幻"),
@@ -296,6 +297,7 @@ pub fn home_filled() -> HomeView {
             ],
         },
         LibraryRowView {
+            library_id: "lib-1".to_string(),
             title: "剧集".to_owned(),
             items: vec![
                 CardView::new("s1", "黑镜").with_subtitle("2011 · 科幻"),

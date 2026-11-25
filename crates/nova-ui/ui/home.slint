@@ -27,6 +27,8 @@ import { EmptyState } from "empty_state.slint";
 // 每边只溢出 6px / 10px，而行距 / 标题下距都是 12px，所以不会盖住行标题。
 component CardRow inherits Rectangle {
     in property <string> title;
+    // 这一行对应的媒体库 id（「查看全部 ›」跳到这里；空串表示没有对应库）。
+    in property <string> library-id;
     in property <[CardData]> cards;
     // 2:3 海报行（最近添加）；默认 16:9 横版行。
     in property <bool> portrait: false;
@@ -34,6 +36,8 @@ component CardRow inherits Rectangle {
     // 用户是否已开始导航（见 `HomePage.nav-active`）：未激活时不放大焦点卡。
     in property <bool> nav-active: false;
     callback open-item(string);
+    // 「查看全部 ›」：切到该行对应的媒体库页。
+    callback tab-activated(string);
 
     // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
     // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
@@ -159,10 +163,16 @@ component CardRow inherits Rectangle {
                 vertical-alignment: center;
             }
 
+            // 「查看全部 ›」= 打开该行对应的**媒体库列表页**。
+            //
+            // 以前这里打开的是行内第一张卡——用户点"查看全部"却进了某一部作品，
+            // 语义完全不对（审计里把它记为"看着有反应其实是空转"）。
+            // 只有在拿不到库 id 时（例如"继续观看"这种聚合行）才退回打开第一张卡。
             more-area := TouchArea {
                 clicked => {
-                    // 行内第一张卡就是"查看全部"的落点。
-                    if (root.cards.length > 0) {
+                    if (root.library-id != "") {
+                        root.tab-activated(root.library-id);
+                    } else if (root.cards.length > 0) {
                         root.open-item(root.cards[0].id);
                     }
                 }
@@ -828,7 +838,11 @@ export component HomePage inherits Rectangle {
                     target-prefix: "home.row.lib." + ri + ".";
                     targets-visible: root.visible;
                     title: row-data.title;
+                    library-id: row-data.library-id;
                     cards: row-data.cards;
+                    tab-activated(id) => {
+                        root.tab-activated(id);
+                    }
                     open-item(id) => {
                         root.open-item(id);
                     }

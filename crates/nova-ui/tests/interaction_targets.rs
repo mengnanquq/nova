@@ -29,7 +29,10 @@ use common::{
     install_posters, library_view, player_audio_menu, player_error, player_subtitle_menu,
     player_view, search_empty, search_view,
 };
-use nova_ui::{App, AppWindow, BannerData, BannerLevel, Page, TARGET_KINDS, TargetInfo};
+use nova_ui::{
+    App, AppWindow, BannerData, BannerLevel, CardView, HomeView, LibraryRowView, Page,
+    TARGET_KINDS, TargetInfo,
+};
 use slint::ComponentHandle;
 use slint::platform::{PointerEventButton, WindowEvent};
 
@@ -959,4 +962,58 @@ fn dialog_and_banner_targets_are_registered() {
     ] {
         assert!(app.target(id).is_some(), "对话框缺少目标 {id}");
     }
+}
+
+/// 「查看全部 ›」必须打开该行对应的**媒体库列表页**，而不是行内第一张卡。
+///
+/// 以前它直接 `open-item(cards[0].id)`——用户点"查看全部"却进了某一部作品。
+#[test]
+fn row_more_opens_the_library_page() {
+    let app = window();
+    // 只留一个库行：目标清单只保留中心落在窗口内的元素，行太多会把库行挤到折叠下。
+    let mut home = HomeView::new();
+    home.library_rows = vec![LibraryRowView {
+        library_id: "lib-1".to_string(),
+        title: "电影".to_string(),
+        items: vec![CardView::new("m1", "银翼杀手"), CardView::new("m2", "异形")],
+    }];
+    app.set_home(&home);
+    app.ui().set_billboard_ratio(0.2);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    let targets = settle(&app, 300);
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    {
+        let fired = fired.clone();
+        app.on_tab_activated(move |id| fired.borrow_mut().push(id.to_owned()));
+    }
+
+    let target = app.target("home.row.lib.0.more").unwrap_or_else(|| {
+        panic!(
+            "库行的「查看全部」目标不存在，当前：{:?}",
+            targets.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        )
+    });
+    let (cx, cy) = target.center();
+    let window = app.ui().window();
+    let position = slint::LogicalPosition::new(cx, cy);
+    window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed {
+        position,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+
+    // 无头测试里没有真实库数据（`local.library()` 会失败、路由不变），
+    // 所以断言"链路正确"：点击必须发出 `tab-activated(lib-1)`，
+    // 而不是 `open-item(第一张卡)`。
+    let ids = fired.borrow().clone();
+    assert!(
+        ids.iter().any(|id| id == "lib-1"),
+        "「查看全部」应当切到该行的库 lib-1，实际触发：{ids:?}"
+    );
 }

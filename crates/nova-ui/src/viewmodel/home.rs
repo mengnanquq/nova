@@ -11,6 +11,8 @@ use crate::viewmodel::library::LibraryTab;
 /// 首页里的一个媒体库行（16:9，标题 = 库名，最多 20 条）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LibraryRowView {
+    /// 该行对应的媒体库 id（「查看全部 ›」要跳到这个库的列表页）。
+    pub library_id: String,
     /// 行标题（库名）。
     pub title: String,
     /// 行内卡片。

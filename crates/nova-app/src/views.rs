@@ -147,6 +147,7 @@ pub fn home_view(
                     .map(|item| card_view(&item))
                     .collect();
                 Ok(LibraryRowView {
+                    library_id: tab.id.clone(),
                     title: tab.title.clone(),
                     items,
                 })

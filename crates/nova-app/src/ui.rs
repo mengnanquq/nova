@@ -146,6 +146,12 @@ pub(crate) struct Shell {
     pending_capture: RefCell<Option<player::CaptureOptions>>,
     /// `--play --source` 指定的版本（同上）。
     pending_source: RefCell<Option<String>>,
+    /// 详情页里用户选中的播放版本（`source_id`）。
+    ///
+    /// 以前这个选择只改高亮，`play` 用的还是 `--play --source` 那一次性的
+    /// `pending_source`——于是"选 4K 播放出来还是默认版本"，是审计里的一条
+    /// "看着有反应其实是空转"。
+    selected_source: RefCell<Option<String>>,
     /// 捕获结果槽（与 `Player` 共享）。
     capture_out: player::CaptureSlot,
     /// 搜索代次：每次输入 +1，晚到的旧结果按它丢弃（避免乱序覆盖）。
@@ -269,6 +275,7 @@ pub fn run_window(
         timer: slint::Timer::default(),
         pending_capture: RefCell::new(None),
         pending_source: RefCell::new(None),
+        selected_source: RefCell::new(None),
         capture_out: Rc::clone(&capture_out),
         search_generation: Arc::new(AtomicU64::new(0)),
         search_debounce: RefCell::new(None),
@@ -619,7 +626,16 @@ impl Shell {
                         "sort": view.sort_label,
                         "first": view.cards.first().map(|card| card.title.clone()),
                     })),
-                    "detail": state.detail.as_ref().map(|view| view.title.clone()),
+                    "detail": state.detail.as_ref().map(|view| serde_json::json!({
+                        "item": view.item_id,
+                        "title": view.title,
+                        // 版本下拉：谁被选中（验证"选了版本再去播"是否真的生效）。
+                        "sources": view.sources.iter().map(|source| serde_json::json!({
+                            "id": source.source_id,
+                            "label": source.title,
+                            "selected": source.selected,
+                        })).collect::<Vec<_>>(),
+                    })),
                     "detail_geometry": detail_geometry,
                     "search": state.search.as_ref().map(|view| serde_json::json!({
                         "term": view.term,
@@ -1272,6 +1288,19 @@ impl Shell {
 
     fn apply_detail(&self, detail: DetailView) {
         let keys = detail.image_keys();
+        // 服务端回灌的详情永远把第一个版本标成选中（`detail_from_item` 的行为），
+        // 会把用户在版本下拉里选的那个重置掉。这里补回用户的选择。
+        let mut detail = detail;
+        if let Some(selected) = self.selected_source.borrow().clone()
+            && detail
+                .sources
+                .iter()
+                .any(|source| source.source_id == selected)
+        {
+            for source in &mut detail.sources {
+                source.selected = source.source_id == selected;
+            }
+        }
         self.app.set_detail(&detail);
         self.state.borrow_mut().detail = Some(detail);
         self.request_images(keys);
@@ -1396,8 +1425,20 @@ impl Shell {
         }
         let post = self.post_handle();
         let capture = self.pending_capture.borrow_mut().take();
-        let source = self.pending_source.borrow_mut().take();
-        tracing::debug!(?item_id, has_capture = capture.is_some(), "开始播放条目");
+        let source = choose_source(
+            self.pending_source.borrow_mut().take(),
+            self.selected_source.borrow().clone(),
+            matches!(
+                self.app.current_route(),
+                Some(Route::Detail { .. }) | Some(Route::Player { .. })
+            ),
+        );
+        tracing::debug!(
+            ?item_id,
+            ?source,
+            has_capture = capture.is_some(),
+            "开始播放条目"
+        );
         self.play_item(item_id, source, capture, &post);
         // 标题/进度需要真实条目；顺手刷新一次。
         self.spawn_detail(item_id.to_owned());
@@ -1463,6 +1504,7 @@ impl Shell {
         for source in &mut detail.sources {
             source.selected = source.source_id == source_id;
         }
+        *self.selected_source.borrow_mut() = Some(source_id.to_owned());
         self.app.set_detail(&detail);
         self.state.borrow_mut().detail = Some(detail);
     }
@@ -1829,6 +1871,18 @@ pub(crate) fn accept_search_result(
     current_generation == message_generation
         && on_search_route
         && message_term.trim() == current_input.trim()
+}
+
+/// 播放时用哪个版本：显式 `--play --source` > 详情页里用户选中的版本。
+///
+/// `selected` 只在用户**停留在详情/播放页**时才算数：用户离开详情页后，
+/// 那个选择属于上一条内容，带去播下一条是错的（`on_route` 就是这个判断）。
+pub(crate) fn choose_source(
+    explicit: Option<String>,
+    selected: Option<String>,
+    on_route: bool,
+) -> Option<String> {
+    explicit.or_else(|| selected.filter(|_| on_route))
 }
 
 /// 防抖醒来 / 请求返回时，代次是否仍然是最新的。
