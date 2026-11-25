@@ -15,10 +15,11 @@ import { PlayerData, TrackData } from "models.slint";
 
 // 播放三角：用 Path 画，不依赖字体里是否有 "▶" 字形。
 // Path 会缩放到元素尺寸，所以宽高必须显式给出（否则取父级尺寸，图形会被拉大）。
+// 边长按 Theme.player-icon-glyph（24px）归一，宽度保持原始 16:18 比例（命令行不动）。
 component PlayGlyph inherits Path {
     in property <color> tint: Theme.text;
-    width: 16px;
-    height: 18px;
+    width: Theme.player-icon-glyph * 8 / 9;
+    height: Theme.player-icon-glyph;
     commands: "M 0 0 L 16 9 L 0 18 Z";
     fill: root.tint;
 }
@@ -26,25 +27,27 @@ component PlayGlyph inherits Path {
 // 暂停双竖条。
 component PauseGlyph inherits Rectangle {
     in property <color> tint: Theme.text;
-    width: 18px;
-    height: 20px;
+    // 原始图形 18×20，高度归一到 24px。所有内层尺寸按同一比例从 token 派生。
+    property <length> u: Theme.player-icon-glyph / 20;
+    width: 18 * root.u;
+    height: Theme.player-icon-glyph;
     background: transparent;
 
     Rectangle {
         x: 0;
         y: 0;
-        width: 6px;
+        width: 6 * root.u;
         height: parent.height;
-        border-radius: 1px;
+        border-radius: 1 * root.u;
         background: root.tint;
     }
 
     Rectangle {
-        x: 12px;
+        x: 12 * root.u;
         y: 0;
-        width: 6px;
+        width: 6 * root.u;
         height: parent.height;
-        border-radius: 1px;
+        border-radius: 1 * root.u;
         background: root.tint;
     }
 }
@@ -54,26 +57,28 @@ component VolumeGlyph inherits Rectangle {
     in property <bool> muted: false;
     in property <color> tint: Theme.text;
 
-    width: 20px;
-    height: 18px;
+    // 原始图形 20×18，宽度归一到 24px；内层坐标统一乘 u。
+    property <length> u: Theme.player-icon-glyph / 20;
+    width: Theme.player-icon-glyph;
+    height: 18 * root.u;
     background: transparent;
 
     // 喇叭壳体（bbox 9x18）。
     Path {
         x: 0;
         y: 0;
-        width: 9px;
-        height: 18px;
+        width: 9 * root.u;
+        height: 18 * root.u;
         fill: root.tint;
         commands: "M 0 6 L 4 6 L 9 0 L 9 18 L 4 12 L 0 12 Z";
     }
 
     // 有声：一道向外扩散的弧（bbox 5x10）。
     Path {
-        x: 10px;
-        y: 3px;
-        width: 5px;
-        height: 10px;
+        x: 10 * root.u;
+        y: 3 * root.u;
+        width: 5 * root.u;
+        height: 10 * root.u;
         stroke: root.tint;
         stroke-width: 2px;
         fill: transparent;
@@ -83,10 +88,10 @@ component VolumeGlyph inherits Rectangle {
 
     // 静音：一道斜线（bbox 8x12）。
     Path {
-        x: 10px;
-        y: 2px;
-        width: 8px;
-        height: 12px;
+        x: 10 * root.u;
+        y: 2 * root.u;
+        width: 8 * root.u;
+        height: 12 * root.u;
         stroke: root.tint;
         stroke-width: 2px;
         fill: transparent;
@@ -103,7 +108,9 @@ component VolumeButton inherits Rectangle {
     width: Theme.player-control-size;
     height: Theme.player-control-size;
     border-radius: Theme.radius-pill;
-    background: volume-area.has-hover ? Theme.player-menu-selected : transparent;
+    background: volume-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
+    border-width: Theme.player-icon-border-width;
+    border-color: Theme.player-icon-border;
 
     VolumeGlyph {
         x: (parent.width - self.width) / 2;
@@ -129,9 +136,9 @@ component TransportButton inherits Rectangle {
     width: label-text.preferred-width + Theme.space-3 * 2;
     height: Theme.player-control-size;
     border-radius: Theme.radius-pill;
-    background: area.has-hover ? Theme.surface-raised : (root.active ? Theme.player-menu-selected : Theme.surface);
-    border-width: 1px;
-    border-color: root.active ? Theme.hairline-strong : Theme.hairline;
+    background: area.has-hover ? Theme.surface-raised : (root.active ? Theme.player-menu-selected : Theme.player-icon-bg);
+    border-width: Theme.player-icon-border-width;
+    border-color: root.active ? Theme.hairline-strong : Theme.player-icon-border;
 
     area := TouchArea {
         mouse-cursor: pointer;
@@ -163,6 +170,8 @@ component PlayButton inherits Rectangle {
     height: Theme.player-play-size;
     border-radius: Theme.radius-pill;
     background: area.has-hover ? Theme.accent-hover : Theme.accent;
+    border-width: Theme.player-icon-border-width;
+    border-color: Theme.player-icon-border;
 
     area := TouchArea {
         mouse-cursor: pointer;
@@ -172,8 +181,8 @@ component PlayButton inherits Rectangle {
     }
 
     if !root.playing : PlayGlyph {
-        x: (parent.width - 16px) / 2 + 2px;
-        y: (parent.height - 18px) / 2;
+        x: (parent.width - self.width) / 2 + self.width / 8;
+        y: (parent.height - self.height) / 2;
         tint: Theme.accent-contrast;
     }
 
@@ -419,6 +428,19 @@ component PlayerProgress inherits Rectangle {
     height: Theme.player-hit-height;
     background: transparent;
 
+    // 悬停 / 拖动：轨道变粗、拖动头放大（Netflix 的 scrubber hover 规则）。
+    property <bool> hot: bar-area.has-hover || root.scrubbing;
+    property <length> bar-height: root.hot ? Theme.player-bar-height-hover : Theme.player-bar-height;
+    property <length> knob-size: Theme.player-bar-knob * (root.hot ? Theme.player-bar-knob-scale : 1);
+    animate bar-height {
+        duration: Theme.motion;
+        easing: ease-out;
+    }
+    animate knob-size {
+        duration: Theme.motion;
+        easing: ease-out;
+    }
+
     property <float> buffered-ratio: max(root.buffered, root.played);
     // 已缓冲的那一段占比（剩余部分才画轨道）。
     property <float> buffered-part: clamp(root.buffered-ratio, 0, 1);
@@ -426,37 +448,38 @@ component PlayerProgress inherits Rectangle {
     // 轨道只画在"未缓冲"的那一段：缓冲段**替换**轨道，而不是叠画在上面。
     Rectangle {
         x: parent.width * root.buffered-part;
-        y: (parent.height - Theme.player-bar-height) / 2;
+        y: (parent.height - root.bar-height) / 2;
         width: parent.width - parent.width * root.buffered-part;
-        height: Theme.player-bar-height;
+        height: root.bar-height;
         border-radius: Theme.radius-pill;
         background: Theme.player-track;
     }
 
     Rectangle {
         x: 0;
-        y: (parent.height - Theme.player-bar-height) / 2;
+        y: (parent.height - root.bar-height) / 2;
         width: parent.width * root.buffered-part;
-        height: Theme.player-bar-height;
+        height: root.bar-height;
         border-radius: Theme.radius-pill;
         background: Theme.player-buffered;
     }
 
     Rectangle {
         x: 0;
-        y: (parent.height - Theme.player-bar-height) / 2;
+        y: (parent.height - root.bar-height) / 2;
         width: parent.width * clamp(root.played, 0, 1);
-        height: Theme.player-bar-height;
+        height: root.bar-height;
         border-radius: Theme.radius-pill;
         background: Theme.accent;
     }
 
-    // 拖动时的圆点把手。
-    if root.scrubbing : Rectangle {
+    // 拖动头：悬停或拖动时出现，
+    // 拖动时放大到 1.2 倍（实测 `.scrubber-head:hover { transform: scale(1.2) }`）。
+    if root.hot : Rectangle {
         x: parent.width * clamp(root.played, 0, 1) - self.width / 2;
         y: (parent.height - self.height) / 2;
-        width: 12px;
-        height: 12px;
+        width: root.knob-size;
+        height: root.knob-size;
         border-radius: Theme.radius-pill;
         background: Theme.accent;
     }
@@ -489,7 +512,7 @@ component PlayerProgress inherits Rectangle {
         }
     }
 
-    TouchArea {
+    bar-area := TouchArea {
         mouse-cursor: pointer;
 
         // 按下开始拖动，移动只更新气泡与把手（不发 seek），松手才提交。
@@ -588,8 +611,8 @@ export component PlayerOverlay inherits Rectangle {
         height: 44px;
         border-radius: Theme.radius-pill;
         background: back-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
-        border-width: 1px;
-        border-color: Theme.hairline;
+        border-width: Theme.player-icon-border-width;
+        border-color: Theme.player-icon-border;
 
         back-text := Text {
             x: 0;
@@ -599,7 +622,7 @@ export component PlayerOverlay inherits Rectangle {
             text: "←";
             color: Theme.text;
             font-family: Theme.font-family;
-            font-size: Theme.font-22;
+            font-size: Theme.player-icon-glyph;
             vertical-alignment: center;
             horizontal-alignment: center;
         }
@@ -645,10 +668,12 @@ export component PlayerOverlay inherits Rectangle {
         height: Theme.player-icon-size;
         border-radius: Theme.radius-pill;
         background: Theme.player-icon-bg;
+        border-width: Theme.player-icon-border-width;
+        border-color: Theme.player-icon-border;
 
         PlayGlyph {
-            x: (parent.width - 16px) / 2 + 4px;
-            y: (parent.height - 18px) / 2;
+            x: (parent.width - self.width) / 2 + self.width / 4;
+            y: (parent.height - self.height) / 2;
             tint: Theme.text;
         }
     }

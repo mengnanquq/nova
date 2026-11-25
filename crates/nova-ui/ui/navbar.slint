@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 顶部导航（Netflix 风格）：透明浮在 hero 上，滚动 40px 后渐变为 surface 实底。
+//! 顶部导航（Netflix 风格）：未滚动时用顶部黑→底部透明的压暗渐变浮在 hero 上，
+//! 滚动 40px 后渐变为 surface 实底。
 //!
 //! 左：NOVA 字标（红点 + 白字）；中：库标签——纯文字态（当前白、其余 text-secondary），
 //! 无胶囊无下划线；右：搜索图标按钮（聚焦展开 240px 输入框）+ 圆形头像。
@@ -39,6 +40,22 @@ export component Navbar inherits Rectangle {
     animate background {
         duration: Theme.motion;
         easing: ease-out;
+    }
+
+    // 未滚动态的压暗层：顶栏高度内由顶部黑淡到底部透明，再向下多延伸 56px
+    // （Netflix 的 header 渐变 `to top` 就只覆盖顶栏本身，这里放宽一点以免硬边）。
+    // 滚动后淡出，露出下面的实底。
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: Theme.navbar-height + Theme.navbar-gradient-extend;
+        background: Theme.navbar-scroll-gradient;
+        opacity: root.scrolled ? 0 : 1;
+        animate opacity {
+            duration: Theme.motion;
+            easing: ease-out;
+        }
     }
 
     // 右缘渐隐：标签放不下时暗示"后面还有"。只在实底态显示（透明态没有可融入的底色）。

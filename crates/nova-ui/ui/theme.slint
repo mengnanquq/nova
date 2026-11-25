@@ -49,8 +49,11 @@ export global Theme {
     // 进度条三层：轨道 / 已缓冲 / 已播（Netflix 红）。
     in property <color> player-track: #FFFFFF33;
     in property <color> player-buffered: #FFFFFF66;
-    // 控件底：Netflix 风格去掉胶囊底，只在悬停时出现一层淡白。
-    in property <color> player-icon-bg: transparent;
+    // 圆钮底：Netflix 实测 `rgba(22,22,22,.7)`（hero 内的视频控制圆钮）。
+    in property <color> player-icon-bg: #161616B3;
+    // 圆钮描边：实测 `1px solid rgba(128,128,128,.7)`。
+    in property <color> player-icon-border: #808080B3;
+    in property <length> player-icon-border-width: 1px;
     // 菜单 / 错误卡 / 气泡的不透明底。
     in property <color> player-panel-solid: #141414;
     in property <color> player-menu-selected: #FFFFFF14;
@@ -126,8 +129,15 @@ export global Theme {
     in property <length> arrow-size: 48px;
     // 顶栏链接间距：1.5vw（1280 → 19px）。
     in property <length> nav-link-gap: root.viewport-width * 0.015;
-    // 顶栏 68px，透明浮在 hero 上。
-    in property <length> navbar-height: 68px;
+    // 顶栏 72px（Netflix header 实测 `height: 72px`），透明浮在 hero 上。
+    in property <length> navbar-height: 72px;
+    // 未滚动态的压暗渐变：Netflix header 实测
+    // `linear-gradient(to top, rgba(0,0,0,0) 0%, rgb(0,0,0) 100%)`。
+    // CSS 的 `to top` = 底部透明 → 顶部黑；Slint 的 180deg 从顶部开始写 stops，
+    // 所以这里 stops 反过来，视觉与实测一致（压暗顶部）。
+    in property <brush> navbar-scroll-gradient: @linear-gradient(180deg, #000000 0%, #00000000 100%);
+    // 渐变向下延伸量：72px 顶栏之外再淡出 56px，避免在 hero 上留一条硬边。
+    in property <length> navbar-gradient-extend: 56px;
     // 顶部横幅（通知位）：贴顶方角，出现时内容整体下移。
     in property <length> banner-height: 48px;
 
@@ -189,9 +199,17 @@ export global Theme {
     // 播放页参数不变。
     in property <length> player-scrim-height: 264px;
     in property <length> player-bar-height: 4px;
+    // 悬停 / 拖动时轨道变粗（Netflix 规则 `.scrubber-container:hover .track { height: 1em }`
+    // 是大屏播放器的 16px；我们的控制层按 40px 控件缩过，取 8px）。
+    in property <length> player-bar-height-hover: 8px;
+    // 拖动头 12px，悬停 / 拖动时放大 1.2 倍（实测 `.scrubber-head:hover { transform: scale(1.2) }`）。
+    in property <length> player-bar-knob: 12px;
+    in property <float> player-bar-knob-scale: 1.2;
     in property <length> player-hit-height: 28px;
     in property <length> player-control-size: 40px;
     in property <length> player-play-size: 56px;
+    // 圆钮里的图标字形 / 图形边长（Netflix 实测内图标 24×24）。
+    in property <length> player-icon-glyph: 24px;
     in property <length> player-icon-size: 88px;
     in property <length> player-menu-width: 320px;
     in property <length> player-menu-row: 44px;

@@ -17,7 +17,7 @@
 | 元素 | 数值 |
 |---|---|
 | 页面左右留白 | `4vw`（1280 → 51px；≥1920 固定 60px） |
-| 顶栏高 | 68px；logo 字高 20px，字距 -0.5px；链接 14px/400，间距 `1.5vw` |
+| 顶栏高 | 72px；未滚动时 `linear-gradient(to top, rgba(0,0,0,0) 0%, rgb(0,0,0) 100%)`；logo 字高 20px，字距 -0.5px；链接 14px/400，间距 `1.5vw` |
 | 头像 | 32px 圆，`#E50914` 底 + 白色首字母 14px bold |
 | 搜索图标 | 24px 描边 2px；展开时输入框 240×36，左图标 20px |
 | billboard 高 | `min(88vh, 720px)`；内容底部距 billboard 底 `18%` |
@@ -77,11 +77,16 @@
 口径：1920×1080 视口、**免登录 non-member 版**详情页，取值方式是 DevTools 读
 `getComputedStyle` / `getBoundingClientRect`（已知条目 `80100172`）。
 
-> **「播放」/「更多信息」双按钮与播放器控件因未登录无法实测**（该区域被登录引导替代），
-> 所以按钮尺寸**沿用我们现有值**（高 44px、白底/半透明白底），本节其余项均为实测。
+> **「播放」/「更多信息」双按钮与播放器的完整控件布局因未登录无法实测**（该区域被登录引导替代），
+> 所以按钮尺寸**沿用我们现有值**（高 44px、白底/半透明白底）。
+> 但 hero 内的**视频控制圆钮**与**播放器样式表（CSSOM）**可以拿到，见下面的「顶栏」「播放器圆钮」两行，
+> 我们据此对齐播放器的圆钮与进度条交互；本节其余项均为实测。
 
 | 项 | 实测值 | 落在代码哪里 |
 |---|---|---|
+| 顶栏 | `height: 72px` / `z-index: 20` / `background-image: linear-gradient(to top, rgba(0,0,0,0) 0%, rgb(0,0,0) 100%)` | `Theme.navbar-height: 72px`；未滚动态用 `Theme.navbar-scroll-gradient`（`180deg` + `#000000 → #00000000`，即 CSS `to top` 的反写）再向下延伸 `Theme.navbar-gradient-extend: 56px`；滚动后仍是 `Theme.surface` 实底 |
+| 播放器圆钮（hero 内视频控制钮实测） | 40×40 / `border-radius: 20px`（正圆）/ `background: rgba(22,22,22,.7)` / `border: 1px solid rgba(128,128,128,.7)` / 内图标 24×24 / 两钮间距 12px | `Theme.player-control-size: 40px`、`Theme.player-icon-bg: #161616B3`、`Theme.player-icon-border: #808080B3` + `Theme.player-icon-border-width: 1px`、`Theme.player-icon-glyph: 24px`、行内 `spacing: Theme.space-3`；左上返回钮保持 44×44（不是实测项，保留现状） |
+| 进度条交互（播放器样式表 CSSOM 原文，未渲染验证） | `.nfp .scrubber-container .scrubber-head:hover { transform: scale(1.2) }`；`.nfp .is-scrubbing .scrubber-container .track, .nfp .scrubber-container:hover .track { height: 1em }`；`.nfp .volume-controller .scrubber-target:hover { transform: scale(1.2) }` | 拖动头 `Theme.player-bar-knob: 12px` × `Theme.player-bar-knob-scale: 1.2`；轨道 `Theme.player-bar-height: 4px` → `Theme.player-bar-height-hover: 8px`（Netflix 的 `1em` = 16px 属大屏播放器，我们的控制层按 40px 控件缩到 8px）；悬停 / 拖动均走 `Theme.motion` 过渡 |
 | 页面底色 | `background-color: rgb(15,15,15)` | `Theme.detail-bg`（**不动** `Theme.bg`，其它页仍然纯黑） |
 | hero 高度 | 845px / 视口 1080px = 0.782 | `Theme.detail-backdrop-ratio: 0.78` |
 | hero 底部渐变 | `linear-gradient(rgba(0,0,0,0) 40%, rgba(0,0,0,.6) 100%)`，占 hero 高 60% | `detail.slint` 底部层：高 `backdrop-height * 0.6`、`@linear-gradient(180deg, #00000000 40%, #00000099 100%)` |
@@ -114,3 +119,9 @@
    单串里，不碰 Rust 逻辑就无法逐项生效——需要后续把元信息拆成分段字段。
 4. 集数卡外框对 `PosterCard` 是全局改动，放大覆盖层（`CardZoom`）保持原样式（它是一张
    独立的放大卡，本次未纳入实测范围）。
+
+**仍然无法实测的部分**（不要当成事实）：
+
+- 播放器的**完整控件布局**（传输行顺序、间距、左右分组）需要登录才能拿到，保持不变。
+- 播放器**中央大钮尺寸**（现用 `Theme.player-play-size: 56px`，中央覆盖图标圈 `Theme.player-icon-size: 88px`）无法实测，**保留现状**。
+- 进度条轨道静息高度（4px）也是我们的选择：Netflix 只给出悬停态的 `1em`，未给出静息值。
