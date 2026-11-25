@@ -100,6 +100,7 @@
 | hero 底部渐变 | `linear-gradient(rgba(0,0,0,0) 40%, rgba(0,0,0,.6) 100%)`，占 hero 高 60% | `detail.slint` 底部层：高 `backdrop-height * 0.6`、`@linear-gradient(180deg, #00000000 40%, #00000099 100%)` |
 | hero 顶部压暗 | 浅黑渐变压住顶栏 | 顶部层高 `backdrop-height * 0.15`，`Theme.scrim-soft` → 透明 |
 | 正文左右 padding | 200px（1920） | `Theme.content-gutter`（≥1920 → 200px、1280–1919 → 152px；原 `detail-gutter` 已并入，避免两套数字漂移） |
+| 内容块位置 | 内容块 `rect(136, 424.1, 1648×440)`，hero `y 131..976`（高 844.88）→ 顶端在 hero 的 **34.7%**，底端距 hero 下缘 **111.9 ≈ 112px** | `Theme.detail-body-bottom-gap: 112px`；`detail.slint` 里单一 `body := VerticalLayout` 用 `y: max(0px, backdrop-height − detail-body-bottom-gap − self.height)` 反推顶端（**已完成**，见备注 5） |
 | 正文列宽 | 1520px（1920 − 200×2） | 同上 |
 | section 间距 | 40px | `Theme.section-gap: 40px` |
 | 区块标题 | 32px / 700 / 行高 46px / 下距 12px | `Theme.text-h4-size`(32px) + `Theme.text-h4-weight`(700)；媒体库标题用同一对，行标题用 `Theme.row-title-*` 三级断点 |
@@ -127,6 +128,22 @@
    单串里，不碰 Rust 逻辑就无法逐项生效——需要后续把元信息拆成分段字段。
 4. 集数卡外框对 `PosterCard` 是全局改动，放大覆盖层（`CardZoom`）保持原样式（它是一张
    独立的放大卡，本次未纳入实测范围）。
+5. **内容块已叠在 hero 下半部**（2026 本轮修完，之前是「落在 hero 下方」的未完成项）：
+   标题 / 原文名 / 元信息 / 简介 / 按钮行 / 版本行合并成**一个** `body := VerticalLayout`，
+   子项**一律不写 `y`**，位置只由顺序 + `spacing`（`Theme.space-4`）决定；容器顶端由
+   「底端锚定 112px + 自身高度反推」得到。
+
+   **踩过的坑（不要再犯）**：旧实现是标题块与简介块**各自绝对定位**——标题块
+   `alignment: end` 贴在 `backdrop-height` 处、简介块 `y: backdrop-height + space-5`。
+   两块互不知情，所以「只把简介块上移」的结果是**标题压住简介**：看起来像布局算错，
+   实际是两个独立 y 绑定的必然结果。合并成一个纵向布局后，任何一块的高度变化都会把
+   下面的块推开，物理上不可能重叠（回归断言：`crates/nova-ui/tests/detail_layout.rs`）。
+
+   另一个坑：Slint 里**布局元素的默认高度是父元素的 100%**（不是内容高），直接写
+   `y: max(0px, … − self.height)` 会撞上 `content.height → body.height → body.y →
+   content.height` 的编译期 binding loop，而且多出来的高度会被可拉伸的 `Text` 子项
+   吃掉（实测原文名 / 元信息各被撑到 269px）。所以必须显式 `height: self.preferred-height`
+   + `alignment: start`。
 
 **仍然无法实测的部分**（不要当成事实）：
 
@@ -222,7 +239,7 @@
 | 行入场（淡入 + 6px 上浮） | 数据空 → 非空 | `motion-row`（540ms） | `cubic-bezier(0.5, 0, 0.1, 1)` | 时长/曲线来自**官方 CSS**（那行是 `.lolomoRow` 的"行展开"），入场是我们借用 |
 | 首页 billboard 文案块入场 | 同上 | `motion-row` | 同上 | 同上 |
 | 网格入场（媒体库 / 搜索结果） | 数据空 → 非空 | `motion-slow` | `ease-out` | 我们自定（触发时机见 9.5） |
-| 详情页 backdrop 淡入 + 标题块 +8px 归位 | 数据到达 | `motion-slow` | `ease-out` | 我们自定 |
+| 详情页 backdrop 淡入 + 内容块 +8px 归位 | 数据到达 | `motion-slow` | `ease-out` | 我们自定（内容块是单一纵向布局，见 §7 备注 5） |
 | 顶栏滚动变实底 | 滚 > 40px | `motion` | `ease-out` | 我们自定（终态色 `#141414` 是实测的） |
 | 顶栏标签悬停 / 激活字色 | 悬停 / 切标签 | `motion-fast` | `ease-out` | 我们自定（净止态颜色实测，过渡时长不是） |
 | 顶栏搜索框展开 | 聚焦 | `motion` | `ease-out` | 我们自定（展开宽 240px 实测） |
@@ -522,6 +539,8 @@ hero = 88vh  (1280) = 704 → 行块起点 = 688 + 40 = 728 → 标题 728…774
 | 1280 以下的正文留白 | 960–1279 → 96px、<960 → 48px | `4vw`（1280 → 51px） | 我们的最小窗口就是 1280；避免 1279→1280 之间从 51px 跳到 152px 之外再多一个断点 |
 | `<960` 竖版卡宽 | 8.25rem = 132px | `min(vw×0.16, 130px)` | 保留原值（本轮只按任务书改三档 + 圆角）；圆角已按官方 8px |
 | 箭头 hover | 换底色 `rgba(128,128,128,.2)` | `opacity → 0.85` | 动效层上一轮刚定稿，不动 |
+| 详情页内容块顶端位置（占 hero 百分比） | 顶端在 hero 的 34.7%（内容块高 440） | 底端锚定 112px，顶端占 hero 33.8%（1280）/ 51%（1920，有简介） | 我们内容块只有 282–301px 高（没有徽章 / 匹配度等区），底端对齐后顶端就偏低；要改就补内容，不是调 y（见 10.12） |
+| 详情页标题 / 原文名 / 元信息之间的间距 | 官方各块 gap 未逐项实测 | 都是 `Theme.space-4` 16px（旧实现标题块内是 4px） | 单一纵向布局只有一个 `spacing`；分别为标题 / 元信息单独调间距必须写 `y` 或嵌子布局，会重新引入“分块定位”的坑（见 §7 备注 5） |
 
 > **已修**：旧版「行标题被放大卡遮住」的偏差（1.35 倍 + 上移 12px 会压进行标题 32px）
 > 在改成官方 1.05 + 无位移后自然消失：放大卡上沿距行标题下沿实测仍有 6.8px（1280）/ 6.6px（1920），
@@ -597,3 +616,59 @@ magick identify /tmp/bp-1280.png /tmp/bp-1600.png /tmp/bp-1920.png
 `netflix-card-focused` / `nf-card-hover` / `nf-row-hover`（放大 + 标题）、
 `library` / `netflix-library` / `search-results`（网格出现卡下标题、行高变了）、
 `nf-home-1920`（同上，1920 档）。
+
+### 10.12 详情页内容块叠在 hero 下半部（单一纵向布局 + 底端锚定 112px）
+
+本轮把详情页的内容块从「落在 hero 下方」改成 **叠在 hero 下半部**，与 Netflix 官方结构一致。
+（§7 备注 5 里那条"未完成"的待办已改为已完成，做法与踩过的坑都记在那里。）
+
+| 项 | 官方实测（1920×1080） | 我们 | 说明 |
+|---|---|---|---|
+| hero | `y 131..976`，高 844.88 | `Theme.detail-backdrop-ratio: 0.78`（1080 → 842.4） | 已有 |
+| 内容块 | `rect(136, 424.1, 1648×440)`：顶端在 hero 的 **34.7%** | 单一 `body := VerticalLayout`，**底端**锚定 | 高度不同，顶端百分比随之变化（见下面的实测表） |
+| 内容块底端 | 距 hero 下缘 111.9px | `Theme.detail-body-bottom-gap: 112px` | 新增 token |
+| 内容列左边距 | 200（`main 48` + `padding 152`） | `Theme.content-gutter` | 已有 |
+| 子项顺序 | 标题 → 原文名 → 元信息 → 简介 → 按钮 → 版本 | 同（**子项一律不写 `y`**） | 位置只由顺序 + `spacing` 决定 |
+| 子项间距 | 各块之间未逐项实测 | `Theme.space-4`（16px，沿用旧 `lower` 的 spacing） | 标题 / 原文名 / 元信息原来是 4px，现在同为 16px |
+
+做法（`crates/nova-ui/ui/detail.slint`）：
+
+- `body := VerticalLayout { x: content-gutter; width: 父宽 − 2×gutter; spacing: space-4; alignment: start; }`，
+  六个子项按顺序排，**一个 `y` 都不写**；
+- `height: self.preferred-height`（不写会被默认成父高的 100%，见 §7 备注 5 的 binding loop）；
+- `y: max(0px, root.backdrop-height - Theme.detail-body-bottom-gap - self.height)
+  + Theme.motion-rise-hero * (1 - root.reveal)`——末项是入场 8px 上浮，`reveal` 结算后为 0；
+- 页面总高 `content.height = max(parent.height, body.y + body.height + Theme.space-8)`
+  （底部留白 48px；官方未测，沿用现有 token）；
+- **返回按钮绘制在 body 之后**（浮在内容上，`y: space-4` 固定），内容块再高也不会被盖住；
+  官方也是返回钮浮在 hero 之上，所以选"改绘制顺序"而不是"给 body 加 clip"。
+
+实测（探针 `AppWindow.detail-body-y` / `detail-body-height` / `detail-backdrop-height`）：
+
+| 视口 | backdrop 高 | `body.y` | `body.height` | `y + h + 112` | 差 | 顶端占 hero |
+|---|---|---|---|---|---|---|
+| 1280×800（有简介，无头 fixture） | 624 | 211 | 301 | 624 | **0.0** | **33.8%** |
+| 1920×1080（有简介，无头 fixture） | 842.4 | 429.4 | 301 | 842.4 | **0.0** | **51.0%** |
+| 1280×800（真实条目「暗流」，简介为空） | 624 | 230 | 282 | 624 | **0.0** | 36.9% |
+| 1920×1080（同上） | 842.4 | 448.4 | 282 | 842.4 | **0.0** | 53.2% |
+
+为什么顶端百分比不是官方那个 34.7%：官方内容块高 440px（含我们没做的徽章 / 匹配度 /
+更多元信息行），我们只有 282–301px，底端锚定就只能把顶端推下去。1280 + 有简介时
+33.8% ≈ 官方；1920 视口更高而内容不再变高，百分比自然变大。要贴近官方得先把**内容做高**
+（补区块），不是再回去调 y。
+
+真机验证（`--debug-socket /tmp/nf.sock` + `{"cmd":"open","item":"324029"}` + `screenshot`，
+调试通道的 `view` 现在也带 `detail_geometry` 探针）：
+
+| 视口 | 截图 | backdrop 高 | `body.y` | `body.height` | `y + h + 112 − backdrop` | 标题字形顶 y | 标题↔简介字形间隙 |
+|---|---|---|---|---|---|---|---|
+| 1280×800 | `/tmp/detail-1280.png` | 624 | 230 | 282 | **0.0** | 231（< 624 ✓ 在 hero 内） | 378 − 280 = **98px** |
+| 1920×1080 | `/tmp/detail-1920.png` | 842.4 | 448.4 | 282 | **0.0** | 455（< 842.4 ✓ 在 hero 内） | 597 − 498 = **99px** |
+
+快照变化（2 张，其余 27 张逐字节不变）：`detail.png` / `netflix-detail.png`，
+bbox `(148, 217)-(845, 800)`、76 107 像素——内容块从 hero 下方（y ≈ 648）整体上移到
+hero 内（y = 211），标题 / 原文名 / 元信息 / 简介 / 按钮 / 版本行全部跟着上移，
+backdrop 与渐变层逐像素不变。
+
+回归断言：`crates/nova-ui/tests/detail_layout.rs`（body 底端 + 112 = hero 下缘 ±2px、
+`body.y > 0`、标题底 ≤ 简介顶 ≤ 简介底 ≤ 按钮顶、内容比 hero 高时兜底到 0）。

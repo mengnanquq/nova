@@ -71,6 +71,20 @@ export component AppWindow inherits Window {
     out property <length> search-content-gutter: search-page.probe-gutter;
     out property <length> search-first-card-x: search-page.probe-first-x;
 
+    // 测试用：详情页内容块几何（单一纵向布局叠在 hero 下半部）。
+    // `detail-body-y + detail-body-height + Theme.detail-body-bottom-gap` 应等于
+    // `detail-backdrop-height`（±2px）——即内容块整体落在 hero 内。
+    out property <length> detail-body-y: detail-page.probe-body-y;
+    out property <length> detail-body-height: detail-page.probe-body-height;
+    out property <length> detail-backdrop-height: detail-page.probe-backdrop-height;
+    // 三个区块的绝对上下沿（标题 / 简介 / 按钮），用于"互不重叠"回归断言。
+    out property <length> detail-title-top: detail-page.probe-title-top;
+    out property <length> detail-title-bottom: detail-page.probe-title-bottom;
+    out property <length> detail-overview-top: detail-page.probe-overview-top;
+    out property <length> detail-overview-bottom: detail-page.probe-overview-bottom;
+    out property <length> detail-buttons-top: detail-page.probe-buttons-top;
+    out property <length> detail-buttons-bottom: detail-page.probe-buttons-bottom;
+
     in property <HomeData> home;
     in property <LibraryData> library;
     in property <DetailData> detail;
@@ -389,7 +403,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            DetailPage {
+            detail-page := DetailPage {
                 width: parent.width;
                 height: parent.height;
                 visible: root.page == 2;

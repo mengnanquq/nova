@@ -533,6 +533,21 @@ impl Shell {
             Cmd::View => {
                 let state = shell.state.borrow();
                 let route = shell.app.current_route();
+                // 详情页几何探针（`ui/detail.slint` 的 `probe-*` → `AppWindow.detail-*`）：
+                // `body_y + body_height + 112 ≈ backdrop_height` 就是"内容块叠在 hero 下半部"，
+                // 详见 `tests/detail_layout.rs` 与 docs/ui-netflix-1to1.md §7。
+                let ui = shell.app.ui();
+                let detail_geometry = serde_json::json!({
+                    "body_y": ui.get_detail_body_y(),
+                    "body_height": ui.get_detail_body_height(),
+                    "backdrop_height": ui.get_detail_backdrop_height(),
+                    "title_top": ui.get_detail_title_top(),
+                    "title_bottom": ui.get_detail_title_bottom(),
+                    "overview_top": ui.get_detail_overview_top(),
+                    "overview_bottom": ui.get_detail_overview_bottom(),
+                    "buttons_top": ui.get_detail_buttons_top(),
+                    "buttons_bottom": ui.get_detail_buttons_bottom(),
+                });
                 serde_json::json!({
                     "ok": true,
                     "route": format!("{route:?}"),
@@ -549,6 +564,7 @@ impl Shell {
                         "current_tab": view.current_tab,
                     })),
                     "detail": state.detail.as_ref().map(|view| view.title.clone()),
+                    "detail_geometry": detail_geometry,
                     "search": state.search.as_ref().map(|view| serde_json::json!({
                         "term": view.term,
                         "state": format!("{:?}", view.state),

@@ -35,6 +35,19 @@ export component DetailPage inherits Rectangle {
         easing: ease-out;
     }
 
+    // ---- 探针（测试用：内容块几何，见 `tests/detail_layout.rs`）----
+    // 坐标系与 `content` 一致（无头测试里 Flickable 未滚动，即窗口坐标）。
+    out property <length> probe-body-y: body.y;
+    out property <length> probe-body-height: body.height;
+    out property <length> probe-backdrop-height: root.backdrop-height;
+    // 各区块的绝对上下沿：body 无 padding，子项 `y` 相对 body。
+    out property <length> probe-title-top: body.y + title-wrap.y;
+    out property <length> probe-title-bottom: body.y + title-wrap.y + title-wrap.height;
+    out property <length> probe-overview-top: body.y + overview-wrap.y;
+    out property <length> probe-overview-bottom: body.y + overview-wrap.y + overview-wrap.height;
+    out property <length> probe-buttons-top: body.y + button-row.y;
+    out property <length> probe-buttons-bottom: body.y + button-row.y + button-row.height;
+
     flick := Flickable {
         width: parent.width;
         height: parent.height;
@@ -44,8 +57,12 @@ export component DetailPage inherits Rectangle {
 
         content := Rectangle {
             width: parent.width;
-            // backdrop + 下方文字区（简介 / 按钮 / 版本）。
-            height: max(parent.height, root.backdrop-height + lower.preferred-height + Theme.space-8);
+            // 页面总高 = max(可视高度, 内容块下缘 + 底部留白)。
+            // 内容块叠在 hero 下半部，所以当内容块 + 112px 仍短于窗口时以窗口为主；
+            // 内容块比 hero 高时（长简介 / 无 backdrop）body.y 会被兜底到 0，
+            // 此时 content 由 body 下缘撑开，可滚动。
+            // 底部留白官方未测，沿用现有 `Theme.space-8`（本仓库是 48px）。
+            height: max(parent.height, body.y + body.height + Theme.space-8);
 
             // ---- Backdrop（78vh）----
             Image {
@@ -95,52 +112,40 @@ export component DetailPage inherits Rectangle {
                 visible: root.data.backdrop.width > 0;
             }
 
-            // 返回按钮（左上）。
-            Rectangle {
+            // ---- 内容列（单一纵向布局，叠在 hero 下半部）----
+            //
+            // 不可破坏的不变量：**这里的每个子项都不写 `y`**，先后顺序 + `spacing`
+            // 就是唯一的位置来源。
+            // 踩过的坑：标题块与简介块曾经各自绑 y（标题块 `alignment: end` 贴在 backdrop 下缘、
+            // 简介块 `y = backdrop-height + space-5`），两块互不知情；那样只把简介块上移，
+            // 标题块纹丝不动地“留在原地”——重叠的是标题压住简介。合并成一个布局后，
+            // 任何一块的高度变化都会把它下面的块推开，不可能再重叠，
+            // 回归断言见 `crates/nova-ui/tests/detail_layout.rs`。
+            body := VerticalLayout {
                 x: Theme.content-gutter;
-                y: Theme.space-4;
-                width: back-label.preferred-width + Theme.space-5;
-                height: 36px;
-                // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
-                border-radius: Theme.radius-button;
-                background: back-area.has-hover ? Theme.btn-secondary-bg : Theme.btn-secondary-bg;
-
-                back-label := Text {
-                    x: Theme.space-3;
-                    height: parent.height;
-                    text: "←  返回";
-                    color: Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-14;
-                    vertical-alignment: center;
-                }
-
-                back-area := TouchArea {
-                    clicked => {
-                        root.back();
-                    }
-                }
-            }
-
-            // ---- 标题 / 元信息（压在 backdrop 下缘）----
-            // 高度自适应：48px 标题 + 原文名 + 元信息交给 VerticalLayout 自己撑开，
-            // 整块贴住 backdrop 下缘（`alignment: end`），长标题不再被 160px 固定高度裁切。
-            title-block := VerticalLayout {
-                x: 0;
-                // 入场上浮量由同一条 `reveal` 反推（+8px → 0）。
-                y: Theme.motion-rise-hero * (1 - root.reveal);
-                width: parent.width;
-                height: root.backdrop-height;
-                padding-left: Theme.content-gutter;
-                padding-right: Theme.content-gutter;
-                alignment: end;
-                spacing: Theme.space-1;
+                width: parent.width - Theme.content-gutter * 2;
+                // 内容块**底端**锚定（Netflix 实测距 hero 下缘 112px，见 `Theme.detail-body-bottom-gap`）：
+                // 高度由内容撑开，所以 y 由自身高度反推。内容比 hero 还高时用 0 兜底。
+                // 末尾的 `motion-rise-hero * (1 - reveal)` 是入场 +8px 上浮归位；
+                // reveal 结算到 1 后该项为 0，不影响上面这条底端锚定等式。
+                //
+                // `height` 必须显式写成 `self.preferred-height`：布局元素的默认高度是
+                // **父元素的 100%**（不是内容高），留着默认值会让 `content.height` →
+                // `body.height` → `body.y` → `content.height` 成环（编译期 binding loop），
+                // 并且多出来的高度会被两个可拉伸的 `Text` 子项吃掉（实测各撑到 269px）。
+                height: self.preferred-height;
+                y: max(0px, root.backdrop-height - Theme.detail-body-bottom-gap - self.height)
+                    + Theme.motion-rise-hero * (1 - root.reveal);
+                spacing: Theme.space-4;
+                // 子项按顺序从顶端排（高度 = 内容高，余量为 0；写死只是为了不让未来
+                // 的 min-height 改动把内容居中/居底）。
+                alignment: start;
                 opacity: root.reveal;
 
                 // 标题：48px bold（Netflix 实测）。Text 直接放进布局时，无头渲染器
                 // 会按极窄宽度算 preferred-height（一行字撑成几十行），所以外面套一层
                 // 定宽 Rectangle，用 Text 自己的 preferred-height 撑开（长标题换行不裁切）。
-                Rectangle {
+                title-wrap := Rectangle {
                     height: title-text.preferred-height;
                     background: transparent;
 
@@ -184,21 +189,10 @@ export component DetailPage inherits Rectangle {
                     wrap: no-wrap;
                     visible: root.data.meta-line != "";
                 }
-            }
-
-            // ---- 简介 / 按钮 / 版本下拉（backdrop 下方的黑底区）----
-            lower := VerticalLayout {
-                x: Theme.content-gutter;
-                width: parent.width - Theme.content-gutter * 2;
-                // 内容块现在落在 hero **下方**。Netflix 实测是叠在 hero 下半部
-                // （内容底端距 hero 下缘 112px），但把 VerticalLayout 上移后子项
-                // 会互相重叠（标题压住简介），需要先重排内部定位才能做，见文档备注。
-                y: root.backdrop-height + Theme.space-5;
-                spacing: Theme.space-4;
 
                 // 简介：实测宽 697px、16px / 行高 24px、不限行数（Slint 无 line-height，
                 // 行距用字体默认；高度由文字行数自适应，不再 90px 截断 + elide）。
-                Rectangle {
+                overview-wrap := Rectangle {
                     width: 697px;
                     height: overview-text.preferred-height;
                     background: transparent;
@@ -214,7 +208,7 @@ export component DetailPage inherits Rectangle {
                     }
                 }
 
-                HorizontalLayout {
+                button-row := HorizontalLayout {
                     spacing: Theme.space-3;
 
                     // ▶ 播放：白底黑字。
@@ -431,6 +425,35 @@ export component DetailPage inherits Rectangle {
                                 }
                             }
                         }
+                }
+            }
+
+            // 返回按钮（左上）。位置固定，**绘制顺序在 body 之后**，所以即使内容块
+            // 很高（body.y 兜底到 0）也不会遮住它；反过来它会压在内容上——与 Netflix 一致
+            // （官方也是返回钮浮在 hero 之上）。
+            Rectangle {
+                x: Theme.content-gutter;
+                y: Theme.space-4;
+                width: back-label.preferred-width + Theme.space-5;
+                height: 36px;
+                // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
+                border-radius: Theme.radius-button;
+                background: back-area.has-hover ? Theme.btn-secondary-bg : Theme.btn-secondary-bg;
+
+                back-label := Text {
+                    x: Theme.space-3;
+                    height: parent.height;
+                    text: "←  返回";
+                    color: Theme.text;
+                    font-family: Theme.font-family;
+                    font-size: Theme.font-14;
+                    vertical-alignment: center;
+                }
+
+                back-area := TouchArea {
+                    clicked => {
+                        root.back();
+                    }
                 }
             }
         }

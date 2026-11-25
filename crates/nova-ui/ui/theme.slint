@@ -286,6 +286,13 @@ export global Theme {
         : root.row-title-weight-sm;
     // 详情页 backdrop 占窗口高度比例：实测 hero 845px / 视口 1080px = 0.782。
     in property <float> detail-backdrop-ratio: 0.78;
+    // 详情页内容块**底端**距 hero 下缘的距离。
+    // 来源：Netflix 官方实测（1920×1080，`netflix.com/tw/title/<id>`，免登录）——
+    //   hero 矩形 y 131..976（高 844.88），内容块 rect(136, 424.1, 1648×440)；
+    //   内容块底端 424.1 + 440 = 864.1，hero 下缘 976 − 864.1 = 111.9 ≈ **112px**。
+    // 内容块顶端因此落在 hero 的 ≈35%（(424.1−131)/844.88 = 34.7%），高度由内容撑开，
+    // 所以布局用「底端锚定 + 自身高度反推 y」（见 detail.slint 的 `body`）。
+    in property <length> detail-body-bottom-gap: 112px;
     // 顶栏搜索框：展开宽度 / 高度。
     in property <length> search-box-width: 240px;
     in property <length> search-box-height: 36px;
