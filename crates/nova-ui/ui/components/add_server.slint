@@ -7,6 +7,7 @@
 //! 关闭后覆盖层整体隐藏，不给下层布局预留任何空间。
 
 import { Theme } from "../theme.slint";
+import { Target, TargetBus } from "../models.slint";
 
 export component AddServerDialog inherits Rectangle {
     in property <bool> open: false;
@@ -33,6 +34,68 @@ export component AddServerDialog inherits Rectangle {
     property <bool> submit-disabled: root.state == 1
         || root.address == ""
         || root.address-hint != "";
+
+    // ---- 调试通道：可交互目标（对话框里的输入框与两个动作按钮）----
+    // 对话框整体 `visible: open`，关闭时下面的登记会被 `root.visible` 挡住。
+    out property <[Target]> targets: [
+        {
+            id: "dialog.address",
+            kind: "input",
+            label: "服务器地址",
+            x: address-input.absolute-position.x,
+            y: address-input.absolute-position.y,
+            width: address-input.width,
+            height: address-input.height,
+        },
+        {
+            id: "dialog.user",
+            kind: "input",
+            label: "用户名",
+            x: user-input.absolute-position.x,
+            y: user-input.absolute-position.y,
+            width: user-input.width,
+            height: user-input.height,
+        },
+        {
+            id: "dialog.password",
+            kind: "input",
+            label: "密码",
+            x: password-input.absolute-position.x,
+            y: password-input.absolute-position.y,
+            width: password-input.width,
+            height: password-input.height,
+        },
+        {
+            id: "dialog.cancel",
+            kind: "button",
+            label: "取消",
+            x: cancel-area.absolute-position.x,
+            y: cancel-area.absolute-position.y,
+            width: cancel-area.width,
+            height: cancel-area.height,
+        },
+        {
+            id: "dialog.connect",
+            kind: "button",
+            label: "连接",
+            x: connect-area.absolute-position.x,
+            y: connect-area.absolute-position.y,
+            width: connect-area.width,
+            height: connect-area.height,
+        },
+    ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     /// 把焦点交给地址输入框（打开对话框时由上层调到这里）。
     public function focus-input() {

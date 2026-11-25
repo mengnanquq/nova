@@ -25,6 +25,7 @@ use crate::images::{ImageService, ProviderFetcher, image_from_decoded};
 use crate::local::Local;
 use crate::refresh;
 use crate::status::STATUS_ITEM_ID;
+use crate::views;
 
 /// 快照尺寸：与 `.slint` 里的默认窗口一致，便于与 `target/snapshots/` 对照。
 pub const SNAPSHOT_WIDTH: f32 = 1280.0;
@@ -71,7 +72,7 @@ pub fn run_snapshot(
                 .first()
                 .map(|tab| tab.id.clone())
                 .unwrap_or_default();
-            Some(local.library(&id, search)?)
+            Some(local.library(&id, search, views::LibrarySort::default())?)
         }
         _ => None,
     };

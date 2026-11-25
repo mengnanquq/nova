@@ -19,8 +19,11 @@
 //!   调试线程用 oneshot 等结果，天然串行，不会两个命令同时改状态。
 //! - 不监听网络，只监听本地文件；socket 权限跟随用户目录，**没有鉴权也没有加密**——
 //!   它只该在开发机上开启。
-//! - 不注入鼠标/键盘事件：跨平台注入是另一个坑，而"直接切路由 + 自截"已经能覆盖
-//!   绝大多数自动化需求。
+//! - 交互是通过 Slint 自己的 `Window::dispatch_event` 注入的（`PointerMoved` /
+//!   `PointerPressed` / `PointerReleased` / `KeyPressed`），不需要操作系统级工具，
+//!   也不会干扰用户桌面。目标清单由界面在 `ui/*.slint` 里登记（`Target` / `TargetBus`）。
+//! - `targets` / `sweep` / `dead` 需要"界面把目标重新登记一遍"：命令先排队等一拍
+//!   事件循环（`TargetBus.gen` 推进后 Slint 才会重新求值），见 `ui.rs` 的调试定时器。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -28,7 +31,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 /// 一条调试命令。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 没有 `Eq`：`click` 的坐标是 `f32`（Slint 的逻辑像素）。
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Command {
     /// 当前视图摘要。
     View,
@@ -47,8 +52,47 @@ pub(crate) enum Command {
     },
     /// 自截窗口到 PNG（回读自己的 back buffer）。
     Screenshot { path: PathBuf },
+    /// 当前页面的可交互目标清单。
+    Targets,
+    /// 点一个目标：`target` 按名字，或者 `x`/`y` 按窗口坐标。
+    Click {
+        target: Option<String>,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    /// 只发 `PointerMoved`（验证悬停才出现的东西：音量滑杆、卡片放大、行箭头）。
+    Hover {
+        target: Option<String>,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    /// 一个按键（命名键或单字符）。
+    Key { key: String },
+    /// 逐字符输入文本。
+    Type { text: String },
+    /// 在 UI 线程上不阻塞地等一段时间（动画 / 异步加载结算）。
+    Wait { ms: u64 },
+    /// 交互扫描：对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化。
+    Sweep,
+    /// 只返回"点击后状态没有任何变化"的目标（`sweep` 的过滤版）。
+    Dead,
     /// 退出进程。
     Quit,
+}
+
+impl Command {
+    /// 是否需要先让界面把目标重新登记一遍（推进 `TargetBus.gen` 并等一拍）。
+    pub(crate) const fn needs_settle(&self) -> bool {
+        matches!(self, Self::Targets | Self::Sweep | Self::Dead)
+    }
+
+    /// 命令自身要求的等待时间（`wait` 用；其余命令不需要等）。
+    pub(crate) const fn wait_ms(&self) -> u64 {
+        match self {
+            Self::Wait { ms } => *ms,
+            _ => 0,
+        }
+    }
 }
 
 impl Command {
@@ -65,6 +109,7 @@ impl Command {
                 .and_then(|value| value.as_str())
                 .map(str::to_owned)
         };
+        let number = |key: &str| value.get(key).and_then(|value| value.as_f64());
         match cmd {
             "view" => Ok(Self::View),
             "route" => Ok(Self::Route {
@@ -88,6 +133,41 @@ impl Command {
             "screenshot" => Ok(Self::Screenshot {
                 path: PathBuf::from(text("path").ok_or_else(|| "screenshot 需要 path".to_owned())?),
             }),
+            "targets" => Ok(Self::Targets),
+            "click" | "hover" => {
+                let target = text("target");
+                // 坐标按 f32 用（Slint 的逻辑像素），先在这里收窄，后续不再转换。
+                let (x, y) = match (number("x"), number("y")) {
+                    (Some(x), Some(y)) => (Some(x as f32), Some(y as f32)),
+                    _ => (None, None),
+                };
+                if target.is_none() && x.is_none() {
+                    return Err(format!("{cmd} 需要 target，或同时给 x 与 y"));
+                }
+                if cmd == "click" {
+                    Ok(Self::Click { target, x, y })
+                } else {
+                    Ok(Self::Hover { target, x, y })
+                }
+            }
+            "key" => Ok(Self::Key {
+                key: text("key").ok_or_else(|| "key 需要 key".to_owned())?,
+            }),
+            "type" => Ok(Self::Type {
+                text: text("text").ok_or_else(|| "type 需要 text".to_owned())?,
+            }),
+            "wait" => {
+                let ms = number("ms").ok_or_else(|| "wait 需要 ms".to_owned())?;
+                if ms < 0.0 {
+                    return Err("wait 的 ms 不能为负".to_owned());
+                }
+                // 调试线程等回信的超时是 10s，等太久会先超时；上限取 9s。
+                Ok(Self::Wait {
+                    ms: ms.min(9_000.0) as u64,
+                })
+            }
+            "sweep" => Ok(Self::Sweep),
+            "dead" => Ok(Self::Dead),
             "quit" => Ok(Self::Quit),
             other => Err(format!("未知命令 `{other}`")),
         }
@@ -206,6 +286,65 @@ mod tests {
             })
         );
         assert_eq!(Command::parse(r#"{"cmd":"quit"}"#), Ok(Command::Quit));
+        assert_eq!(Command::parse(r#"{"cmd":"targets"}"#), Ok(Command::Targets));
+        assert_eq!(
+            Command::parse(r#"{"cmd":"click","target":"library.sort"}"#),
+            Ok(Command::Click {
+                target: Some("library.sort".to_owned()),
+                x: None,
+                y: None
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"click","x":123,"y":45}"#),
+            Ok(Command::Click {
+                target: None,
+                x: Some(123.0),
+                y: Some(45.0)
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"hover","target":"home.row.continue.card.0"}"#),
+            Ok(Command::Hover {
+                target: Some("home.row.continue.card.0".to_owned()),
+                x: None,
+                y: None
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"key","key":"Enter"}"#),
+            Ok(Command::Key {
+                key: "Enter".to_owned()
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"type","text":"沙丘"}"#),
+            Ok(Command::Type {
+                text: "沙丘".to_owned()
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"wait","ms":400}"#),
+            Ok(Command::Wait { ms: 400 })
+        );
+        assert_eq!(Command::parse(r#"{"cmd":"sweep"}"#), Ok(Command::Sweep));
+        assert_eq!(Command::parse(r#"{"cmd":"dead"}"#), Ok(Command::Dead));
+    }
+
+    #[test]
+    fn settle_and_wait_flags_match_the_command() {
+        assert!(Command::Targets.needs_settle());
+        assert!(Command::Sweep.needs_settle());
+        assert!(Command::Dead.needs_settle());
+        assert!(!Command::View.needs_settle());
+        assert_eq!(Command::Wait { ms: 400 }.wait_ms(), 400);
+        assert_eq!(Command::View.wait_ms(), 0);
+        // 上限 9s：调试线程等回信只有 10s。
+        assert_eq!(Command::Wait { ms: 60_000 }.wait_ms(), 60_000);
+        assert_eq!(
+            Command::parse(r#"{"cmd":"wait","ms":60000}"#),
+            Ok(Command::Wait { ms: 9_000 })
+        );
     }
 
     #[test]
@@ -220,6 +359,26 @@ mod tests {
             Command::parse(r#"{"cmd":"nope"}"#)
                 .unwrap_err()
                 .contains("未知命令")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"click"}"#)
+                .unwrap_err()
+                .contains("target")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"click","x":1}"#)
+                .unwrap_err()
+                .contains("x")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"key"}"#)
+                .unwrap_err()
+                .contains("key")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"wait","ms":-1}"#)
+                .unwrap_err()
+                .contains("负")
         );
     }
 }

@@ -220,7 +220,14 @@ impl Local {
     }
 
     /// 用缓存构建媒体库页。
-    pub fn library(&self, library_id: &str, search: Option<&str>) -> Result<LibraryView, AppError> {
+    ///
+    /// `sort` 只影响本地缓存的条目顺序（见 [`views::LibrarySort`]），不参与查询。
+    pub fn library(
+        &self,
+        library_id: &str,
+        search: Option<&str>,
+        sort: views::LibrarySort,
+    ) -> Result<LibraryView, AppError> {
         let tabs = self.tabs();
         let tab = tabs
             .iter()
@@ -248,6 +255,7 @@ impl Local {
             &tab,
             tabs,
             search,
+            sort,
         )?)
     }
 
@@ -596,7 +604,9 @@ mod tests {
         let home = local.home(None).expect("构建首页");
         assert_eq!(home.recently_added.len(), 1);
         assert_eq!(home.recently_added[0].title, "缓存电影");
-        let library = local.library("", None).expect("构建媒体库");
+        let library = local
+            .library("", None, views::LibrarySort::default())
+            .expect("构建媒体库");
         assert_eq!(library.cards.len(), 1);
         assert_eq!(library.title, "全部");
     }

@@ -6,7 +6,7 @@
 //! NETFLIX 风格的版本下拉（替换三行列表）。
 
 import { Theme } from "theme.slint";
-import { DetailData } from "models.slint";
+import { DetailData, Target, TargetBus } from "models.slint";
 import { FocusRing } from "focus_ring.slint";
 
 export component DetailPage inherits Rectangle {
@@ -16,6 +16,60 @@ export component DetailPage inherits Rectangle {
     callback back();
     callback play();
     callback source-selected(string);
+
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 返回 / 播放 / 我的列表 / 版本下拉是页面直接摆放的常驻控件 → 声明式列出；
+    // 展开后的版本行是条件子树里的重复元素 → 各自登记到 `TargetBus`。
+    out property <[Target]> targets: [
+        {
+            id: "detail.back",
+            kind: "button",
+            label: "返回",
+            x: back-area.absolute-position.x,
+            y: back-area.absolute-position.y,
+            width: back-area.width,
+            height: back-area.height,
+        },
+        {
+            id: "detail.play",
+            kind: "button",
+            label: root.data.play-label,
+            x: play-area.absolute-position.x,
+            y: play-area.absolute-position.y,
+            width: play-area.width,
+            height: play-area.height,
+        },
+        {
+            id: "detail.my-list",
+            kind: "toggle",
+            label: root.in-my-list ? "已在列表" : "+  我的列表",
+            x: list-area.absolute-position.x,
+            y: list-area.absolute-position.y,
+            width: list-area.width,
+            height: list-area.height,
+        },
+        {
+            id: "detail.drop",
+            kind: "toggle",
+            label: "播放版本：" + root.data.selected-source-label,
+            x: drop-area.absolute-position.x,
+            y: drop-area.absolute-position.y,
+            width: drop-area.width,
+            height: drop-area.height,
+        },
+    ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     // 详情页底色：实测 rgb(15,15,15)，与其它页的纯黑不同。
     background: Theme.detail-bg;
@@ -412,6 +466,22 @@ export component DetailPage inherits Rectangle {
                                         root.focus-index = i + 1;
                                         root.drop-open = false;
                                         root.source-selected(source.id);
+                                    }
+                                }
+
+                                // 版本行只在展开时实例化，自己登记目标。
+                                property <int> target-gen: TargetBus.gen;
+                                changed target-gen => {
+                                    if (root.visible) {
+                                        TargetBus.register({
+                                            id: "detail.source." + i,
+                                            kind: "button",
+                                            label: source.title,
+                                            x: source-row.absolute-position.x,
+                                            y: source-row.absolute-position.y,
+                                            width: source-row.width,
+                                            height: source-row.height,
+                                        });
                                     }
                                 }
 

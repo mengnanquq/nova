@@ -8,7 +8,7 @@
 //! 无胶囊无下划线；右：搜索图标按钮（聚焦展开 240px 输入框）+ 圆形头像。
 
 import { Theme } from "theme.slint";
-import { TabData } from "models.slint";
+import { TabData, Target, TargetBus } from "models.slint";
 
 export component Navbar inherits Rectangle {
     in property <[TabData]> tabs;
@@ -32,6 +32,64 @@ export component Navbar inherits Rectangle {
     callback search-clear();
     // 输入框里按 Esc：交由上层退出聚焦。
     callback search-escape();
+
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 页面传入自己的命名空间（`"home."` / `"library."` / `"search."`），
+    // 这样同一份顶栏在三个页面里不会互相覆盖 id。
+    in property <string> target-prefix: "";
+    in property <bool> targets-visible: true;
+    /// 顶栏里固定存在的可点控件。库标签是 `for` 重复元素，单独登记（见下）。
+    ///
+    /// 三个搜索入口是**互斥可见**的：收起时只有放大镜（点它展开），展开时是输入框，
+    /// 输入框有文字时才多一个「×」。清单只列当前真的能点的那个，否则
+    /// `sweep` 会对着不可见的区域点击并报"没反应"。
+    out property <[Target]> targets: !root.show-search ? []
+        : root.search-focused
+            ? (root.search-text != ""
+                ? [search-input-target, search-clear-target]
+                : [search-input-target])
+            : [search-icon-target];
+
+    property <Target> search-icon-target: {
+        id: root.target-prefix + "nav.search",
+        kind: "button",
+        label: "搜索",
+        x: search-area.absolute-position.x,
+        y: search-area.absolute-position.y,
+        width: search-area.width,
+        height: search-area.height,
+    };
+    property <Target> search-input-target: {
+        id: root.target-prefix + "nav.search-input",
+        kind: "input",
+        label: "顶栏搜索框",
+        x: search-input.absolute-position.x,
+        y: search-input.absolute-position.y,
+        width: search-input.width,
+        height: search-input.height,
+    };
+    property <Target> search-clear-target: {
+        id: root.target-prefix + "nav.search-clear",
+        kind: "button",
+        label: "清除搜索",
+        x: clear-area.absolute-position.x,
+        y: clear-area.absolute-position.y,
+        width: clear-area.width,
+        height: clear-area.height,
+    };
+
+    // 把本轮 `targets` 登记到总线（调试通道取清单前会推进 `gen`）。
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.targets-visible && root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     /// 让搜索输入框拿到键盘焦点（Ctrl+F 由 Rust 侧调到这里）。
     public function focus-input() {
@@ -155,6 +213,22 @@ export component Navbar inherits Rectangle {
                     tab-area := TouchArea {
                         clicked => {
                             root.tab-activated(tab.id);
+                        }
+                    }
+
+                    // 库标签是重复元素：只能自己登记目标（数组无法在父组件里拼接）。
+                    property <int> target-gen: TargetBus.gen;
+                    changed target-gen => {
+                        if (root.targets-visible && root.visible) {
+                            TargetBus.register({
+                                id: root.target-prefix + "nav.tab." + i,
+                                kind: "tab",
+                                label: tab.title,
+                                x: tab-area.absolute-position.x,
+                                y: tab-area.absolute-position.y,
+                                width: tab-area.width,
+                                height: tab-area.height,
+                            });
                         }
                     }
                 }

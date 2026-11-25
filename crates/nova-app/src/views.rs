@@ -26,7 +26,86 @@ pub const PLAYER_STATUS: &str = "播放引擎将在阶段 4 接入";
 const FALLBACK_SORT_LABEL: &str = "本地缓存（服务端列表不含 ParentId）";
 
 /// 默认排序条文案。
-const DEFAULT_SORT_LABEL: &str = "排序：最近添加";
+pub const DEFAULT_SORT_LABEL: &str = "排序：最近添加";
+
+/// 媒体库排序方式：点「排序」按钮循环切换（顺序就是这个枚举的声明顺序）。
+///
+/// 排序只作用于**本地缓存**里的 `MediaItem` 列表，不改 provider 的查询参数
+/// （那会引入网络依赖，排序按钮在离线时也必须立刻生效）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LibrarySort {
+    /// 最近添加：保持数据库顺序（服务端按加入时间倒序返回）。
+    #[default]
+    RecentlyAdded,
+    /// 标题 A→Z。
+    TitleAsc,
+    /// 标题 Z→A。
+    TitleDesc,
+    /// 发行年份从新到旧（缺年份的排在最后）。
+    YearDesc,
+}
+
+impl LibrarySort {
+    /// 排序条上显示的文案（`LibraryView::sort_label`）。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RecentlyAdded => DEFAULT_SORT_LABEL,
+            Self::TitleAsc => "排序：标题 A→Z",
+            Self::TitleDesc => "排序：标题 Z→A",
+            Self::YearDesc => "排序：发行年份从新到旧",
+        }
+    }
+
+    /// 下一次点击的排序方式（`最近添加 → 标题 A→Z → 标题 Z→A → 年份从新到旧 → …`）。
+    pub const fn next(self) -> Self {
+        match self {
+            Self::RecentlyAdded => Self::TitleAsc,
+            Self::TitleAsc => Self::TitleDesc,
+            Self::TitleDesc => Self::YearDesc,
+            Self::YearDesc => Self::RecentlyAdded,
+        }
+    }
+
+    /// 就地排序；缺少排序键的条目也必须有**稳定**顺序。
+    ///
+    /// 每种排序的最后一级比较都是条目 id：标题相同、年份缺失（按 0 处理）时
+    /// 顺序仍然确定，不会因为 `sort` 的不稳定性导致每次点击结果不同。
+    pub fn apply(self, items: &mut [MediaItem]) {
+        match self {
+            // 数据库顺序就是"最近添加"，保持原样（不要在客户端重新洗一遍）。
+            Self::RecentlyAdded => {}
+            Self::TitleAsc => items.sort_by(|left, right| {
+                title_key(left)
+                    .cmp(&title_key(right))
+                    .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+            }),
+            Self::TitleDesc => items.sort_by(|left, right| {
+                title_key(right)
+                    .cmp(&title_key(left))
+                    .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+            }),
+            Self::YearDesc => items.sort_by(|left, right| {
+                let left_year = left.year.unwrap_or(0);
+                let right_year = right.year.unwrap_or(0);
+                right_year.cmp(&left_year).then_with(|| {
+                    title_key(left)
+                        .cmp(&title_key(right))
+                        .then_with(|| left.id.as_str().cmp(right.id.as_str()))
+                })
+            }),
+        }
+    }
+}
+
+/// 标题排序键：优先 `sort_title`（服务端给的排序标题），缺失时退回显示标题。
+fn title_key(item: &MediaItem) -> String {
+    let key = item.sort_key().trim();
+    if key.is_empty() {
+        item.title.trim().to_lowercase()
+    } else {
+        key.to_lowercase()
+    }
+}
 
 /// 用本地缓存构建首页。
 ///
@@ -94,6 +173,7 @@ pub fn library_view(
     tab: &LibraryTab,
     tabs: Vec<LibraryTab>,
     search: Option<&str>,
+    sort: LibrarySort,
 ) -> Result<LibraryView, nova_storage::StorageError> {
     let parent = if tab.id.is_empty() {
         None
@@ -101,14 +181,19 @@ pub fn library_view(
         Some(ItemId::new(tab.id.clone()))
     };
     let mut items = db.children(server_id, parent.as_ref())?;
-    let mut sort_label = DEFAULT_SORT_LABEL.to_owned();
+    let mut sort_label = sort.label().to_owned();
     if items.is_empty() && parent.is_some() {
         let top_level = db.children(server_id, None)?;
         if !top_level.is_empty() {
             items = top_level;
-            sort_label = FALLBACK_SORT_LABEL.to_owned();
+            // 退化列表 + 默认排序保持原来的文案（快照/文档都与它对齐）；
+            // 用户切换排序后显示新排序，退化说明让位给排序状态。
+            if sort == LibrarySort::RecentlyAdded {
+                sort_label = FALLBACK_SORT_LABEL.to_owned();
+            }
         }
     }
+    sort.apply(&mut items);
 
     let mut cards: Vec<CardView> = items.iter().map(card_view).collect();
     if let Some(term) = search {
@@ -463,6 +548,77 @@ mod tests {
             created_at: 1,
             last_seen_at: 1,
         }
+    }
+
+    fn movie_with(id: &str, title: &str, sort_title: &str, year: Option<u16>) -> MediaItem {
+        let mut item = item(id, title, MediaKind::Movie, Duration::ZERO, Some(7200));
+        item.sort_title = sort_title.to_owned();
+        item.year = year;
+        item
+    }
+
+    #[test]
+    fn sort_cycles_through_the_documented_order() {
+        use LibrarySort::{RecentlyAdded, TitleAsc, TitleDesc, YearDesc};
+        // 顺序写进文档与 `docs/ui-architecture.md`：循环一次回到原点。
+        assert_eq!(RecentlyAdded.next(), TitleAsc);
+        assert_eq!(TitleAsc.next(), TitleDesc);
+        assert_eq!(TitleDesc.next(), YearDesc);
+        assert_eq!(YearDesc.next(), RecentlyAdded);
+        // 每种排序都有自己的文案（排序条要能看出当前状态）。
+        for sort in [RecentlyAdded, TitleAsc, TitleDesc, YearDesc] {
+            assert!(!sort.label().is_empty());
+        }
+        assert_eq!(LibrarySort::default(), RecentlyAdded);
+    }
+
+    #[test]
+    fn title_sort_is_case_insensitive_and_stable_without_sort_keys() {
+        let mut items = vec![
+            // 缺标题、缺排序标题的条目：键为空串，必须靠 id 稳定排序（不能随机）。
+            movie_with("b", "", "", None),
+            movie_with("a", "", "", None),
+            movie_with("c", "Beta", "beta", Some(2020)),
+            movie_with("d", "alpha", "", Some(2021)),
+        ];
+        LibrarySort::TitleAsc.apply(&mut items);
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "d", "c"]);
+
+        LibrarySort::TitleDesc.apply(&mut items);
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["c", "d", "a", "b"]);
+
+        // 再排一次结果不变（幂等 + 稳定）。
+        let before: Vec<String> = items.iter().map(|item| item.id.to_string()).collect();
+        LibrarySort::TitleDesc.apply(&mut items);
+        let after: Vec<String> = items.iter().map(|item| item.id.to_string()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn year_sort_puts_missing_years_last_and_ties_break_by_title() {
+        let mut items = vec![
+            movie_with("old", "Old", "old", Some(1999)),
+            movie_with("none", "NoYear", "noyear", None),
+            movie_with("new", "New", "new", Some(2023)),
+            movie_with("new-b", "Another", "another", Some(2023)),
+        ];
+        LibrarySort::YearDesc.apply(&mut items);
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        // 2023 两条按标题（another < new），然后 1999，最后是没有年份的。
+        assert_eq!(ids, ["new-b", "new", "old", "none"]);
+    }
+
+    #[test]
+    fn recently_added_keeps_the_database_order() {
+        let mut items = vec![
+            movie_with("z", "Zulu", "zulu", Some(2001)),
+            movie_with("a", "Alpha", "alpha", Some(2020)),
+        ];
+        LibrarySort::RecentlyAdded.apply(&mut items);
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["z", "a"]);
     }
 
     #[test]

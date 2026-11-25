@@ -17,7 +17,7 @@
 //! 重算尺寸（单张卡的绘制只有这一份）。
 
 import { Theme } from "theme.slint";
-import { CardData } from "models.slint";
+import { CardData, TargetBus } from "models.slint";
 
 export component PosterCard inherits Rectangle {
     in property <CardData> card;
@@ -39,6 +39,28 @@ export component PosterCard inherits Rectangle {
     // 是否接受指针输入：放大覆盖层在放大完成前要关掉，否则它会抢走基础卡的悬停
     // （悬停 → 覆盖层接管 → 基础卡失焦 → 还原 → 无限抖动）。
     in property <bool> interactive: true;
+    // ---- 调试通道：卡片本身是一个可点目标 ----
+    // 卡片是重复元素，没法被父组件的 `targets` 数组收进去，所以自己登记
+    // （id / label 由父组件按 `行前缀 + 下标` 传下来，见 docs/ui-architecture.md）。
+    in property <string> target-id: "";
+    in property <string> target-label: "";
+    in property <bool> targets-visible: true;
+    property <int> target-gen: TargetBus.gen;
+    changed target-gen => {
+        if (root.targets-visible && root.visible && root.target-id != ""
+            && root.width > 0px && root.height > 0px) {
+            TargetBus.register({
+                id: root.target-id,
+                kind: "card",
+                label: root.target-label,
+                x: root.absolute-position.x,
+                y: root.absolute-position.y,
+                width: root.width,
+                height: root.height,
+            });
+        }
+    }
+
     // 卡片总高（图高 + 标题块 × scale）——布局与测试只读这个。
     out property <length> card-height: (root.image-height + Theme.card-caption-height)
         * root.scale;

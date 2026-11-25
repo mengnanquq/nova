@@ -7,17 +7,18 @@
 //! `viewmodel` 中完成，`.slint` 里不写业务判断。
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 
-use crate::AppWindow;
 use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
 use crate::viewmodel::{
     AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
-    Navigator, PlayerView, Route, SearchView, move_focus,
+    Navigator, PlayerView, Route, SearchView, TargetInfo, move_focus,
 };
+use crate::{AppWindow, Target, TargetBus};
 
 /// 页面编号。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -263,12 +264,81 @@ impl Default for State {
     }
 }
 
+/// 页面命名空间：可交互目标的 id 前缀（`"library.sort"` 的 `"library."`）。
+///
+/// 目标清单在 Rust 侧按当前页前缀过滤，隐藏页面的登记因此不会混进来。
+pub(crate) fn target_prefix(page: Page) -> &'static str {
+    match page {
+        Page::Home => "home.",
+        Page::Library => "library.",
+        Page::Detail => "detail.",
+        Page::Search => "search.",
+        Page::Player => "player.",
+    }
+}
+
+impl From<Target> for TargetInfo {
+    fn from(target: Target) -> Self {
+        Self {
+            id: target.id.to_string(),
+            kind: target.kind.to_string(),
+            label: target.label.to_string(),
+            x: target.x,
+            y: target.y,
+            width: target.width,
+            height: target.height,
+        }
+    }
+}
+
+/// 一次交互扫描的单项结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepEntry {
+    /// 目标 id。
+    pub id: String,
+    /// 控件类型。
+    pub kind: String,
+    /// 界面上的文字。
+    pub label: String,
+    /// 点击前后状态摘要是否不同。
+    pub changed: bool,
+    /// 点击后是否成功把应用恢复原状（页面 / 路由 / 对话框）。
+    pub restored: bool,
+    /// 点击前的状态摘要。
+    pub before: String,
+    /// 点击后的状态摘要。
+    pub after: String,
+}
+
+/// 一次交互扫描的结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepReport {
+    /// 被扫描的页面名。
+    pub page: String,
+    /// 每一项的结果。
+    pub entries: Vec<SweepEntry>,
+    /// 是否因为"页面回不去"而提前收尾。
+    pub aborted: bool,
+}
+
+impl SweepReport {
+    /// 点完状态完全没变的目标（"死按钮"候选）。
+    pub fn dead(&self) -> Vec<&SweepEntry> {
+        self.entries.iter().filter(|entry| !entry.changed).collect()
+    }
+}
+
 /// 界面应用：拥有一个 `AppWindow`、导航栈、焦点与图片表。
 ///
 pub struct App {
     ui: AppWindow,
     state: Rc<RefCell<State>>,
     images: Rc<RefCell<ImageStore>>,
+    /// 重复元素 / 条件子树登记上来的可交互目标（按 id 去重）。
+    ///
+    /// Slint 1.19 的数组属性没有推导与拼接，这类目标没法写进父组件的
+    /// `targets` 数组，只能经 `TargetBus` 报到 Rust（见 `docs/ui-architecture.md`）。
+    targets: Rc<RefCell<BTreeMap<String, TargetInfo>>>,
 }
 
 impl App {
@@ -284,7 +354,328 @@ impl App {
         let state = Rc::new(RefCell::new(State::default()));
         state.borrow_mut().images = images.clone();
         wire(&ui, &state);
-        Self { ui, state, images }
+        let targets: Rc<RefCell<BTreeMap<String, TargetInfo>>> =
+            Rc::new(RefCell::new(BTreeMap::new()));
+        {
+            // 登记回调：只存下来，不做任何界面操作（调试通道取清单时才读）。
+            let sink = Rc::clone(&targets);
+            ui.global::<TargetBus>().on_register(move |target| {
+                let info = TargetInfo::from(target);
+                sink.borrow_mut().insert(info.id.clone(), info);
+            });
+        }
+        Self {
+            ui,
+            state,
+            images,
+            targets,
+        }
+    }
+
+    /// 让所有登记型目标（卡片 / 标签 / 菜单行 / 条件子树）重新上报一次。
+    ///
+    /// 推进 `TargetBus.gen` 后，Slint 会在**下一个事件循环回合**重新求值所有
+    /// 依赖它的绑定并触发登记回调——调用方必须等一帧（真实窗口是调试定时器的
+    /// 下一拍，测试是 `mock_elapsed_time`）再读 [`App::targets`]。
+    ///
+    /// 先清空再推进：删掉的卡片 / 关闭的菜单不会留在清单里。
+    pub fn refresh_targets(&self) {
+        self.targets.borrow_mut().clear();
+        let bus = self.ui.global::<TargetBus>();
+        bus.set_gen(bus.get_gen().wrapping_add(1));
+    }
+
+    /// 当前页面的可交互目标（声明式清单 + 登记总线，按 id 去重并按 id 排序）。
+    ///
+    /// 过滤规则：
+    /// - 只保留**当前页命名空间**（`home.` / `library.` / …）与浮层（`banner.` /
+    ///   `dialog.`）的目标——隐藏页面里已登记的元素不会混进来；
+    /// - 宽高必须为正，中心点必须落在窗口内（横向溢出视口一半的卡点不到中心）；
+    /// - 「添加服务器」对话框打开时只保留 `dialog.` 目标（下层被遮罩挡住，
+    ///   点它们只会得到"没反应"的假结论）。
+    pub fn targets(&self) -> Vec<TargetInfo> {
+        // 窗口尺寸是物理像素，目标坐标是逻辑像素：用缩放因子换算。
+        let scale = self.ui.window().scale_factor();
+        let size = self.ui.window().size();
+        let (window_w, window_h) = (size.width as f32 / scale, size.height as f32 / scale);
+        let mut merged: BTreeMap<String, TargetInfo> = BTreeMap::new();
+        // 先放登记总线（重复元素 / 条件子树），再用声明式清单覆盖同 id：
+        // 声明式清单是活绑定，标签与坐标永远是最新的；登记上来的是一次快照。
+        for (id, info) in self.targets.borrow().iter() {
+            merged.insert(id.clone(), info.clone());
+        }
+        let declared = self.ui.get_targets();
+        for index in 0..declared.row_count() {
+            if let Some(target) = declared.row_data(index) {
+                let info = TargetInfo::from(target);
+                merged.insert(info.id.clone(), info);
+            }
+        }
+        if std::env::var("NOVA_DEBUG_TARGETS").is_ok() {
+            eprintln!(
+                "DEBUG merged nav: {:?}",
+                merged
+                    .values()
+                    .filter(|t| t.id.starts_with("home.nav"))
+                    .map(|t| (t.id.clone(), t.x, t.width))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let dialog_open = self.ui.get_add_server_open();
+        let prefix = target_prefix(self.page());
+        let mut out: Vec<TargetInfo> = merged
+            .into_values()
+            .filter(|target| target.is_clickable())
+            .filter(|target| target.center_in_window(window_w, window_h))
+            .filter(|target| {
+                if dialog_open {
+                    target.id.starts_with("dialog.")
+                } else {
+                    target.id.starts_with(prefix)
+                        || target.id.starts_with("banner.")
+                        || target.id.starts_with("dialog.")
+                }
+            })
+            .collect();
+        out.sort_by(|left, right| left.id.cmp(&right.id));
+        out
+    }
+
+    /// 按 id 找一目标（调试通道）。
+    pub fn target(&self, id: &str) -> Option<TargetInfo> {
+        self.targets().into_iter().find(|target| target.id == id)
+    }
+
+    /// 在窗口坐标上点一下（移动 → 按下 → 松开）。
+    ///
+    /// 走 Slint 自己的 `dispatch_event`：不需要操作系统级注入，也不打扰用户桌面。
+    pub fn click_at(&self, x: f32, y: f32) -> Result<(), String> {
+        self.pointer_at(x, y, true)
+    }
+
+    /// 只把指针移到窗口坐标（悬停）。
+    pub fn hover_at(&self, x: f32, y: f32) -> Result<(), String> {
+        self.pointer_at(x, y, false)
+    }
+
+    /// 点一个目标（按 id）；不存在时返回 `None`。
+    pub fn click_target(&self, id: &str) -> Option<TargetInfo> {
+        let target = self.target(id)?;
+        let (x, y) = target.center();
+        self.click_at(x, y).ok()?;
+        Some(target)
+    }
+
+    /// 发一次按键（按下 + 松开）。
+    pub fn press_key(&self, text: slint::SharedString) -> Result<(), String> {
+        let window = self.ui.window();
+        window
+            .dispatch_event_with_result(slint::platform::WindowEvent::KeyPressed {
+                text: text.clone(),
+            })
+            .map_err(|error| error.to_string())?;
+        window
+            .dispatch_event_with_result(slint::platform::WindowEvent::KeyReleased { text })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// 状态摘要：`sweep` 用它判断"点了有没有反应"。
+    ///
+    /// 只放**可观测且稳定**的字段（页面 / 路由 / 焦点 / 搜索词 / 排序 / 菜单 /
+    /// 对话框 / 播放器状态 / 滚动偏移）。悬停态、动画中间帧这类噪声字段不进来，
+    /// 否则每个按钮都会"有变化"，死按钮就淹没了。
+    pub fn state_digest(&self) -> String {
+        let ui = &self.ui;
+        let state = self.state.borrow();
+        // 视图模型总是存在（没有数据时是默认值），所以这里不区分 Option：
+        // 摘要里出现空库/空搜索页是正常的，只要"变没变"。
+        let library = {
+            let view = &state.library;
+            format!(
+                "id={};sort={};count={};first={}",
+                view.id,
+                view.sort_label,
+                view.cards.len(),
+                view.cards
+                    .first()
+                    .map(|card| card.title.as_str())
+                    .unwrap_or("")
+            )
+        };
+        let detail = format!(
+            "item={};title={};drop_open={};in_my_list={}",
+            state.detail.item_id,
+            state.detail.title,
+            ui.get_detail_drop_open(),
+            ui.get_detail_in_my_list()
+        );
+        let search = format!(
+            "term={};state={:?};count={}",
+            state.search.term,
+            state.search.state,
+            state.search.cards.len()
+        );
+        let player = &state.player;
+        let player_line = format!(
+            "playing={};volume={:.3};muted={};rate={:.2};audio={};subs={};controls={};error={}",
+            player.playing,
+            player.volume,
+            player.muted,
+            player.rate,
+            player.audio_menu_open,
+            player.subtitle_menu_open,
+            player.controls_visible,
+            player.error.as_deref().unwrap_or("")
+        );
+        format!(
+            "page={};route={:?};focus={},{},{},{};nav_active={};search_focused={};             search_text={};banner={}/{};dialog={}/{}/{};library=[{}];detail=[{}];             search=[{}];player=[{}]",
+            self.page().index(),
+            self.current_route(),
+            ui.get_home_focus(),
+            ui.get_library_focus(),
+            ui.get_detail_focus(),
+            ui.get_search_focus(),
+            ui.get_nav_active(),
+            ui.get_search_focused(),
+            self.search_text(),
+            ui.get_banner_visible(),
+            ui.get_banner_text(),
+            ui.get_add_server_open(),
+            ui.get_add_server_state(),
+            ui.get_add_server_error(),
+            library,
+            detail,
+            search,
+            player_line
+        )
+    }
+
+    /// 交互扫描：对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化。
+    ///
+    /// 每点一项就把应用恢复原状（关对话框 / 从详情或播放页退回原路由），
+    /// 否则后续目标的坐标会落在已经换掉的页面上，得到一堆假的"没反应"。
+    pub fn sweep(&self) -> SweepReport {
+        let page = self.page();
+        let route = self.current_route();
+        let targets = self.targets();
+        let mut entries = Vec::new();
+        let mut aborted = false;
+        for target in &targets {
+            let before = self.state_digest();
+            let (x, y) = target.center();
+            let outcome = self.hover_at(x, y).and_then(|()| self.click_at(x, y));
+            if let Err(error) = outcome {
+                entries.push(SweepEntry {
+                    id: target.id.clone(),
+                    kind: target.kind.clone(),
+                    label: target.label.clone(),
+                    changed: false,
+                    restored: true,
+                    before,
+                    after: format!("error: {error}"),
+                });
+                continue;
+            }
+            let after = self.state_digest();
+            let changed = before != after;
+            let restored = self.restore_after_click(page, &route);
+            entries.push(SweepEntry {
+                id: target.id.clone(),
+                kind: target.kind.clone(),
+                label: target.label.clone(),
+                changed,
+                restored,
+                before,
+                after,
+            });
+            if !restored {
+                // 页面回不去，后面每个目标的坐标都不可信：提前收尾并说明原因。
+                aborted = true;
+                break;
+            }
+        }
+        SweepReport {
+            page: target_prefix(page).trim_end_matches('.').to_owned(),
+            entries,
+            aborted,
+        }
+    }
+
+    /// 把应用恢复到扫描开始时的页面 / 路由；返回是否恢复成功。
+    ///
+    /// 恢复顺序：
+    /// 1. 关掉被点开的「添加服务器」对话框；
+    /// 2. 先尝试 `go_back`（点卡片进详情、点标签切库、点播放进播放页都是压栈）；
+    /// 3. 栈已经回不去（例如点「返回」直接把详情页弹掉了）就按原路由重建栈顶
+    ///    （详情 / 媒体库 / 搜索 / 首页都能从当前视图模型重建）；
+    /// 4. 最后强制切回原页面。
+    ///
+    /// 播放页是例外：播放会话（mpv）不是视图模型能凭空重建的，所以只要页面回到
+    /// 播放页就算恢复成功（路由可能已经变成上一条）；调用方（`nova-app` 的
+    /// `sweep`）会在扫描结束后收掉误开的播放器。
+    fn restore_after_click(&self, page: Page, route: &Option<Route>) -> bool {
+        if self.ui.get_add_server_open() {
+            self.close_add_server();
+        }
+        for _ in 0..4 {
+            if &self.current_route() == route {
+                break;
+            }
+            if !self.go_back() {
+                break;
+            }
+        }
+        if &self.current_route() != route {
+            match route {
+                Some(Route::Detail { item_id }) => {
+                    let _ = self.open_detail(item_id);
+                }
+                Some(Route::Library { .. }) => {
+                    let view = self.state.borrow().library.clone();
+                    let _ = self.open_library(&view);
+                }
+                Some(Route::Search { .. }) => {
+                    let view = self.state.borrow().search.clone();
+                    let _ = self.open_search(&view);
+                }
+                Some(Route::Home) => self.show_home(),
+                // 播放会话无法重建，交给下面的页面检查。
+                Some(Route::Player { .. }) | None => {}
+            }
+        }
+        if self.page() != page {
+            self.show_page(page);
+        }
+        if self.page() != page {
+            return false;
+        }
+        &self.current_route() == route || page == Page::Player
+    }
+
+    fn pointer_at(&self, x: f32, y: f32, click: bool) -> Result<(), String> {
+        let window = self.ui.window();
+        let position = slint::LogicalPosition::new(x, y);
+        window
+            .dispatch_event_with_result(slint::platform::WindowEvent::PointerMoved { position })
+            .map_err(|error| error.to_string())?;
+        if click {
+            for event in [
+                slint::platform::WindowEvent::PointerPressed {
+                    position,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+                slint::platform::WindowEvent::PointerReleased {
+                    position,
+                    button: slint::platform::PointerEventButton::Left,
+                },
+            ] {
+                window
+                    .dispatch_event_with_result(event)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     /// 底层 Slint 窗口。

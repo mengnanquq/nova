@@ -18,7 +18,7 @@
 //! `Enter` 提交后把焦点还给全局键盘（方向键才能在结果网格里移动）。
 
 import { Theme } from "theme.slint";
-import { SearchData } from "models.slint";
+import { SearchData, Target, TargetBus } from "models.slint";
 import { PosterGrid } from "poster_grid.slint";
 import { EmptyState } from "empty_state.slint";
 import { Navbar } from "navbar.slint";
@@ -50,6 +50,42 @@ export component SearchPage inherits Rectangle {
     callback search-blur();
     // 错误态的"重试"。
     callback search-retry();
+
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 页面直接摆放的搜索框与清除按钮声明式列出；结果卡片 / 顶栏标签 / 空态按钮
+    // 由子组件自己登记到 `TargetBus`。
+    out property <[Target]> targets: [
+        {
+            id: "search.input",
+            kind: "input",
+            label: "搜索页输入框",
+            x: query.absolute-position.x,
+            y: query.absolute-position.y,
+            width: query.width,
+            height: query.height,
+        },
+        {
+            id: "search.clear",
+            kind: "button",
+            label: "清除搜索",
+            x: clear-area.absolute-position.x,
+            y: clear-area.absolute-position.y,
+            width: clear-area.width,
+            height: clear-area.height,
+        },
+    ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     /// 把焦点交给本页的搜索框（Ctrl+F / 从顶栏首次输入时由上层调到这里）。
     public function focus-input() {
@@ -268,6 +304,8 @@ export component SearchPage inherits Rectangle {
                 x: 0;
                 y: 0;
                 width: parent.width;
+                target-prefix: "search.";
+                targets-visible: root.data.state == 2;
                 nav-active: root.nav-active;
                 columns: root.columns;
                 grid-top: root.grid-top;
@@ -289,6 +327,8 @@ export component SearchPage inherits Rectangle {
             y: root.results-y;
             width: parent.width;
             height: parent.height - root.results-y;
+            target-prefix: "search.";
+            targets-visible: root.visible;
             title: "没有找到相关内容";
             message: "换个关键词试试";
         }
@@ -299,6 +339,8 @@ export component SearchPage inherits Rectangle {
             y: root.results-y;
             width: parent.width;
             height: parent.height - root.results-y;
+            target-prefix: "search.";
+            targets-visible: root.visible;
             title: "搜索失败";
             message: root.data.error;
             primary-label: "重试";
@@ -321,6 +363,8 @@ export component SearchPage inherits Rectangle {
         // 结果区滚动超过 40px 后顶栏变实底（与 `library.slint` 同一阈值）。
         scrolled: results.content-y < -40px;
         show-search: false;
+        target-prefix: "search.";
+        targets-visible: root.visible;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {

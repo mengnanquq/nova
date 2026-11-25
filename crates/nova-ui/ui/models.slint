@@ -155,3 +155,31 @@ export struct PlayerData {
     has-frame: bool,
 }
 
+
+/// 调试通道的"可交互目标"清单（见 `docs/debugging.md` 与 `docs/ui-architecture.md`）。
+///
+/// `id` 是稳定标识（`"library.sort"` / `"home.row.continue.card.2"`），`x`/`y` 是
+/// **窗口坐标**（由元素的 `absolute-position` 得出，直接可点），`kind` 供脚本按类型
+/// 过滤：`button` / `toggle` / `input` / `card` / `tab` / `slider` / `scroll`。
+export struct Target {
+    id: string,
+    kind: string,
+    label: string,
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+}
+
+/// 目标注册总线。
+///
+/// 为什么需要它：Slint 1.19 的数组属性只能写成字面量——没有数组推导、没有拼接，
+/// 所以"重复元素（卡片 / 标签 / 轨道行）"和"条件子树（hero / 空态 / 对话框 / 菜单）"
+/// 没法加进父组件的 `targets` 数组。这些元素改为在 `gen` 变化时通过本总线登记自己：
+/// 调试通道在取清单前把 `gen` 加一，事件循环下一拍所有登记项都会重新上报一遍。
+///
+/// `gen` 在正常用户路径上永远是 0（没有任何绑定依赖它），不会带来额外开销。
+export global TargetBus {
+    in-out property <int> gen: 0;
+    callback register(Target);
+}

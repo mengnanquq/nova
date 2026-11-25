@@ -15,7 +15,7 @@
 //! `Timer` 只是把真实窗口的时间增量喂回视图模型（见 `pages::player::TICK_INTERVAL`）。
 
 import { Theme } from "theme.slint";
-import { PlayerData, TrackData } from "models.slint";
+import { PlayerData, Target, TargetBus, TrackData } from "models.slint";
 
 // 播放三角。官方 `.watch-video .svg-icon.svg-icon-nfplayerPlay{width:1.05555556em;height:1.22222222em}`。
 // `Path` 会按 width/height 等比缩放（`fit` 默认 contain），所以外框给官方比例即可。
@@ -333,6 +333,24 @@ component TrackRow inherits Rectangle {
     in property <TrackData> track;
     in property <bool> selected: root.track.selected;
     callback activated();
+    // 调试通道：菜单行是重复元素，自己登记自己的目标。
+    in property <string> target-id: "";
+    in property <string> target-label: "";
+    in property <bool> targets-visible: true;
+    property <int> target-gen: TargetBus.gen;
+    changed target-gen => {
+        if (root.targets-visible && root.visible && root.target-id != "") {
+            TargetBus.register({
+                id: root.target-id,
+                kind: "button",
+                label: root.target-label,
+                x: root.absolute-position.x,
+                y: root.absolute-position.y,
+                width: root.width,
+                height: root.height,
+            });
+        }
+    }
 
     height: Theme.player-control-size;
     border-radius: Theme.radius-poster;
@@ -389,6 +407,22 @@ component TrackRow inherits Rectangle {
 component OffRow inherits Rectangle {
     in property <bool> selected;
     callback activated();
+    in property <string> target-id: "";
+    in property <bool> targets-visible: true;
+    property <int> target-gen: TargetBus.gen;
+    changed target-gen => {
+        if (root.targets-visible && root.visible && root.target-id != "") {
+            TargetBus.register({
+                id: root.target-id,
+                kind: "button",
+                label: "关闭字幕",
+                x: root.absolute-position.x,
+                y: root.absolute-position.y,
+                width: root.width,
+                height: root.height,
+            });
+        }
+    }
 
     height: Theme.player-control-size;
     border-radius: Theme.radius-poster;
@@ -430,6 +464,22 @@ component OffRow inherits Rectangle {
 component ActionRow inherits Rectangle {
     in property <string> label: "";
     callback activated();
+    in property <string> target-id: "";
+    in property <bool> targets-visible: true;
+    property <int> target-gen: TargetBus.gen;
+    changed target-gen => {
+        if (root.targets-visible && root.visible && root.target-id != "") {
+            TargetBus.register({
+                id: root.target-id,
+                kind: "button",
+                label: root.label,
+                x: root.absolute-position.x,
+                y: root.absolute-position.y,
+                width: root.width,
+                height: root.height,
+            });
+        }
+    }
 
     height: Theme.player-menu-row;
     border-radius: Theme.radius-poster;
@@ -468,6 +518,9 @@ component TrackMenu inherits Rectangle {
     callback close-activated();
     callback delay-step(float);
     callback external-subtitle();
+    // 调试通道：本菜单的目标 id 前缀（音轨 / 字幕两套）。
+    in property <string> target-prefix: "";
+    in property <bool> targets-visible: true;
 
     property <int> row-count: root.tracks.length + (root.show-close ? 1 : 0);
     property <length> actions-height: root.show-subtitle-actions
@@ -500,6 +553,8 @@ component TrackMenu inherits Rectangle {
         }
 
         OffRow {
+            target-id: root.target-prefix + "off";
+            targets-visible: root.targets-visible;
             // 用 `visible` + 高度归零代替 `if` 条件元素：布局数学一致，
             // 也不会在 software renderer 下让紧随其后的行留下合成接缝。
             visible: root.show-close;
@@ -513,6 +568,9 @@ component TrackMenu inherits Rectangle {
 
         for item in root.tracks : TrackRow {
             track: item;
+            target-id: root.target-prefix + "row." + item.index;
+            target-label: item.label;
+            targets-visible: root.targets-visible;
             activated => {
                 root.item-selected(item.index);
             }
@@ -531,6 +589,8 @@ component TrackMenu inherits Rectangle {
 
         if root.show-subtitle-actions : ActionRow {
             label: "字幕延迟 −0.5s";
+            target-id: root.target-prefix + "delay-down";
+            targets-visible: root.targets-visible;
             activated => {
                 root.delay-step(-0.5);
             }
@@ -538,6 +598,8 @@ component TrackMenu inherits Rectangle {
 
         if root.show-subtitle-actions : ActionRow {
             label: "字幕延迟 +0.5s";
+            target-id: root.target-prefix + "delay-up";
+            targets-visible: root.targets-visible;
             activated => {
                 root.delay-step(0.5);
             }
@@ -545,6 +607,8 @@ component TrackMenu inherits Rectangle {
 
         if root.show-subtitle-actions : ActionRow {
             label: "加载外挂字幕…";
+            target-id: root.target-prefix + "external";
+            targets-visible: root.targets-visible;
             activated => {
                 root.external-subtitle();
             }
@@ -712,6 +776,124 @@ export component PlayerOverlay inherits Rectangle {
 
     background: transparent;
 
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 传输控件的几何都来自这里的元素；菜单行（音轨 / 字幕）与错误卡的重试按钮
+    // 在条件子树里，由各自登记。控制层隐藏时这些坐标点不动任何东西，所以按
+    // `controls-visible` 关掉登记。
+    out property <[Target]> targets: [
+        {
+            id: "player.back",
+            kind: "button",
+            label: "返回",
+            x: back-area.absolute-position.x,
+            y: back-area.absolute-position.y,
+            width: back-area.width,
+            height: back-area.height,
+        },
+        {
+            id: "player.play-pause",
+            kind: "toggle",
+            label: root.data.playing ? "暂停" : "播放",
+            x: play-btn.absolute-position.x,
+            y: play-btn.absolute-position.y,
+            width: play-btn.width,
+            height: play-btn.height,
+        },
+        {
+            id: "player.volume",
+            kind: "slider",
+            label: "音量 " + root.data.volume-text,
+            x: vol.absolute-position.x,
+            y: vol.absolute-position.y,
+            width: vol.width,
+            height: vol.height,
+        },
+        {
+            id: "player.seek-back",
+            kind: "button",
+            label: "-15s",
+            x: seek-back-btn.absolute-position.x,
+            y: seek-back-btn.absolute-position.y,
+            width: seek-back-btn.width,
+            height: seek-back-btn.height,
+        },
+        {
+            id: "player.seek-forward",
+            kind: "button",
+            label: "+15s",
+            x: seek-forward-btn.absolute-position.x,
+            y: seek-forward-btn.absolute-position.y,
+            width: seek-forward-btn.width,
+            height: seek-forward-btn.height,
+        },
+        {
+            id: "player.subtitles",
+            kind: "toggle",
+            label: "字幕",
+            x: subs-btn.absolute-position.x,
+            y: subs-btn.absolute-position.y,
+            width: subs-btn.width,
+            height: subs-btn.height,
+        },
+        {
+            id: "player.audio",
+            kind: "toggle",
+            label: "音轨",
+            x: audio-btn.absolute-position.x,
+            y: audio-btn.absolute-position.y,
+            width: audio-btn.width,
+            height: audio-btn.height,
+        },
+        {
+            id: "player.rate",
+            kind: "button",
+            label: root.data.rate-text,
+            x: rate-btn.absolute-position.x,
+            y: rate-btn.absolute-position.y,
+            width: rate-btn.width,
+            height: rate-btn.height,
+        },
+        {
+            id: "player.fullscreen",
+            kind: "toggle",
+            label: root.fullscreen ? "退出全屏" : "全屏",
+            x: fs-btn.absolute-position.x,
+            y: fs-btn.absolute-position.y,
+            width: fs-btn.width,
+            height: fs-btn.height,
+        },
+        {
+            id: "player.time",
+            kind: "toggle",
+            label: root.data.time-text,
+            x: time-area.absolute-position.x,
+            y: time-area.absolute-position.y,
+            width: time-area.width,
+            height: time-area.height,
+        },
+        {
+            id: "player.progress",
+            kind: "slider",
+            label: root.data.time-line,
+            x: progress.absolute-position.x,
+            y: progress.absolute-position.y,
+            width: progress.width,
+            height: progress.height,
+        },
+    ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.data.controls-visible && root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
+
     property <bool> controls-visible: root.data.controls-visible;
     // ---- 控制层显隐：opacity 过渡 ----
     //
@@ -861,6 +1043,21 @@ export component PlayerOverlay inherits Rectangle {
 
     // ---- 错误卡 ----
     if root.data.has-error : Rectangle {
+        // 调试通道：重试按钮只在错误卡里存在，自己登记。
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible) {
+                TargetBus.register({
+                    id: "player.retry",
+                    kind: "button",
+                    label: root.data.error-action,
+                    x: retry-area.absolute-position.x,
+                    y: retry-area.absolute-position.y,
+                    width: retry-area.width,
+                    height: retry-area.height,
+                });
+            }
+        }
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: Theme.player-error-width;
@@ -1020,7 +1217,7 @@ export component PlayerOverlay inherits Rectangle {
             }
 
             // 第二行：进度条（3.3em = 53px 命中区）。
-            PlayerProgress {
+            progress := PlayerProgress {
                 height: Theme.player-hit-height;
                 played: root.shown-ratio;
                 buffered: max(root.data.buffered, root.shown-ratio);
@@ -1067,14 +1264,14 @@ export component PlayerOverlay inherits Rectangle {
                 cross-axis-alignment: center;
 
                 // ---- 左组 ----
-                PlayButton {
+                play-btn := PlayButton {
                     playing: root.data.playing;
                     clicked => {
                         root.play-pause();
                     }
                 }
 
-                VolumeControl {
+                vol := VolumeControl {
                     volume: root.data.volume;
                     muted: root.data.muted;
 
@@ -1089,14 +1286,14 @@ export component PlayerOverlay inherits Rectangle {
 
                 // 官方图标是 ±10s（`nfplayerBackTen` / `nfplayerFastForward`）；我们是 ±15s
                 // （与键盘 ←/→ 一致），形态统一但步长是我们的选择，见 §11.6。
-                TransportButton {
+                seek-back-btn := TransportButton {
                     label: "-15s";
                     clicked => {
                         root.seek-relative(-15);
                     }
                 }
 
-                TransportButton {
+                seek-forward-btn := TransportButton {
                     label: "+15s";
                     clicked => {
                         root.seek-relative(15);
@@ -1110,7 +1307,7 @@ export component PlayerOverlay inherits Rectangle {
                 }
 
                 // ---- 右组 ----
-                TransportButton {
+                subs-btn := TransportButton {
                     label: "字幕";
                     active: root.data.subtitle-menu-open;
                     clicked => {
@@ -1118,7 +1315,7 @@ export component PlayerOverlay inherits Rectangle {
                     }
                 }
 
-                TransportButton {
+                audio-btn := TransportButton {
                     label: "音轨";
                     active: root.data.audio-menu-open;
                     clicked => {
@@ -1128,14 +1325,14 @@ export component PlayerOverlay inherits Rectangle {
 
                 // 倍速：官方有对应控件（`.PlayerControlsNeo__core-controls .button-nfplayerSpeed` +
                 // `.speed-controller` 弹层），不是我们自加的。
-                TransportButton {
+                rate-btn := TransportButton {
                     label: root.data.rate-text;
                     clicked => {
                         root.rate-cycle();
                     }
                 }
 
-                TransportButton {
+                fs-btn := TransportButton {
                     label: root.fullscreen ? "退出全屏" : "全屏";
                     clicked => {
                         root.fullscreen-toggle();
@@ -1188,6 +1385,8 @@ export component PlayerOverlay inherits Rectangle {
         y: root.height - root.progress-top - Theme.space-4 - self.height;
         heading: "音轨";
         tracks: root.data.audio-tracks;
+        target-prefix: "player.menu.audio.";
+        targets-visible: root.data.controls-visible;
 
         item-selected(index) => {
             root.audio-selected(index);
@@ -1200,6 +1399,8 @@ export component PlayerOverlay inherits Rectangle {
         y: root.height - root.progress-top - Theme.space-4 - self.height;
         heading: "字幕";
         tracks: root.data.subtitle-tracks;
+        target-prefix: "player.menu.subtitle.";
+        targets-visible: root.data.controls-visible;
         show-close: true;
         close-selected: root.data.subtitles-off;
         show-subtitle-actions: true;

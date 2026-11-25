@@ -7,6 +7,7 @@
 //! 不遮挡导航栏。贴顶、方角、高度 48。
 
 import { Theme } from "../theme.slint";
+import { TargetBus } from "../models.slint";
 
 export component Banner inherits Rectangle {
     // 语义级别：0 info / 1 warning / 2 danger。
@@ -73,6 +74,23 @@ export component Banner inherits Rectangle {
             TouchArea {
                 clicked => {
                     root.action();
+                }
+            }
+
+            // 调试通道：横幅动作按钮只在 `action-label` 非空时实例化，
+            // 由这块自己登记（id 固定 `banner.action`）。
+            property <int> target-gen: TargetBus.gen;
+            changed target-gen => {
+                if (root.visible) {
+                    TargetBus.register({
+                        id: "banner.action",
+                        kind: "button",
+                        label: root.action-label,
+                        x: self.absolute-position.x,
+                        y: self.absolute-position.y,
+                        width: self.width,
+                        height: self.height,
+                    });
                 }
             }
         }

@@ -6,7 +6,7 @@
 //! .slint 只做“按键 → 意图编号”的映射与页面切换；焦点索引、导航栈都在 Rust 里。
 
 import { Theme } from "theme.slint";
-import { HomeData, LibraryData, DetailData, PlayerData, SearchData } from "models.slint";
+import { HomeData, LibraryData, DetailData, PlayerData, SearchData, Target, TargetBus } from "models.slint";
 import { HomePage } from "home.slint";
 import { LibraryPage } from "library.slint";
 import { DetailPage } from "detail.slint";
@@ -16,6 +16,8 @@ import { Banner } from "components/banner.slint";
 import { AddServerDialog } from "components/add_server.slint";
 
 export { Theme }
+// 调试通道的目标注册总线：Rust 侧要能读写 `gen` 并安装 `register` 回调。
+export { TargetBus }
 
 export component AppWindow inherits Window {
     // 窗口初始逻辑宽（真实启动 1280×800）。绑定只作初始值：用户手动缩窗时
@@ -140,6 +142,16 @@ export component AppWindow inherits Window {
     // 6 张 240 宽海报 + 12px 间距正好铺满，所以 1920 也是 6 列（不是 7）。
     // 媒体库 / 搜索页 / 键盘焦点数学必须用同一个数，否则方向键步长与画面不符。
     out property <int> grid-columns: 6;
+
+    // ---- 调试通道：当前页面的可交互目标（见 docs/ui-architecture.md）----
+    // 只含"当前页面直接摆放、常驻"的控件（即各页 `targets` 数组）。重复元素
+    // （卡片 / 标签 / 菜单行）与条件子树（hero / 空态 / 横幅 / 对话框）在 Slint 1.19
+    // 里没法拼进数组，它们通过 `TargetBus` 登记；调试通道在 Rust 侧把两路合并。
+    out property <[Target]> targets: root.page == 0 ? home-page.targets
+        : root.page == 1 ? lib-page.targets
+        : root.page == 2 ? detail-page.targets
+        : root.page == 3 ? player-page.targets
+        : search-page.targets;
     // testing 快照用：压缩首页 billboard，让行区进入首屏。
     in-out property <float> billboard-ratio: 0.88;
 
@@ -459,7 +471,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            PlayerShellPage {
+            player-page := PlayerShellPage {
                 width: parent.width;
                 height: parent.height;
                 visible: root.page == 3;
@@ -577,6 +589,11 @@ export component AppWindow inherits Window {
     }
 
     out property <length> home-scroll-y: home-page.scroll-y;
+    // 测试 / 调试用：详情页的版本下拉是否展开、「我的列表」是否已加入
+    // （调试状态摘要要读；两者都只存在于 .slint 局部状态里）。
+    out property <bool> detail-drop-open: detail-page.drop-open;
+    out property <bool> detail-in-my-list: detail-page.in-my-list;
+    out property <int> debug-nav-tabs: home-page.debug-nav-tabs;
     out property <length> home-content-h: home-page.content-h;
 
     // “添加服务器”对话框：绝对定位覆盖层（不进布局器，关闭后零残留）。

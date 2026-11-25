@@ -38,6 +38,11 @@ export component PosterGrid inherits Rectangle {
     // 点开一张卡：参数是条目 id。
     callback open(string);
 
+    // ---- 调试通道：网格里每张卡的 id 前缀（`"library."` / `"search."`）----
+    in property <string> target-prefix: "";
+    // 网格当前是否真的可以点（搜索页非 Ready 态时关掉，避免登记到空/错误态上）。
+    in property <bool> targets-visible: true;
+
     // ---- 几何（媒体库与搜索页都只读这些）----
     // 列宽（同时也是海报区宽，含外框内衬）。
     out property <length> card-width: (root.width - root.content-gutter * 2
@@ -109,6 +114,9 @@ export component PosterGrid inherits Rectangle {
         card: card;
         card-width: root.card-width;
         image-height: root.poster-height;
+        target-id: root.target-prefix + "card." + i;
+        target-label: card.title;
+        targets-visible: root.targets-visible;
         clicked => {
             root.open(card.id);
         }

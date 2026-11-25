@@ -9,7 +9,7 @@
 //! （`CardZoom`），行内基础卡片尺寸恒定，布局零跳动。
 
 import { Theme } from "theme.slint";
-import { CardData, HomeData } from "models.slint";
+import { CardData, HomeData, Target, TargetBus } from "models.slint";
 import { Navbar } from "navbar.slint";
 import { PosterCard } from "poster_card.slint";
 import { CardZoom } from "card_zoom.slint";
@@ -34,6 +34,23 @@ component CardRow inherits Rectangle {
     // 用户是否已开始导航（见 `HomePage.nav-active`）：未激活时不放大焦点卡。
     in property <bool> nav-active: false;
     callback open-item(string);
+
+    // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
+    // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
+    // 所以本行自己登记：卡片由 `PosterCard` 登记，"查看全部"与左右箭头在这里登记。
+    in property <string> target-prefix: "";
+    in property <bool> targets-visible: true;
+    out property <[Target]> targets: [
+        {
+            id: root.target-prefix + "more",
+            kind: "button",
+            label: "查看全部 ›",
+            x: more-area.absolute-position.x,
+            y: more-area.absolute-position.y,
+            width: more-area.width,
+            height: more-area.height,
+        },
+    ];
 
     // 图区宽 / 图区高（"图高"）：**不含**卡下标题。
     property <length> poster-width: root.portrait ? Theme.card-portrait-w : Theme.card-landscape-w;
@@ -176,6 +193,9 @@ component CardRow inherits Rectangle {
                 image-height: root.poster-height;
                 // 首页行是横版集数卡：官方 `li` 有 8px 内衬 + 2px 描边。
                 framed: true;
+                target-id: root.target-prefix + "card." + i;
+                target-label: card.title;
+                targets-visible: root.targets-visible;
                 clicked => {
                     root.open-item(card.id);
                 }
@@ -226,6 +246,47 @@ component CardRow inherits Rectangle {
     out property <length> arrow-y: arrow-left.y;
     // 测试探针：卡下标题的下沿（放大卡上沿必须不低于它 = 不遮挡行标题）。
     out property <length> row-title-bottom: root.rise + Theme.section-title-height;
+    // 把本轮 `targets` 与左右箭头登记到总线（箭头只在悬停/有焦点时可见，
+    // 隐藏时点击没有意义，所以按可见性登记）。
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.targets-visible && root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
+    property <int> arrows-target-gen: TargetBus.gen;
+    changed arrows-target-gen => {
+        if (root.targets-visible && root.visible) {
+            if (arrow-left.visible) {
+                TargetBus.register({
+                    id: root.target-prefix + "left",
+                    kind: "scroll",
+                    label: "向左滚动",
+                    x: arrow-left-area.absolute-position.x,
+                    y: arrow-left-area.absolute-position.y,
+                    width: arrow-left-area.width,
+                    height: arrow-left-area.height,
+                });
+            }
+            if (arrow-right.visible) {
+                TargetBus.register({
+                    id: root.target-prefix + "right",
+                    kind: "scroll",
+                    label: "向右滚动",
+                    x: arrow-right-area.absolute-position.x,
+                    y: arrow-right-area.absolute-position.y,
+                    width: arrow-right-area.width,
+                    height: arrow-right-area.height,
+                });
+            }
+        }
+    }
+
     // 测试探针：图宽 / 图高 / 卡片总高。
     out property <length> poster-width-probe: root.poster-width;
     out property <length> poster-height-probe: root.poster-height;
@@ -328,6 +389,13 @@ export component HomePage inherits Rectangle {
     callback search-escape();
     // 空状态的“连接服务器”：真正的连接流程在上层（这里只发回调）。
     callback connect-server();
+
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 首页自己直接摆放的控件全在条件子树里（hero 按钮）或是子组件（顶栏 / 卡片行 /
+    // 空态），Slint 1.19 的数组属性无法拼接，所以都走 `TargetBus` 登记；
+    // 这里的声明式数组只留"页面直接摆放且常驻"的控件——首页目前没有。
+    out property <[Target]> targets: [];
+    out property <int> debug-nav-tabs: nav.tabs.length;
 
     /// 把焦点交给搜索输入框（Ctrl+F / 点击搜索图标时由上层调到这里）。
     public function focus-input() {
@@ -532,6 +600,32 @@ export component HomePage inherits Rectangle {
                             HorizontalLayout {
                                 spacing: Theme.space-3;
 
+                            // 调试通道：hero 的两个按钮在条件子树里（只有有简介时才实例化），
+                            // 只能由这块自己登记（id 固定 `home.hero.*`）。
+                            property <int> target-gen: TargetBus.gen;
+                            changed target-gen => {
+                                if (root.visible) {
+                                    TargetBus.register({
+                                        id: "home.hero.play",
+                                        kind: "button",
+                                        label: "▶  播放",
+                                        x: hero-play-area.absolute-position.x,
+                                        y: hero-play-area.absolute-position.y,
+                                        width: hero-play-area.width,
+                                        height: hero-play-area.height,
+                                    });
+                                    TargetBus.register({
+                                        id: "home.hero.info",
+                                        kind: "button",
+                                        label: "更多信息",
+                                        x: hero-info-area.absolute-position.x,
+                                        y: hero-info-area.absolute-position.y,
+                                        width: hero-info-area.width,
+                                        height: hero-info-area.height,
+                                    });
+                                }
+                            }
+
                             // ▶ 播放：白底黑字。
                             Rectangle {
                                 width: Theme.play-button-width;
@@ -699,6 +793,8 @@ export component HomePage inherits Rectangle {
             row0 := CardRow {
                 width: parent.width;
                 visible: root.continue-count > 0;
+                target-prefix: "home.row.continue.";
+                targets-visible: root.visible;
                 title: "继续观看";
                 cards: root.data.continue-watching;
                 focused-index: root.continue-focus;
@@ -712,6 +808,8 @@ export component HomePage inherits Rectangle {
             row1 := CardRow {
                 width: parent.width;
                 visible: root.recent-count > 0;
+                target-prefix: "home.row.recent.";
+                targets-visible: root.visible;
                 title: "最近添加";
                 portrait: true;
                 cards: root.data.recently-added;
@@ -723,10 +821,12 @@ export component HomePage inherits Rectangle {
             }
 
             // ---- 各库前 20 条（16:9，标题 = 库名）----
-            for row-data in root.data.library-rows :
+            for row-data[ri] in root.data.library-rows :
                 CardRow {
                     width: parent.width;
                     visible: row-data.cards.length > 0;
+                    target-prefix: "home.row.lib." + ri + ".";
+                    targets-visible: root.visible;
                     title: row-data.title;
                     cards: row-data.cards;
                     open-item(id) => {
@@ -740,6 +840,8 @@ export component HomePage inherits Rectangle {
         EmptyState {
             width: parent.width;
             height: parent.height;
+            target-prefix: "home.";
+            targets-visible: root.visible;
             title: "媒体库还是空的";
             message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
             primary-label: "连接服务器";
@@ -761,6 +863,8 @@ export component HomePage inherits Rectangle {
         tabs: root.data.tabs;
         current-index: root.data.current-tab;
         scrolled: !root.data.empty && flick.content-y < -40px;
+        target-prefix: "home.";
+        targets-visible: root.visible;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {

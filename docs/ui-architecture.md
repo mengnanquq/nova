@@ -105,6 +105,52 @@ pub struct Navigator { /* 栈 + back() */ }
 网格几何只有一份：`ui/poster_grid.slint`（媒体库与搜索页共用 6 列 / `content-gutter` /
 `card-gap` / 5:7 卡 / `CardZoom` 覆盖层）。改列数或卡宽只改这一个文件。
 
+## 可交互目标清单（`Target`）：可点元素的事实来源
+
+界面上"用户能点的东西"有一份**显式清单**，定义在 `ui/models.slint`：
+
+```slint
+export struct Target {
+    id: string;        // "library.sort" / "home.row.continue.card.2"
+    kind: string;      // button | toggle | input | card | tab | slider | scroll
+    label: string;     // 界面上看得见的文字（报告/无障碍用）
+    x: length; y: length;   // 窗口逻辑像素（来自元素的 absolute-position，直接可点）
+    width: length; height: length;
+}
+```
+
+这不是"调试彩蛋"，而是**新增控件的登记义务**：
+
+- 每个页面组件（`HomePage` / `LibraryPage` / `SearchPage` / `DetailPage` /
+  `PlayerShellPage` / `Navbar` / `EmptyState` / `Banner` / `AddServerDialog`）都有一个
+  `out property <[Target]> targets`，用数组字面量声明自己**直接摆放且常驻**的可点控件；
+- `AppWindow.targets` 是"当前页面的那份清单"（非当前页为空）；
+- **重复元素**（卡片 / 库标签 / 版本行 / 音轨字幕行）和**条件子树**（hero 按钮 / 空态 /
+  横幅动作 / 对话框 / 菜单）没法写进父组件的数组（Slint 1.19 的数组属性没有推导、没有拼接），
+  它们在 `TargetBus.gen` 变化时调用 `TargetBus.register(...)` 自报坐标；
+- 这两路在 `nova-ui` 的 `App::targets()` 里合并、按当前页命名空间过滤、去掉被窗口裁掉的项。
+
+为什么用 `absolute-position` 而不是手写偏移：坐标永远跟着布局/滚动走，改布局不会让清单失准。
+
+**硬性约定**（由测试强制）：
+
+1. 新增一个 `TouchArea` 必须要么登记成 `Target`（在所属组件的 `targets` 数组或登记回调里），
+   要么在 `crates/nova-ui/tests/interaction_targets.rs` 的 `TOUCH_AREAS` 表里写明
+   **为什么它不是可枚举控件**（例如"面板的事件拦截层，没有行为"）。
+2. `id` 必须带页面命名空间前缀（`home.` / `library.` / `search.` / `detail.` / `player.`），
+   浮层用 `banner.` / `dialog.`；同一窗口内唯一。
+3. `kind` 只能是 `button` / `toggle` / `input` / `card` / `tab` / `slider` / `scroll`。
+4. 目标必须是"真的能点到"的矩形：宽高为正、中心点在窗口内。
+
+新增控件的检查清单：
+
+- [ ] 控件有稳定的 `id`（列表项带下标或条目 id）；
+- [ ] `label` 是界面上真的看得见的文字（不是内部字段名）；
+- [ ] `--debug-socket` 的 `targets` 能看到它，`click` 能点出它该有的效果；
+- [ ] `cargo test -p nova-ui --test interaction_targets` 通过（会检查 `TouchArea` 覆盖率）；
+- [ ] `cargo test -p nova-app --test interaction_sweep` 通过（新控件如果有行为，它必须让
+  "状态摘要"发生变化；否则要把理由写进该测试的 `KNOWN_DEAD`）。
+
 ## 图片契约
 
 界面**不下载图片**。它只做两件事：
@@ -164,6 +210,9 @@ pub struct Navigator { /* 栈 + back() */ }
    `window.take_snapshot()` 存 `target/snapshots/*.png`。这些 PNG 要能被人眼直接看，
    用来判断布局是否崩坏（不是像素级回归基线）。
 3. **键盘导航测试**：testing backend 发键事件，断言焦点索引与路由变化。
+4. **交互目标 / 交互扫描测试**：`interaction_targets.rs` 断言每个页面的目标清单完整
+   （含 `TouchArea` 覆盖率），`interaction_sweep.rs` 点每个目标并检查"死按钮"清单
+   （见 `docs/testing.md`）。
 
 如果 testing backend 在本机跑不起来（缺字体、缺后端），必须**如实报告**并退化为"启动真实窗口 + 截图"，
 不允许把"没验证"写成"通过"。

@@ -7,7 +7,7 @@
 //! HDR 片源只能在 mpv 侧色调映射到 SDR —— 界面文案写"色调映射"，不写"直通"。
 
 import { Theme } from "theme.slint";
-import { PlayerData } from "models.slint";
+import { PlayerData, Target } from "models.slint";
 import { PlayerOverlay } from "player_overlay.slint";
 
 export component PlayerShellPage inherits Rectangle {
@@ -38,6 +38,11 @@ export component PlayerShellPage inherits Rectangle {
     callback subtitle-delay(float);
     callback subtitle-external();
 
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 播放页的控件全在 `PlayerOverlay` 里（子组件），本页自己不直接摆放控件，
+    // 所以声明式数组为空；`PlayerOverlay` 会把自己的目标登记到 `TargetBus`。
+    out property <[Target]> targets: [];
+
     background: Theme.player-bg;
 
     // 视频画布：先铺黑底，起播时不会闪白。
@@ -46,7 +51,12 @@ export component PlayerShellPage inherits Rectangle {
         y: 0;
         width: 100%;
         height: 100%;
-        background: Theme.player-bg;
+        // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 播放页的控件全在 `PlayerOverlay` 里（子组件），本页自己不直接摆放控件，
+    // 所以声明式数组为空；`PlayerOverlay` 会把自己的目标登记到 `TargetBus`。
+    out property <[Target]> targets: [];
+
+    background: Theme.player-bg;
 
         // 首帧到达前 / 缓冲时保留的画面（由上层推入的背景图）。
         Image {

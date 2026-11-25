@@ -6,6 +6,7 @@
 //! 图标是胶片（Path 画的语义形状），不依赖字体里有没有某个字形。
 
 import { Theme } from "theme.slint";
+import { Target, TargetBus } from "models.slint";
 
 export component EmptyState inherits Rectangle {
     in property <string> title: "这里还没有内容";
@@ -14,6 +15,45 @@ export component EmptyState inherits Rectangle {
     in property <string> secondary-label: "";
     callback primary();
     callback secondary();
+
+    // ---- 调试通道：可交互目标（空态面板的主/次按钮）----
+    // 空态是条件子树（页面在"没有内容/搜索失败"时才实例化），所以自己登记。
+    in property <string> target-prefix: "";
+    in property <bool> targets-visible: true;
+    out property <[Target]> targets: root.primary-label == "" && root.secondary-label == ""
+        ? []
+        : [
+            {
+                id: root.target-prefix + "empty.primary",
+                kind: "button",
+                label: root.primary-label,
+                x: primary-area.absolute-position.x,
+                y: primary-area.absolute-position.y,
+                width: primary-area.width,
+                height: primary-area.height,
+            },
+            {
+                id: root.target-prefix + "empty.secondary",
+                kind: "button",
+                label: root.secondary-label,
+                x: secondary-area.absolute-position.x,
+                y: secondary-area.absolute-position.y,
+                width: secondary-area.width,
+                height: secondary-area.height,
+            },
+        ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.targets-visible && root.visible) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     background: transparent;
 

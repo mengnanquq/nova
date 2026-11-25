@@ -7,7 +7,7 @@
 //! 覆盖层按焦点/悬停索引定位绘制，后绘制盖住相邻卡片，布局零跳动。
 
 import { Theme } from "theme.slint";
-import { LibraryData } from "models.slint";
+import { LibraryData, Target, TargetBus } from "models.slint";
 import { Navbar } from "navbar.slint";
 import { PosterGrid } from "poster_grid.slint";
 import { EmptyState } from "empty_state.slint";
@@ -29,6 +29,34 @@ export component LibraryPage inherits Rectangle {
     callback search-submit();
     callback search-clear();
     callback search-escape();
+
+    // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
+    // 排序按钮是页面直接摆放、常驻的控件 → 声明式列出；网格卡片 / 顶栏标签 /
+    // 空态按钮在子组件或条件子树里 → 由它们自己登记到 `TargetBus`。
+    // 空库时排序条不显示（点了也没有意义），清单里也就不该出现。
+    out property <[Target]> targets: root.data.empty ? [] : [
+        {
+            id: "library.sort",
+            kind: "button",
+            label: root.data.sort-label + "  ▼",
+            x: sort-area.absolute-position.x,
+            y: sort-area.absolute-position.y,
+            width: sort-area.width,
+            height: sort-area.height,
+        },
+    ];
+
+    for target in root.targets : Rectangle {
+        width: 0px;
+        height: 0px;
+        visible: false;
+        property <int> target-gen: TargetBus.gen;
+        changed target-gen => {
+            if (root.visible && !root.data.empty) {
+                TargetBus.register(target);
+            }
+        }
+    }
 
     /// 把焦点交给搜索输入框（Ctrl+F / 点击搜索图标时由上层调到这里）。
     public function focus-input() {
@@ -124,6 +152,8 @@ export component LibraryPage inherits Rectangle {
                     x: 0;
                     y: 0;
                     width: parent.width;
+                    target-prefix: "library.";
+                    targets-visible: !root.data.empty;
                     nav-active: root.nav-active;
                     columns: root.columns;
                     grid-top: root.grid-y;
@@ -142,6 +172,8 @@ export component LibraryPage inherits Rectangle {
         EmptyState {
             width: parent.width;
             height: parent.height;
+            target-prefix: "library.";
+            targets-visible: root.visible;
             title: root.data.title + " 里还没有内容";
             message: "同步完成后，海报会出现在这里。";
             primary-label: "重新搜索";
@@ -159,6 +191,8 @@ export component LibraryPage inherits Rectangle {
         tabs: root.data.tabs;
         current-index: root.data.current-tab;
         scrolled: !root.data.empty && grid-flick.content-y < -40px;
+        target-prefix: "library.";
+        targets-visible: root.visible;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {

@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 
 use nova_core::{ItemId, MediaKind};
 use nova_images::DecodedImage;
@@ -32,9 +32,10 @@ use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
 use nova_ui::{
     AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
-    LibraryView, PlayerShellView, Route, SearchView,
+    LibraryView, PlayerShellView, Route, SearchView, TargetInfo,
 };
 use slint::ComponentHandle;
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 
@@ -52,6 +53,25 @@ const MAX_QUEUED_MESSAGES: usize = 4096;
 
 /// 搜索输入的防抖：停手 300ms 后才打服务端（本地缓存是即时的）。
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 调试通道定时器的节拍：命令在这个节拍上排队 / 执行 / 等待。
+const DEBUG_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// 调试命令最长等待（`wait` 的上限与调试线程回信超时对齐，留 1s 余量）。
+const DEBUG_WAIT_MAX_MS: u64 = 9_000;
+
+/// 一条待执行的调试命令。
+///
+/// `settle` 是还需要"让界面重新登记目标"的回合数：Slint 只会在事件循环的下一回合
+/// 重新求值依赖 `TargetBus.gen` 的绑定，登记回调要等那一拍才会把坐标报上来。
+/// 两轮是必需的——第一轮让已存在的元素上报，第一轮之后才创建的元素（刚展开的
+/// 菜单行、刚切页后的卡片）`gen` 的初值已经是新值，得再推一次才会触发 `changed`。
+struct DebugTask {
+    command: crate::debug::Command,
+    reply: mpsc::Sender<serde_json::Value>,
+    settle: u8,
+    wait_ms: u64,
+}
 
 /// 一次服务端搜索最多取多少条（与 `views::SEARCH_LIMIT` 一致）。
 const SEARCH_LIMIT: u32 = 60;
@@ -137,6 +157,8 @@ pub(crate) struct Shell {
     /// 后续网络请求、写缓存继续跑。任务正常结束后不主动清理（见
     /// [`Shell::abort_search_debounce`]）。
     search_debounce: RefCell<Option<JoinHandle<()>>>,
+    /// 媒体库当前的排序方式（点排序条循环切换；只作用于本地缓存）。
+    library_sort: RefCell<views::LibrarySort>,
 }
 
 /// 跨线程消息通道：队列 + 唤醒事件循环用的弱窗口句柄。
@@ -250,6 +272,7 @@ pub fn run_window(
         capture_out: Rc::clone(&capture_out),
         search_generation: Arc::new(AtomicU64::new(0)),
         search_debounce: RefCell::new(None),
+        library_sort: RefCell::new(views::LibrarySort::default()),
     });
     SHELL.with(|slot| {
         *slot.borrow_mut() = Some(Rc::clone(&shell));
@@ -292,43 +315,68 @@ pub fn run_window(
         crate::debug::serve(path, job_tx);
         let job_rx = std::sync::Arc::new(std::sync::Mutex::new(job_rx));
         let weak = Rc::downgrade(&shell);
+        // 需要"等一拍"的命令留在这里，下一拍继续（不阻塞 UI 线程）。
+        let pending: std::rc::Rc<RefCell<VecDeque<DebugTask>>> =
+            std::rc::Rc::new(RefCell::new(VecDeque::new()));
         let timer = slint::Timer::default();
-        timer.start(
-            slint::TimerMode::Repeated,
-            std::time::Duration::from_millis(50),
-            move || {
-                let Some(shell) = weak.upgrade() else {
-                    return;
-                };
-                // 命令：逐条在 UI 线程执行，回信给调试线程。
-                let jobs: Vec<crate::debug::Job> = match job_rx.lock() {
-                    Ok(receiver) => receiver.try_iter().collect(),
-                    Err(poisoned) => poisoned.into_inner().try_iter().collect(),
-                };
+        timer.start(slint::TimerMode::Repeated, DEBUG_TICK, move || {
+            let Some(shell) = weak.upgrade() else {
+                return;
+            };
+            // 命令：逐条在 UI 线程执行，回信给调试线程。
+            let jobs: Vec<crate::debug::Job> = match job_rx.lock() {
+                Ok(receiver) => receiver.try_iter().collect(),
+                Err(poisoned) => poisoned.into_inner().try_iter().collect(),
+            };
+            {
+                let mut queue = pending.borrow_mut();
                 for (command, reply) in jobs {
-                    let _ = reply.send(shell.debug_execute(command));
+                    queue.push_back(DebugTask {
+                        settle: if command.needs_settle() { 2 } else { 0 },
+                        wait_ms: command.wait_ms(),
+                        command,
+                        reply,
+                    });
                 }
-                // 自截：等回读结果到了再写盘。
-                let pending = shell.pending_shot.borrow().clone();
-                if let Some(path) = pending
-                    && let Some((frame, error)) = shell.host.borrow_mut().take_shot()
-                {
-                    *shell.pending_shot.borrow_mut() = None;
-                    match error {
-                        Some(error) => tracing::warn!(%error, "调试自截失败"),
-                        None => match player::gl::write_png(&path, &frame) {
-                            Ok(()) => tracing::info!(
-                                path = %path.display(),
-                                width = frame.width,
-                                height = frame.height,
-                                "调试自截已保存"
-                            ),
-                            Err(error) => tracing::warn!(%error, "调试自截写盘失败"),
-                        },
-                    }
+            }
+            let mut queue = std::mem::take(&mut *pending.borrow_mut());
+            let mut later = VecDeque::new();
+            let tick_ms = DEBUG_TICK.as_millis() as u64;
+            while let Some(mut task) = queue.pop_front() {
+                if task.wait_ms > tick_ms {
+                    task.wait_ms -= tick_ms;
+                    later.push_back(task);
+                } else if task.settle > 0 {
+                    // 让目标重新登记一遍，这一拍先不执行命令。
+                    shell.app.refresh_targets();
+                    task.settle -= 1;
+                    later.push_back(task);
+                } else {
+                    let reply = shell.debug_execute(task.command);
+                    let _ = task.reply.send(reply);
                 }
-            },
-        );
+            }
+            *pending.borrow_mut() = later;
+            // 自截：等回读结果到了再写盘。
+            let shot_path = shell.pending_shot.borrow().clone();
+            if let Some(path) = shot_path
+                && let Some((frame, error)) = shell.host.borrow_mut().take_shot()
+            {
+                *shell.pending_shot.borrow_mut() = None;
+                match error {
+                    Some(error) => tracing::warn!(%error, "调试自截失败"),
+                    None => match player::gl::write_png(&path, &frame) {
+                        Ok(()) => tracing::info!(
+                            path = %path.display(),
+                            width = frame.width,
+                            height = frame.height,
+                            "调试自截已保存"
+                        ),
+                        Err(error) => tracing::warn!(%error, "调试自截写盘失败"),
+                    },
+                }
+            }
+        });
         Some(timer)
     } else {
         None
@@ -562,6 +610,8 @@ impl Shell {
                         "title": view.title,
                         "count": view.cards.len(),
                         "current_tab": view.current_tab,
+                        "sort": view.sort_label,
+                        "first": view.cards.first().map(|card| card.title.clone()),
                     })),
                     "detail": state.detail.as_ref().map(|view| view.title.clone()),
                     "detail_geometry": detail_geometry,
@@ -636,12 +686,217 @@ impl Shell {
                 shell.app.ui().window().request_redraw();
                 serde_json::json!({ "ok": true, "queued": true, "path": path.display().to_string() })
             }
+            Cmd::Targets => {
+                {
+                    let home = shell.app.ui().get_home();
+                    use slint::Model as _;
+                    eprintln!(
+                        "DEBUG slint home tabs={} rows={} targetgen={}",
+                        home.tabs.row_count(),
+                        shell.app.ui().get_debug_nav_tabs(),
+                        home.library_rows.row_count(),
+                        shell.app.ui().global::<nova_ui::TargetBus>().get_gen(),
+                    );
+                }
+                let targets = shell.app.targets();
+                serde_json::json!({
+                    "ok": true,
+                    "page": page_name(shell.app.page()),
+                    "count": targets.len(),
+                    "targets": targets.iter().map(target_json).collect::<Vec<_>>(),
+                })
+            }
+            Cmd::Click { target, x, y } => match shell.resolve_point(target.as_deref(), x, y) {
+                Ok((x, y, resolved)) => match shell.pointer_at(x, y, true) {
+                    Ok(()) => serde_json::json!({
+                        "ok": true,
+                        "target": resolved.as_ref().map(|target| target.id.clone()),
+                        "kind": resolved.as_ref().map(|target| target.kind.clone()),
+                        "label": resolved.as_ref().map(|target| target.label.clone()),
+                        "x": x,
+                        "y": y,
+                        "page": page_name(shell.app.page()),
+                    }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                },
+                Err(reply) => reply,
+            },
+            Cmd::Hover { target, x, y } => match shell.resolve_point(target.as_deref(), x, y) {
+                Ok((x, y, resolved)) => match shell.pointer_at(x, y, false) {
+                    Ok(()) => serde_json::json!({
+                        "ok": true,
+                        "target": resolved.as_ref().map(|target| target.id.clone()),
+                        "x": x,
+                        "y": y,
+                    }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                },
+                Err(reply) => reply,
+            },
+            Cmd::Key { key } => match key_event_text(&key) {
+                Some(text) => {
+                    let result = shell.dispatch_key(text.clone());
+                    match result {
+                        Ok(()) => serde_json::json!({ "ok": true, "key": key }),
+                        Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                    }
+                }
+                None => serde_json::json!({
+                    "ok": false,
+                    "error": format!("unknown key: {key}"),
+                    "supported": [
+                        "Enter", "Escape", "Left", "Right", "Up", "Down", "Space", "Tab",
+                        "Backspace", "+ 单字符"
+                    ],
+                }),
+            },
+            Cmd::Type { text } => {
+                let mut typed = 0u32;
+                for character in text.chars() {
+                    let key = slint::SharedString::from(character.to_string());
+                    if shell.dispatch_key(key).is_err() {
+                        break;
+                    }
+                    typed += 1;
+                }
+                serde_json::json!({ "ok": true, "typed": typed, "text": text })
+            }
+            // `wait` 由调试定时器节拍负责"真的等"，这里只回结果。
+            Cmd::Wait { ms } => {
+                serde_json::json!({ "ok": true, "waited": ms.min(DEBUG_WAIT_MAX_MS) })
+            }
+            Cmd::Sweep => shell.sweep(false),
+            Cmd::Dead => shell.sweep(true),
             Cmd::Quit => {
                 let _ = shell.app.ui().hide();
                 let _ = slint::quit_event_loop();
                 serde_json::json!({ "ok": true, "quit": true })
             }
         }
+    }
+
+    /// 注入一个窗口事件（坐标是逻辑像素）。
+    fn dispatch(&self, event: WindowEvent) -> Result<(), String> {
+        self.app
+            .ui()
+            .window()
+            .dispatch_event_with_result(event)
+            .map(|_| ())
+            .map_err(|error| format!("注入事件失败：{error}"))
+    }
+
+    /// 移动指针；`click` 为真时再补按下 / 松开。
+    fn pointer_at(&self, x: f32, y: f32, click: bool) -> Result<(), String> {
+        let position = slint::LogicalPosition::new(x, y);
+        self.dispatch(WindowEvent::PointerMoved { position })?;
+        if click {
+            self.dispatch(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            })?;
+            self.dispatch(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// 发一次按键（按下 + 松开）。
+    fn dispatch_key(&self, text: slint::SharedString) -> Result<(), String> {
+        self.dispatch(WindowEvent::KeyPressed { text: text.clone() })?;
+        self.dispatch(WindowEvent::KeyReleased { text })
+    }
+
+    /// 把命令里的 `target` / `x,y` 解析成一个可以点的点。
+    fn resolve_point(
+        &self,
+        target: Option<&str>,
+        x: Option<f32>,
+        y: Option<f32>,
+    ) -> Result<(f32, f32, Option<TargetInfo>), serde_json::Value> {
+        if let (Some(x), Some(y)) = (x, y) {
+            return Ok((x, y, None));
+        }
+        let id = target.unwrap_or_default();
+        match self.app.target(id) {
+            Some(target) => {
+                let (x, y) = target.center();
+                Ok((x, y, Some(target)))
+            }
+            None => Err(self.unknown_target(id)),
+        }
+    }
+
+    /// 目标 id 不存在时的回信：附上前 20 个可用 id，方便脚本直接改。
+    fn unknown_target(&self, id: &str) -> serde_json::Value {
+        let available: Vec<String> = self
+            .app
+            .targets()
+            .iter()
+            .take(20)
+            .map(|target| target.id.clone())
+            .collect();
+        serde_json::json!({
+            "ok": false,
+            "error": format!("unknown target: {id}"),
+            "available": available,
+        })
+    }
+
+    /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
+    ///
+    /// Shell 额外做两件事：
+    /// - 扫描前记下窗口是否全屏（点 `player.fullscreen` 会真的切换窗口全屏），
+    ///   扫描后恢复，避免调试把窗口留在全屏；
+    /// - 扫描前没有播放器、扫描后有了（点到了 hero 的播放 / 详情页的播放），
+    ///   收掉 mpv 会话，避免后台继续解码。
+    fn sweep(&self, dead_only: bool) -> serde_json::Value {
+        let was_fullscreen = self.app.player_fullscreen();
+        let had_player = self.player.borrow().is_some();
+        let report = self.app.sweep();
+        if self.app.player_fullscreen() != was_fullscreen {
+            self.app.ui().window().set_fullscreen(was_fullscreen);
+        }
+        if !had_player && self.player.borrow().is_some() {
+            self.stop_playback();
+        }
+        let dead: Vec<serde_json::Value> = report
+            .dead()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "label": entry.label,
+                })
+            })
+            .collect();
+        let shown: Vec<serde_json::Value> = report
+            .entries
+            .iter()
+            .filter(|entry| !dead_only || !entry.changed)
+            .map(|entry| {
+                serde_json::json!({
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "label": entry.label,
+                    "changed": entry.changed,
+                    "restored": entry.restored,
+                    "before": entry.before,
+                    "after": entry.after,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "ok": true,
+            "page": report.page,
+            "count": report.entries.len(),
+            "changed": report.entries.iter().filter(|entry| entry.changed).count(),
+            "dead": dead,
+            "aborted": report.aborted,
+            "results": shown,
+        })
     }
 
     fn request_images(&self, keys: Vec<ImageKey>) {
@@ -656,6 +911,7 @@ impl Shell {
 
     /// 后台刷新一次，然后重建首页与第一个媒体库页。
     fn spawn_refresh(self: &Rc<Self>) {
+        eprintln!("DEBUG spawn_refresh");
         let local = Arc::clone(&self.local);
         let channel = Arc::clone(&self.channel);
         let images = Arc::clone(&self.images);
@@ -673,7 +929,11 @@ impl Shell {
                 move || -> Result<(HomeView, Option<LibraryView>), AppError> {
                     let home = build_local.home(None)?;
                     let library = match build_local.tabs().first() {
-                        Some(tab) => Some(build_local.library(&tab.id, None)?),
+                        Some(tab) => Some(build_local.library(
+                            &tab.id,
+                            None,
+                            views::LibrarySort::default(),
+                        )?),
                         None => None,
                     };
                     Ok((home, library))
@@ -980,6 +1240,11 @@ impl Shell {
             home,
             library,
         } = payload;
+        eprintln!(
+            "DEBUG apply_refresh tabs={} rows={}",
+            home.library_tabs.len(),
+            home.library_rows.len()
+        );
         self.app.set_home(&home);
         // 刷新后的连接状态同步到顶部横幅（过期 / 断开时出现，恢复后消失）。
         self.app.set_banner(status.banner_data());
@@ -1134,8 +1399,11 @@ impl Shell {
     }
 
     fn activate_tab(&self, library_id: &str) {
-        // 空 id 约定为「首页」标签：库标签要等刷新完成才出现，没有这个入口
+        // `HOME_TAB_ID` 是「首页」标签：库标签要等刷新完成才出现，没有这个入口
         // 用户进了媒体库就回不到首页。
+        //
+        // 这里必须**同时切页**：只重建首页数据的话，在媒体库/详情页点「首页」
+        // 除了后台数据刷新什么都不会发生（交互扫描会把它记成"死按钮"）。
         if library_id == crate::local::HOME_TAB_ID {
             if let Ok(home) = self.local.home(None) {
                 let keys = image_keys(&home, None, None);
@@ -1143,9 +1411,11 @@ impl Shell {
                 self.state.borrow_mut().home = home;
                 self.request_images(keys);
             }
+            self.app.show_home();
             return;
         }
-        match self.local.library(library_id, None) {
+        let sort = *self.library_sort.borrow();
+        match self.local.library(library_id, None, sort) {
             Ok(view) => {
                 let keys = view.image_keys();
                 let _ = self.app.open_library(&view);
@@ -1153,6 +1423,31 @@ impl Shell {
                 self.request_images(keys);
             }
             Err(error) => tracing::warn!(%error, "构建媒体库视图失败"),
+        }
+    }
+
+    /// 排序条：`最近添加 → 标题 A→Z → 标题 Z→A → 年份从新到旧` 循环。
+    ///
+    /// 只对本地缓存的条目排序并重建视图（离线也必须立刻生效）；数据来自
+    /// `Local::library`，它按当前 `library_sort` 排序。
+    fn cycle_library_sort(&self) {
+        let next = self.library_sort.borrow().next();
+        *self.library_sort.borrow_mut() = next;
+        let library_id = {
+            let state = self.state.borrow();
+            state.library.as_ref().map(|view| view.id.clone())
+        };
+        let Some(library_id) = library_id else {
+            tracing::debug!(sort = next.label(), "还没有媒体库视图，排序只记录状态");
+            return;
+        };
+        match self.local.library(&library_id, None, next) {
+            Ok(view) => {
+                tracing::info!(sort = next.label(), cards = view.cards.len(), "媒体库排序");
+                self.app.set_library(&view);
+                self.state.borrow_mut().library = Some(view);
+            }
+            Err(error) => tracing::warn!(%error, "按新排序重建媒体库失败"),
         }
     }
 
@@ -1286,8 +1581,12 @@ fn install_callbacks(shell: &Rc<Shell>) {
         });
     }
     {
-        shell.app.on_sort(|| {
-            tracing::debug!("排序条回调：本地缓存按标题排序，阶段 3 不提供切换");
+        // 排序条：点一下切到下一个排序方式，用本地缓存重建媒体库（不碰 provider）。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_sort(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.cycle_library_sort();
+            }
         });
     }
     {
@@ -1390,6 +1689,56 @@ fn install_callbacks(shell: &Rc<Shell>) {
                 shell.host.borrow_mut().set_player_active(false);
             }
         });
+    }
+}
+
+/// 页面名（调试回信里用，与 `docs/debugging.md` 的 `route` 说法一致）。
+fn page_name(page: nova_ui::Page) -> &'static str {
+    match page {
+        nova_ui::Page::Home => "home",
+        nova_ui::Page::Library => "library",
+        nova_ui::Page::Detail => "detail",
+        nova_ui::Page::Player => "player",
+        nova_ui::Page::Search => "search",
+    }
+}
+
+/// 一个目标 → 调试回信里的 JSON（字段名与任务书一致：`w` / `h`）。
+fn target_json(target: &TargetInfo) -> serde_json::Value {
+    serde_json::json!({
+        "id": target.id,
+        "kind": target.kind,
+        "label": target.label,
+        "x": target.x,
+        "y": target.y,
+        "w": target.width,
+        "h": target.height,
+    })
+}
+
+/// 调试命令里的键名 → Slint 的按键文本。
+///
+/// 命名键之外只接受**单个字符**（`"k"` / `"m"` / `"沙"` 这类）。
+fn key_event_text(name: &str) -> Option<slint::SharedString> {
+    let named = match name {
+        "Enter" | "Return" => Some(Key::Return),
+        "Escape" | "Esc" => Some(Key::Escape),
+        "Left" | "LeftArrow" => Some(Key::LeftArrow),
+        "Right" | "RightArrow" => Some(Key::RightArrow),
+        "Up" | "UpArrow" => Some(Key::UpArrow),
+        "Down" | "DownArrow" => Some(Key::DownArrow),
+        "Space" => Some(Key::Space),
+        "Tab" => Some(Key::Tab),
+        "Backspace" => Some(Key::Backspace),
+        _ => None,
+    };
+    if let Some(key) = named {
+        return Some(key.into());
+    }
+    let mut characters = name.chars();
+    match (characters.next(), characters.next()) {
+        (Some(character), None) => Some(character.to_string().into()),
+        _ => None,
     }
 }
 

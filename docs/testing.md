@@ -9,6 +9,61 @@
 | 集成测试（真实） | 对真实 Jellyfin 走完整流程：登录 → 媒体库 → 条目 → 资源 → 播放地址 | docker |
 | 真机渲染测试 | `spikes/slint-mpv-gl` 的 Windows/GPU 用例 | GPU + 显示会话 |
 
+## 交互目标与"死按钮"测试
+
+这两组测试对应一个真实事故：媒体库的「排序：最近添加 ▼」**点了没反应**——回调注册了，
+实现是空的（`tracing::debug!("…阶段 3 不提供切换")`），而当时没有任何测试能发现它。
+现在"界面能点哪些东西"是可断言的：
+
+| 文件 | 作用 |
+|---|---|
+| `crates/nova-ui/tests/interaction_targets.rs` | 目标清单本身：每页非空、id 唯一、`kind` 合法、矩形非零且在窗口内；**`TouchArea` 覆盖率**（见下）；点击后确实能产出新目标（排序/版本下拉） |
+| `crates/nova-app/tests/interaction_sweep.rs` | 行为：用真实 SQLite 缓存 + 无头后端，对每个目标"悬停 → 点击"，断言有足够多的目标产生状态变化，且"没反应"的目标必须出现在 `KNOWN_DEAD` 里 |
+
+运行：
+
+```bash
+cargo test -p nova-ui --test interaction_targets
+cargo test -p nova-app --test interaction_sweep
+```
+
+### `TouchArea` 覆盖率（不留白名单漏洞）
+
+`interaction_targets.rs` 会**扫描 `ui/**/*.slint`** 里所有 `TouchArea` 声明，逐个要求登记：
+
+```rust
+const TOUCH_AREAS: &[Case] = &[
+    Case { file: "library.slint", component: "LibraryPage", entry: "sort-area",
+           pages: &["library"], coverage: Coverage::Targets(&["library.sort"]) },
+    Case { file: "components/add_server.slint", component: "AddServerDialog",
+           entry: "<anonymous#1>", pages: &[],
+           coverage: Coverage::NoTarget("面板自身的事件拦截层：没有点击行为") },
+    …
+];
+```
+
+- 新增 `TouchArea` 而不登记 → `touch_areas_are_classified` 失败（列出所有未登记的项）；
+- `NoTarget` **必须写理由**（空理由会失败）；理由要能解释"为什么它不是可枚举控件"；
+- 登记表里列了但代码里已经不存在的项也会失败（改名/删除后要同步删掉）。
+
+### `KNOWN_DEAD` 的维护约定
+
+`interaction_sweep.rs` 里的 `KNOWN_DEAD` 是"**点击后状态没有任何变化**且已确认可以接受"的
+目标清单，每条带一行原因：
+
+```rust
+const KNOWN_DEAD: &[(&str, &str, &str)] = &[
+    ("library", "library.nav.tab.0", "点已经选中的「电影」标签：重建出同一份视图，同页空操作"),
+];
+```
+
+- `dead` **不是失败**：有的按钮只改局部状态（悬停态），有的是"点当前项"的空操作。
+- 但测试会双向核对：**出现新的 dead → 红灯**（多半是新按钮忘了接行为），
+  **清单里的项又活了 → 也红灯**（清单过时，删掉它）。
+- 加条目之前先问一句"这真的是设计如此，还是功能没写完？"——上面那个排序按钮当初
+  就是"回调空实现"，它应该被修掉，而不是写进白名单。
+- 真机上的完整清单用 `--debug-socket` 的 `sweep` / `dead` 命令拿（见 `docs/debugging.md`）。
+
 ## 起一个真实 Jellyfin
 
 ```bash
