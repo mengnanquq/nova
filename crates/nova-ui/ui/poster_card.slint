@@ -47,8 +47,13 @@ export component PosterCard inherits Rectangle {
     in property <bool> targets-visible: true;
     property <int> target-gen: TargetBus.gen;
     changed target-gen => {
-        if (root.targets-visible && root.visible && root.target-id != ""
-            && root.width > 0px && root.height > 0px) {
+        // 这里**不**再判宽高：
+        // - `App::targets()` 已经用 `TargetInfo::is_clickable()` 过滤过零尺寸（宽高为正、
+        //   中心在窗口内），重复过滤只会制造一类“本该登记却被挡掉”的漏项；
+        // - 登记是**一次性快照**：某个代次里一旦被条件挡掉，清单里就留下上一代的
+        //   旧坐标，直到下一次代次推进。实测刚切页 / 刚实例化的那一拍 `root.width`
+        //   可能还是 0，把合法卡片挡在门外。
+        if (root.targets-visible && root.visible && root.target-id != "") {
             TargetBus.register({
                 id: root.target-id,
                 kind: "card",

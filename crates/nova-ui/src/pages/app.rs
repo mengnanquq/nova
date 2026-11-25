@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use i_slint_core::window::WindowInner;
 use slint::{ComponentHandle, Model};
 
 use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
@@ -330,7 +331,6 @@ impl SweepReport {
 }
 
 /// 界面应用：拥有一个 `AppWindow`、导航栈、焦点与图片表。
-///
 pub struct App {
     ui: AppWindow,
     state: Rc<RefCell<State>>,
@@ -388,14 +388,19 @@ impl App {
 
     /// 让所有登记型目标（卡片 / 标签 / 菜单行 / 条件子树）重新上报一次。
     ///
-    /// 推进 `TargetBus.gen` 后，Slint 会在**下一个事件循环回合**重新求值所有
-    /// 依赖它的绑定并触发登记回调——调用方必须等一帧（真实窗口是调试定时器的
-    /// 下一拍，测试是 `mock_elapsed_time`）再读 [`App::targets`]。
+    /// 顺序不能颠倒：
+    ///
+    /// 1. **先实例化重复元素**（见 [`App::instantiate_items`]）。`for` 项是惰性创建的，
+    ///    推进 `gen` 只让**已存在**的元素重新求值，不会把实例创建出来；
+    /// 2. 再把 `staging` 推进 `targets`、推进 `TargetBus.gen`：Slint 会重新求值所有
+    ///    依赖它的绑定并触发登记回调——调用方必须等一拍（真实窗口是调试定时器的
+    ///    下一拍，测试是 `mock_elapsed_time`）再读 [`App::targets`]。
     ///
     /// 双缓冲：把上一代的结果推进 `targets`，清空 `staging` 收新一代，
     /// 再推进 `TargetBus.gen` 触发表达式重新求值。**不清空 `targets`**——
     /// 空窗期会让按 id 的点击随机失败（原因见 `staging` 字段的注释）。
     pub fn refresh_targets(&self) {
+        self.instantiate_items();
         {
             let mut staging = self.staging.borrow_mut();
             if !staging.is_empty() {
@@ -404,6 +409,24 @@ impl App {
         }
         let bus = self.ui.global::<TargetBus>();
         bus.set_gen(bus.get_gen().wrapping_add(1));
+    }
+
+    /// 把 item tree 里的重复元素实例化出来（惰性 `for` 项不会自己出现）。
+    ///
+    /// 为什么要这一步：Slint 1.19 的 `for`（`RepeatedItemTree`）是**惰性实例化**的，
+    /// 只有 item tree 被遍历——渲染、命中测试、或后端在出帧/处理输入前调用的
+    /// `ensure_instantiated`——才会 new 出实例。而 `TargetBus.gen` 只是让**已存在**的
+    /// 元素重新求值，它不会触发遍历。于是「刚切过去、还没渲染过一帧的页面」里
+    /// 一张卡都不存在，推进多少次代次也登记不上，调试通道按 id 点击就报
+    /// `unknown target`（实测：同一份代码，窗口出帧时正常；窗口被遮挡 / 最小化 /
+    /// 尚未出首帧时整页卡片在清单里“不存在”，而任意一次指针事件（命中测试）
+    /// 之后又立刻恢复）。
+    ///
+    /// 为什么直接调 `i-slint-core`：Slint 没有公开的「请布局 / 请实例化」API，
+    /// `WindowInner::ensure_tree_instantiated` 正是后端自己在渲染前用的那个入口
+    /// （它会创建 `for` 的实例，并把因此触发的 `changed` 回调跑掉）。
+    fn instantiate_items(&self) {
+        WindowInner::from_pub(self.ui.window()).ensure_tree_instantiated();
     }
 
     /// 当前页面的可交互目标（声明式清单 + 登记总线，按 id 去重并按 id 排序）。

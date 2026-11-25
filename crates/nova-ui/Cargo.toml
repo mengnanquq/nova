@@ -18,11 +18,12 @@ slint = { version = "1.19", default-features = false, features = [
     "compat-1-2",
 ] }
 
+i-slint-core = "1.19"
+
 [dev-dependencies]
 # 无头测试：testing backend 内嵌软件光栅器，配合 take_snapshot() 存 PNG。
 # 不用 slint 的 mcp/app 后端：那条路会额外引入 prost 等一大堆依赖。
 i-slint-backend-testing = { version = "1.19", features = ["renderer-software"] }
-i-slint-core = "1.19"
 png = "0.18"
 
 [features]

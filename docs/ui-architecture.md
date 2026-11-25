@@ -130,6 +130,16 @@ export struct Target {
   它们在 `TargetBus.gen` 变化时调用 `TargetBus.register(...)` 自报坐标；
 - 这两路在 `nova-ui` 的 `App::targets()` 里合并、按当前页命名空间过滤、去掉被窗口裁掉的项。
 
+**登记依赖实例化**：Slint 1.19 的 `for` 项是**惰性创建**的——只有 item tree 被遍历
+（渲染 / 命中测试 / `ensure_instantiated`）才会 new 出实例，而推进 `TargetBus.gen`
+只让**已存在**的元素重新求值。所以 `App::refresh_targets()` 先调
+`WindowInner::ensure_tree_instantiated()` 把重复元素实例化，再推进代次；
+否则“刚切过去、还没渲染过一帧的页面”里一张卡都不存在，清单会是空的
+（调试通道按 id 点击报 `unknown target`，而窗口一旦出帧/收到指针事件又“自己好了”）。
+旧版 `PosterCard` 还额外用 `width > 0 && height > 0` 门控登记，那层重复过滤会在
+“实例化完成但布局还没算”的那一拍把合法卡片挡掉，已删除（零尺寸/窗口外的项由
+`TargetInfo::is_clickable()` / `center_in_window()` 统一过滤）。
+
 为什么用 `absolute-position` 而不是手写偏移：坐标永远跟着布局/滚动走，改布局不会让清单失准。
 
 **硬性约定**（由测试强制）：
