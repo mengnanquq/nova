@@ -687,17 +687,6 @@ impl Shell {
                 serde_json::json!({ "ok": true, "queued": true, "path": path.display().to_string() })
             }
             Cmd::Targets => {
-                {
-                    let home = shell.app.ui().get_home();
-                    use slint::Model as _;
-                    eprintln!(
-                        "DEBUG slint home tabs={} rows={} targetgen={}",
-                        home.tabs.row_count(),
-                        shell.app.ui().get_debug_nav_tabs(),
-                        home.library_rows.row_count(),
-                        shell.app.ui().global::<nova_ui::TargetBus>().get_gen(),
-                    );
-                }
                 let targets = shell.app.targets();
                 serde_json::json!({
                     "ok": true,
@@ -911,7 +900,6 @@ impl Shell {
 
     /// 后台刷新一次，然后重建首页与第一个媒体库页。
     fn spawn_refresh(self: &Rc<Self>) {
-        eprintln!("DEBUG spawn_refresh");
         let local = Arc::clone(&self.local);
         let channel = Arc::clone(&self.channel);
         let images = Arc::clone(&self.images);
@@ -1240,11 +1228,6 @@ impl Shell {
             home,
             library,
         } = payload;
-        eprintln!(
-            "DEBUG apply_refresh tabs={} rows={}",
-            home.library_tabs.len(),
-            home.library_rows.len()
-        );
         self.app.set_home(&home);
         // 刷新后的连接状态同步到顶部横幅（过期 / 断开时出现，恢复后消失）。
         self.app.set_banner(status.banner_data());

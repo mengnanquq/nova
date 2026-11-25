@@ -411,16 +411,6 @@ impl App {
                 merged.insert(info.id.clone(), info);
             }
         }
-        if std::env::var("NOVA_DEBUG_TARGETS").is_ok() {
-            eprintln!(
-                "DEBUG merged nav: {:?}",
-                merged
-                    .values()
-                    .filter(|t| t.id.starts_with("home.nav"))
-                    .map(|t| (t.id.clone(), t.x, t.width))
-                    .collect::<Vec<_>>()
-            );
-        }
         let dialog_open = self.ui.get_add_server_open();
         let prefix = target_prefix(self.page());
         let mut out: Vec<TargetInfo> = merged
