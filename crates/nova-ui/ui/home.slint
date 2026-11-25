@@ -172,6 +172,8 @@ component CardRow inherits Rectangle {
                 card: card;
                 card-width: root.poster-width;
                 image-height: root.poster-height;
+                // 首页行是横版集数卡：官方 `li` 有 8px 内衬 + 2px 描边。
+                framed: true;
                 clicked => {
                     root.open-item(card.id);
                 }
@@ -189,6 +191,7 @@ component CardRow inherits Rectangle {
     // 放大覆盖层：按 zoom-index 画一张放大的卡（后绘制 → 盖住相邻卡片）。
     // 常驻实例 + visible 门控：不参与布局，测试可以稳定读到覆盖层几何。
     zoom-ov := CardZoom {
+        framed: true;
         property <int> zi: root.cards.length > 0
             ? clamp(root.zoom-index, 0, root.cards.length - 1) : 0;
         property <length> zw: root.poster-width * root.zoom-factor;

@@ -19,6 +19,8 @@ import { CardData } from "models.slint";
 import { PosterCard } from "poster_card.slint";
 
 export component CardZoom inherits Rectangle {
+    // 是否画横版集数卡的外框（内衬）。竖版海报卡无内衬，见 `PosterCard.framed`。
+    in property <bool> framed: false;
     in property <CardData> card;
     // 基础卡尺寸（放大前）：图区宽 / 图高。
     in property <length> base-width: 260px;
@@ -41,6 +43,7 @@ export component CardZoom inherits Rectangle {
         card-width: root.base-width;
         image-height: root.base-image-height;
         scale: root.zoom-factor;
+        framed: root.framed;
         // 点击/悬停接管分两阶段：放大没走完之前禁用（点击与悬停都穿透给下面的
         // 基础卡，避免"覆盖层一出现就抢走悬停"导致的抖动）；走到 80% 之后启用，
         // 指针在放大后的加宽区域里也能维持行激活。

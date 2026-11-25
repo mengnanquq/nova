@@ -4,7 +4,8 @@
 //! 基础卡片（官方 Netflix `li` 结构）：**海报在上、标题在卡片下方**。
 //!
 //! 尺寸（官方原文见 `theme.slint` 的 `card-caption-*`）：
-//! - `image-height` = 图高（海报区，含 8px 内衬 + 2px 描边，官方 240×336 的那张图）；
+//! - `image-height` = 图高（海报区）。竖版海报**无内衬**（官方 240×336 就是图本体），
+//!   横版集数卡有 8px 内衬 + 2px 描边（`framed: true`）；
 //! - 卡片总高 = 图高 + `Theme.card-caption-height`（标题块 = margin-top + 行高）；
 //! - 官方 `li` 的竖向合计（≥1920）：10.4 + 336 + 8 + 24 + 10.4 = 388.8。
 //!
@@ -26,6 +27,15 @@ export component PosterCard inherits Rectangle {
     in property <length> image-height: 390px;
     // 内部等比放大系数（1.0 = 未放大；放大覆盖层传 `zoom-factor`）。
     in property <float> scale: 1.0;
+    // 是否画"集数卡"外框（8px 内衬 + 2px 描边 + 半透明白底）。
+    //
+    // 官方有两种卡：
+    // - **横版集数卡**：`li 327×322`、`padding:8px`、`background:rgba(255,255,255,.1)`、
+    //   `border-radius:16px` → 缩略图实际 307×173（实测）；
+    // - **竖版海报卡**：`240×336` 的图本体就直接是 240×336，**没有内衬**，
+    //   圆角加在图上。
+    // 所以外框只给横版卡用，竖版卡必须关掉，否则 240 宽的卡里图只剩 220×316。
+    in property <bool> framed: false;
     // 是否接受指针输入：放大覆盖层在放大完成前要关掉，否则它会抢走基础卡的悬停
     // （悬停 → 覆盖层接管 → 基础卡失焦 → 还原 → 无限抖动）。
     in property <bool> interactive: true;
@@ -52,11 +62,12 @@ export component PosterCard inherits Rectangle {
         height: root.image-height * root.scale;
         clip: true;
         border-radius: Theme.radius-poster;
-        background: Theme.card-frame-bg;
-        border-width: Theme.card-frame-border-width;
+        background: root.framed ? Theme.card-frame-bg : transparent;
+        border-width: root.framed ? Theme.card-frame-border-width : 0px;
         border-color: Theme.card-frame-border;
-        property <length> content-inset: (Theme.card-frame-padding + Theme.card-frame-border-width)
-            * root.scale;
+        property <length> content-inset: root.framed
+            ? (Theme.card-frame-padding + Theme.card-frame-border-width) * root.scale
+            : 0px;
 
         // ---- 加载骨架（**近似：静态占位**）----
         //

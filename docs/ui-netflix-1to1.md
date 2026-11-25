@@ -46,7 +46,12 @@
 
 ## 3. 行与卡片交互
 
-1. 默认卡：海报 + 卡下标题，**无边框无阴影**（外框是 8px 内衬 + 2px 极淡描边，见 §7）。
+1. 默认卡：海报 + 卡下标题，**无边框无阴影**。官方两种卡要分开：
+   - 竖版海报卡（媒体库 / 搜索结果）：`240×336` 的图本体就是 `240×336`，**没有内衬**，
+     圆角加在图上 → `PosterCard { framed: false }`（默认）；
+   - 横版集数卡（首页行）：`li 327×322` 带 `padding:8px` + `rgba(255,255,255,.1)` 底 +
+     `2px rgba(255,255,255,.04)` 描边 → 缩略图 307×173 → `framed: true`。
+   一开始把集数卡的外框套到所有卡上，导致 240 宽的竖版卡里图只剩 220×316，已改掉。
 2. 悬停/聚焦 400ms 后放大到 **1.05**（官方 `transform:scale(1.05)`），**不上移、不展开信息面板**——官方 `li` 里只有海报 + 一行标题。
 3. 放大卡要在**相邻卡之上**绘制（覆盖层），且不参与行布局（零跳动）；覆盖卡每边只溢出 6px / 10px，而卡间距与标题下距都是 12px，所以**永远不会盖住行标题**（旧 1.35 + 56px 面板会，已修）。
 4. 行两端各留 `4vw`，滚动时卡片可以从留白区穿出（`clip: false` 的行容器 + 行级遮罩）。
@@ -102,7 +107,7 @@
 | 元信息 | 14px / 500 / 项间距 30px（`margin-left: 30px`）/ 分隔点 `rgba(255,255,255,.4)` | 字号 14px、字重 `Theme.weight-medium` 已对齐；**项间距与点色在数据层字符串内**（`detail_meta_line` 用 `·` 拼成一串），Slint 侧不能逐项调间距 / 逐字上色，`Theme.detail-meta-dot: #FFFFFF66` 先立 token |
 | 简介 | 16px / 行高 24px / 宽 696.95px（≈697）/ 不限行数 | 宽 697px、`wrap: word-wrap`、去掉 `elide` 与 90px 固定高（Slint 无 `line-height`，行距用字体默认） |
 | 集数（横版）卡 | 327×322（容器）；缩略图 307×173 | `Theme.card-landscape-w` = 327px（≥1280，含 1920；447px 只属于「预告」行，我们没有那种行）；`card-landscape-h = w × 9/16` |
-| 集数卡外框 | `padding 8px` / `radius 16px` / `background rgba(255,255,255,.1)` / `border 2px solid rgba(255,255,255,.04)` | `Theme.card-frame-bg` / `card-frame-border` / `card-frame-padding` / `card-frame-border-width`；`poster_card.slint` 统一生效（首页行卡同步带上内衬，属预期） |
+| 集数卡外框 | `padding 8px` / `radius 16px` / `background rgba(255,255,255,.1)` / `border 2px solid rgba(255,255,255,.04)` | `Theme.card-frame-*`；**只对横版集数卡生效**（`PosterCard.framed: true`，首页行用）。竖版海报卡 `framed: false`，图占满 240×336 |
 | 缩略图圆角 | 16px（1920；1280 为 12px，见 §10.1 官方三档） | `Theme.radius-poster`（断点值；图片内缩后自己带圆角） |
 | 时长角标 | `rgba(0,0,0,.9)` 底 / `radius 4px` / `padding 1px 12px` / 13px | 现有 `Theme.badge-bg`（`#000000B3`）+ `radius-badge` 4px + 12px 字号；**未逐项对齐**（我们的角标在卡右上角，Netflix 在缩略图右下角） |
 | 竖版（海报）卡 | 240×336（5:7；另有 184×257.6 @1280、150×210 @960） | `Theme.card-portrait-w/h`（高度由 `poster-ratio-w/h` = 5:7 推导，不写字面高度） |
