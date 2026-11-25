@@ -397,6 +397,8 @@ export component HomePage inherits Rectangle {
     callback search-submit();
     callback search-clear();
     callback search-escape();
+    // 顶栏搜索框里仍要生效的全局快捷键（转发到 `AppWindow.key-intent`）。
+    callback global-shortcut(int);
     // 空状态的“连接服务器”：真正的连接流程在上层（这里只发回调）。
     callback connect-server();
 
@@ -898,6 +900,9 @@ export component HomePage inherits Rectangle {
         }
         search-escape => {
             root.search-escape();
+        }
+        global-shortcut(code) => {
+            root.global-shortcut(code);
         }
     }
 }

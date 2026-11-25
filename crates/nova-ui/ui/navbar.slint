@@ -32,6 +32,13 @@ export component Navbar inherits Rectangle {
     callback search-clear();
     // 输入框里按 Esc：交由上层退出聚焦。
     callback search-escape();
+    // 输入框抢到焦点时仍要生效的全局快捷键（参数是 `AppWindow.key-intent` 的意图编号）。
+    //
+    // 为什么必须由输入框自己发：TextInput 会先把 Ctrl+字母当编辑快捷键吞掉，
+    // `key-pressed` 里 `return reject` 之后事件也不会冒泡到 `AppWindow` 的全局
+    // `keyboard` FocusScope。所以这里识别到 Ctrl+N / Ctrl+F 就**主动**上报并 accept；
+    // Ctrl+A/C/V/X/Z 等编辑键继续 `reject`，留在输入框里正常工作。
+    callback global-shortcut(int);
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 页面传入自己的命名空间（`"home."` / `"library."` / `"search."`），
@@ -340,6 +347,15 @@ export component Navbar inherits Rectangle {
                     // Esc 不进文本框：退出聚焦（由上层把焦点还给全局键盘处理）。
                     if (event.text == Key.Escape) {
                         root.search-escape();
+                        return accept;
+                    }
+                    // 8 = Ctrl+N（打开“添加服务器”），7 = Ctrl+F（聚焦搜索）。
+                    if (event.modifiers.control && (event.text == "n" || event.text == "N")) {
+                        root.global-shortcut(8);
+                        return accept;
+                    }
+                    if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+                        root.global-shortcut(7);
                         return accept;
                     }
                     return reject;

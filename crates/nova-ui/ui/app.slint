@@ -386,6 +386,9 @@ export component AppWindow inherits Window {
                     keyboard.focus();
                     root.search-focused = false;
                 }
+                global-shortcut(code) => {
+                    root.key-intent(code);
+                }
             }
 
             lib-page := LibraryPage {
@@ -421,6 +424,9 @@ export component AppWindow inherits Window {
                 search-escape => {
                     keyboard.focus();
                     root.search-focused = false;
+                }
+                global-shortcut(code) => {
+                    root.key-intent(code);
                 }
             }
 
@@ -483,6 +489,9 @@ export component AppWindow inherits Window {
                 }
                 search-retry => {
                     root.search-retry();
+                }
+                global-shortcut(code) => {
+                    root.key-intent(code);
                 }
             }
 
@@ -605,6 +614,8 @@ export component AppWindow inherits Window {
     // （调试状态摘要要读；两者都只存在于 .slint 局部状态里）。
     out property <bool> detail-drop-open: detail-page.drop-open;
     out property <bool> detail-in-my-list: detail-page.in-my-list;
+    // 调试用：对话框里当前聚焦的输入框（0 = 无，1 = 地址，2 = 用户名，3 = 密码）。
+    out property <int> add-server-focus: add-server.focus-field;
     out property <int> debug-nav-tabs: home-page.debug-nav-tabs;
     out property <length> home-content-h: home-page.content-h;
 

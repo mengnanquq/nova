@@ -80,6 +80,14 @@ fn click(app: &App, x: f32, y: f32) {
     });
 }
 
+/// 刷新两轮目标清单（调试通道与 `sweep` 读它之前的同一步）。
+fn settle(app: &App) {
+    for _ in 0..2 {
+        app.refresh_targets();
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(80));
+    }
+}
+
 #[test]
 fn connect_button_and_ctrl_n_open_the_dialog() {
     let app = setup();
@@ -120,6 +128,68 @@ fn escape_and_cancel_close_the_dialog() {
     assert!(
         app.handle_key(KeyCommand::Search),
         "关框后键盘应恢复全局处理"
+    );
+}
+
+#[test]
+fn cancel_button_closes_the_dialog_and_clears_password() {
+    let app = setup();
+    app.open_add_server("http://127.0.0.1:8096", "me");
+    app.ui().set_add_server_password("secret".into());
+    app.ui().show().unwrap();
+    settle(&app);
+
+    // 真点「取消」：对话框必须真的关掉（不是只有 Esc 能关），密码用完即弃。
+    let cancel = app.target("dialog.cancel").expect("取消按钮应在清单里");
+    let (x, y) = cancel.center();
+    click(&app, x, y);
+
+    assert!(!app.add_server_open(), "点「取消」应关闭对话框");
+    assert_eq!(app.add_server_password(), "", "关框必须清空密码");
+
+    // 关框后目标清单里不能再出现 dialog.*。这里**不等**下一次刷新：登记总线上
+    // 还留着关框前的 5 条快照，`targets()` 必须靠 `add-server-open` 把它们过滤掉
+    // （以前关框后仍会返回 5 个点到不存在的浮层上）。
+    assert!(
+        app.target("dialog.cancel").is_none(),
+        "关框后（同一帧）目标清单不应再有 dialog.cancel"
+    );
+    settle(&app);
+    for id in [
+        "dialog.address",
+        "dialog.user",
+        "dialog.password",
+        "dialog.cancel",
+        "dialog.connect",
+    ] {
+        assert!(
+            app.target(id).is_none(),
+            "对话框已关闭，目标清单不应再有 {id}"
+        );
+    }
+}
+
+#[test]
+fn disabled_connect_is_not_listed_as_a_target() {
+    let app = setup();
+    app.ui().show().unwrap();
+
+    // 空地址：「连接」是禁用态（TouchArea `enabled: false`），不能作为可点目标
+    // 进清单，否则 `sweep` 会对着点不动的按钮报假 dead。
+    app.open_add_server("", "");
+    settle(&app);
+    assert!(
+        app.target("dialog.connect").is_none(),
+        "空地址时「连接」被禁用，不该出现在目标清单里"
+    );
+    assert!(app.target("dialog.cancel").is_some());
+
+    // 合法地址：按钮可用，重新进清单。
+    app.open_add_server("http://127.0.0.1:8096", "me");
+    settle(&app);
+    assert!(
+        app.target("dialog.connect").is_some(),
+        "地址合法后「连接」应重新成为可点目标"
     );
 }
 

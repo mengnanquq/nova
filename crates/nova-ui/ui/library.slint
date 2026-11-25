@@ -29,6 +29,8 @@ export component LibraryPage inherits Rectangle {
     callback search-submit();
     callback search-clear();
     callback search-escape();
+    // 顶栏搜索框里仍要生效的全局快捷键（转发到 `AppWindow.key-intent`）。
+    callback global-shortcut(int);
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 排序按钮是页面直接摆放、常驻的控件 → 声明式列出；网格卡片 / 顶栏标签 /
@@ -212,6 +214,9 @@ export component LibraryPage inherits Rectangle {
         }
         search-escape => {
             root.search-escape();
+        }
+        global-shortcut(code) => {
+            root.global-shortcut(code);
         }
     }
 }

@@ -50,6 +50,9 @@ export component SearchPage inherits Rectangle {
     callback search-blur();
     // 错误态的"重试"。
     callback search-retry();
+    // 页内大输入框里仍要生效的全局快捷键（参数是 `AppWindow.key-intent` 的意图编号）。
+    // 原因见 `navbar.slint` 的 `global-shortcut`：TextInput 会先吞掉 Ctrl 组合。
+    callback global-shortcut(int);
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 页面直接摆放的搜索框与清除按钮声明式列出；结果卡片 / 顶栏标签 / 空态按钮
@@ -176,6 +179,16 @@ export component SearchPage inherits Rectangle {
                 // Esc：清空并回首页（不需要先进文本框再退聚焦）。
                 if (event.text == Key.Escape) {
                     root.search-clear();
+                    return accept;
+                }
+                // 8 = Ctrl+N（打开“添加服务器”），7 = Ctrl+F（重新聚焦搜索）。
+                // TextInput 会先吞掉 Ctrl 组合，所以这里主动上报（见 navbar.slint）。
+                if (event.modifiers.control && (event.text == "n" || event.text == "N")) {
+                    root.global-shortcut(8);
+                    return accept;
+                }
+                if (event.modifiers.control && (event.text == "f" || event.text == "F")) {
+                    root.global-shortcut(7);
                     return accept;
                 }
                 return reject;

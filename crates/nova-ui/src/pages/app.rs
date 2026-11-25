@@ -330,6 +330,24 @@ impl SweepReport {
     }
 }
 
+/// 扫描开始时的对话框快照：`sweep` 每轮拿它把对话框恢复成同一个起点。
+struct DialogSnapshot {
+    address: String,
+    user: String,
+    password: String,
+}
+
+/// 密码在状态摘要里的表示：只有长度。
+///
+/// 状态摘要会通过 `--debug-socket` 的 `sweep` 输出，所以这里**只放长度**。
+///
+/// 曾经放过 FNV-1a 32 位指纹：它不是加密散列，短密码可以在几分钟内暴力还原，
+/// 等于把密码写进调试输出。`sweep` 只需要判断"点了之后有没有变化"，
+/// 而点密码框只会移动焦点、不会改内容，长度足以区分。
+fn password_fingerprint(password: &str) -> String {
+    format!("len={}", password.chars().count())
+}
+
 /// 界面应用：拥有一个 `AppWindow`、导航栈、焦点与图片表。
 pub struct App {
     ui: AppWindow,
@@ -432,11 +450,14 @@ impl App {
     /// 当前页面的可交互目标（声明式清单 + 登记总线，按 id 去重并按 id 排序）。
     ///
     /// 过滤规则：
-    /// - 只保留**当前页命名空间**（`home.` / `library.` / …）与浮层（`banner.` /
-    ///   `dialog.`）的目标——隐藏页面里已登记的元素不会混进来；
+    /// - 只保留**当前页命名空间**（`home.` / `library.` / …）与浮层（`banner.`）的目标
+    ///   ——隐藏页面里已登记的元素不会混进来；
     /// - 宽高必须为正，中心点必须落在窗口内（横向溢出视口一半的卡点不到中心）；
     /// - 「添加服务器」对话框打开时只保留 `dialog.` 目标（下层被遮罩挡住，
-    ///   点它们只会得到"没反应"的假结论）。
+    ///   点它们只会得到"没反应"的假结论）；关闭后 `dialog.` 目标一律不列。
+    ///   登记总线是只增不减的：关框后旧的 `dialog.*` 还在 `staging`/`targets` 里，
+    ///   不看 `add-server-open` 就会在页面上凭空多出几个“对话框目标”（实测：
+    ///   点「取消」后 `targets` 仍返回 5 个 dialog.*）。
     pub fn targets(&self) -> Vec<TargetInfo> {
         // 窗口尺寸是物理像素，目标坐标是逻辑像素：用缩放因子换算。
         let scale = self.ui.window().scale_factor();
@@ -469,9 +490,7 @@ impl App {
                 if dialog_open {
                     target.id.starts_with("dialog.")
                 } else {
-                    target.id.starts_with(prefix)
-                        || target.id.starts_with("banner.")
-                        || target.id.starts_with("dialog.")
+                    target.id.starts_with(prefix) || target.id.starts_with("banner.")
                 }
             })
             .collect();
@@ -566,8 +585,21 @@ impl App {
             player.controls_visible,
             player.error.as_deref().unwrap_or("")
         );
+        // 对话框状态：地址 / 用户名 / 密码（只放指纹，不放明文）/ 当前聚焦的输入框。
+        // 没有这些字段时，`sweep` 在“添加服务器”对话框上整页都是 dead：点输入框
+        // 只改 `TextInput` 内部的焦点与光标，`add-server-open` 等属性保持不变。
+        let dialog = format!(
+            "open={};state={};error={};address={};user={};password={};focus={}",
+            ui.get_add_server_open(),
+            ui.get_add_server_state(),
+            ui.get_add_server_error(),
+            ui.get_add_server_address(),
+            ui.get_add_server_user(),
+            password_fingerprint(ui.get_add_server_password().as_str()),
+            ui.get_add_server_focus(),
+        );
         format!(
-            "page={};route={:?};focus={},{},{},{};nav_active={};search_focused={};             search_text={};banner={}/{};dialog={}/{}/{};library=[{}];detail=[{}];             search=[{}];player=[{}]",
+            "page={};route={:?};focus={},{},{},{};nav_active={};search_focused={};             search_text={};banner={}/{};dialog=[{}];library=[{}];detail=[{}];             search=[{}];player=[{}]",
             self.page().index(),
             self.current_route(),
             ui.get_home_focus(),
@@ -579,9 +611,7 @@ impl App {
             self.search_text(),
             ui.get_banner_visible(),
             ui.get_banner_text(),
-            ui.get_add_server_open(),
-            ui.get_add_server_state(),
-            ui.get_add_server_error(),
+            dialog,
             library,
             detail,
             search,
@@ -591,11 +621,20 @@ impl App {
 
     /// 交互扫描：对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化。
     ///
-    /// 每点一项就把应用恢复原状（关对话框 / 从详情或播放页退回原路由），
-    /// 否则后续目标的坐标会落在已经换掉的页面上，得到一堆假的"没反应"。
+    /// 每点一项就把应用恢复原状（对话框回到扫描前的打开态与字段 / 从详情或
+    /// 播放页退回原路由），否则后续目标的坐标会落在已经换掉的页面上，得到一堆
+    /// 假的"没反应"。典型例子：点「取消」真的关掉了对话框，后面的
+    /// `dialog.connect` / `dialog.user` 坐标就落到被遮罩的页面上，看上去全 dead。
     pub fn sweep(&self) -> SweepReport {
         let page = self.page();
         let route = self.current_route();
+        // 对话框是浮层：扫描前开着就得每轮重新打开，而不是像以前那样在
+        // `restore_after_click` 里无条件关掉（那会让第一个目标之后的全部失效）。
+        let dialog = self.ui.get_add_server_open().then(|| DialogSnapshot {
+            address: self.ui.get_add_server_address().to_string(),
+            user: self.ui.get_add_server_user().to_string(),
+            password: self.add_server_password(),
+        });
         let targets = self.targets();
         let mut entries = Vec::new();
         let mut aborted = false;
@@ -617,7 +656,7 @@ impl App {
             }
             let after = self.state_digest();
             let changed = before != after;
-            let restored = self.restore_after_click(page, &route);
+            let restored = self.restore_after_click(page, &route, dialog.as_ref());
             entries.push(SweepEntry {
                 id: target.id.clone(),
                 kind: target.kind.clone(),
@@ -640,10 +679,11 @@ impl App {
         }
     }
 
-    /// 把应用恢复到扫描开始时的页面 / 路由；返回是否恢复成功。
+    /// 把应用恢复到扫描开始时的页面 / 路由 / 对话框状态；返回是否恢复成功。
     ///
     /// 恢复顺序：
-    /// 1. 关掉被点开的「添加服务器」对话框；
+    /// 1. 对话框：扫描前开着就关闭后按快照重新打开（地址 / 用户名 / 密码回填，
+    ///    状态机复位到空闲、焦点回到地址框）；扫描前没开就关掉被点开的；
     /// 2. 先尝试 `go_back`（点卡片进详情、点标签切库、点播放进播放页都是压栈）；
     /// 3. 栈已经回不去（例如点「返回」直接把详情页弹掉了）就按原路由重建栈顶
     ///    （详情 / 媒体库 / 搜索 / 首页都能从当前视图模型重建）；
@@ -652,9 +692,28 @@ impl App {
     /// 播放页是例外：播放会话（mpv）不是视图模型能凭空重建的，所以只要页面回到
     /// 播放页就算恢复成功（路由可能已经变成上一条）；调用方（`nova-app` 的
     /// `sweep`）会在扫描结束后收掉误开的播放器。
-    fn restore_after_click(&self, page: Page, route: &Option<Route>) -> bool {
-        if self.ui.get_add_server_open() {
-            self.close_add_server();
+    fn restore_after_click(
+        &self,
+        page: Page,
+        route: &Option<Route>,
+        dialog: Option<&DialogSnapshot>,
+    ) -> bool {
+        match dialog {
+            // 扫描前开着：先关（复位状态机 / 清密码）再按快照重开，保证每个目标
+            // 的起点完全一致（焦点 = 地址框、状态 = 空闲、字段不变）。
+            Some(snapshot) => {
+                self.close_add_server();
+                self.open_add_server(&snapshot.address, &snapshot.user);
+                if !snapshot.password.is_empty() {
+                    self.ui
+                        .set_add_server_password(snapshot.password.as_str().into());
+                }
+            }
+            None => {
+                if self.ui.get_add_server_open() {
+                    self.close_add_server();
+                }
+            }
         }
         for _ in 0..4 {
             if &self.current_route() == route {

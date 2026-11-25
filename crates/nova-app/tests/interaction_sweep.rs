@@ -38,16 +38,34 @@ use slint::ComponentHandle;
 /// 一个页面在**本测试环境**里已知"点击后没有任何可观测变化"的目标。
 ///
 /// 每条都必须能解释清楚；新增条目要同时想清楚"是不是让按钮变成死了"。
-const KNOWN_DEAD: &[(&str, &str, &str)] = &[(
-    "home",
-    "home.nav.tab.0",
-    "点已经选中的「首页」标签：重建出同一份首页，同页空操作",
-)];
+///
+/// `page` 写 `"*"` 表示**条件性**目标：它只在特定状态下才出现在清单里
+/// （搜索框已聚焦 / 对话框已打开），所以这里只豁免、不要求每次扫描都出现。
+const KNOWN_DEAD: &[(&str, &str, &str)] = &[
+    (
+        "home",
+        "home.nav.tab.0",
+        "点已经选中的「首页」标签：重建出同一份首页，同页空操作",
+    ),
+    (
+        "*",
+        "library.nav.search-input",
+        "顶栏搜索框已经聚焦（Ctrl+F / 路由留下的状态）时再点它：只是把光标移到点击处，\
+         摘要不跟踪光标位置，所以合理地无变化",
+    ),
+    (
+        "*",
+        "dialog.address",
+        "对话框打开时地址框已自动聚焦（`open_add_server` 会 focus 它）；再点它只是移动\
+         光标，摘要不跟踪光标位置，所以合理地无变化",
+    ),
+];
 
 /// 一个页面的扫描结果摘要。
 struct Scan {
     page: String,
     changed: usize,
+    ids: Vec<String>,
     dead: Vec<(String, String, String)>,
 }
 
@@ -267,6 +285,11 @@ fn scan(app: &Rc<App>) -> Scan {
     Scan {
         page: report.page.clone(),
         changed: report.entries.iter().filter(|entry| entry.changed).count(),
+        ids: report
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect(),
         dead: report
             .dead()
             .iter()
@@ -281,9 +304,15 @@ fn assert_known_dead(scan: &Scan) {
         .filter(|(page, _, _)| *page == scan.page)
         .map(|(_, id, _)| *id)
         .collect();
+    // `"*"` 条目是条件性目标（运行时才在清单里），只豁免、不要求出现。
+    let conditional: Vec<&str> = KNOWN_DEAD
+        .iter()
+        .filter(|(page, _, _)| *page == "*")
+        .map(|(_, id, _)| *id)
+        .collect();
     for (page, id, label) in &scan.dead {
         assert!(
-            known.contains(&id.as_str()),
+            known.contains(&id.as_str()) || conditional.contains(&id.as_str()),
             "{page}: `{id}`（label：{label}）点击后状态没有任何变化——新死按钮？\
              确认它确实不需要行为后，才把它加进 KNOWN_DEAD 并写明原因"
         );
@@ -363,4 +392,82 @@ fn detail_sweep_has_live_controls_and_no_unknown_dead_targets() {
         scan.dead
     );
     assert_known_dead(&scan);
+}
+
+#[test]
+fn library_sweep_with_focused_search_input_has_no_unexplained_dead_targets() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Library, 0.88);
+    // 让顶栏搜索框处于"已经聚焦"的状态（Ctrl+F / 从搜索页路由回来时的真实状态）。
+    // 点一个已经聚焦的输入框只会移动光标——摘要里没有光标位置，所以它是合理 dead。
+    app.ui().set_search_focused(true);
+    app.ui().invoke_focus_search_input();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    assert!(
+        scan.ids.iter().any(|id| id == "library.nav.search-input"),
+        "聚焦后顶栏搜索框应进入目标清单：{:?}",
+        scan.ids
+    );
+    assert!(
+        scan.dead
+            .iter()
+            .any(|(_, id, _)| id == "library.nav.search-input"),
+        "已聚焦的顶栏搜索框再点一次本来就是无变化（理由见 KNOWN_DEAD）"
+    );
+    assert_known_dead(&scan);
+}
+
+#[test]
+fn dialog_sweep_restores_the_dialog_between_targets() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Library, 0.88);
+    // 替身：上层 `nova-app` 的提交处理器会立即进入"连接中"（真实网络在后台）。
+    {
+        let handler_app = Rc::clone(&app);
+        app.on_add_server_submit(move |_address, _user, _password| {
+            handler_app.begin_add_server_connecting();
+        });
+    }
+    app.open_add_server("http://127.0.0.1:8096", "nova");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    // 清单里只有对话框（下层被遮罩挡住，不应混进来）。
+    assert!(
+        scan.ids.iter().all(|id| id.starts_with("dialog.")),
+        "对话框打开时清单混进了下层目标：{:?}",
+        scan.ids
+    );
+    for id in [
+        "dialog.address",
+        "dialog.user",
+        "dialog.password",
+        "dialog.cancel",
+    ] {
+        assert!(scan.ids.iter().any(|entry| entry == id), "缺少目标 {id}");
+    }
+    // 关键回归：点「取消」关掉对话框后，后续目标仍能点到对话框里的控件，
+    // 而不是落到被遮罩的页面上得出"全 dead"。
+    assert_eq!(
+        scan.dead
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["dialog.address"],
+        "对话框页只允许已自动聚焦的地址框是 dead（理由见 KNOWN_DEAD）"
+    );
+    assert_known_dead(&scan);
+    // 扫描结束应恢复成"对话框还开着"（而不是像以前那样被 restore 关掉）。
+    assert!(
+        app.add_server_open(),
+        "sweep 结束后应恢复对话框打开态（扫描前的状态）"
+    );
+    assert_eq!(app.add_server_address(), "http://127.0.0.1:8096");
+    assert_eq!(app.add_server_user(), "nova");
 }
