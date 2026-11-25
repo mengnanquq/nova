@@ -46,6 +46,9 @@ fn zooming_a_card_does_not_move_other_cards() {
 
     // 基线：焦点不在任何行内（大下标 → 两行的 focused-index 都是 -1）。
     app.ui().set_home_focus(i32::MAX);
+    // 先把数据入场动画（淡入 + 上浮 6px）推到终态，否则基线会停在动画中间帧，
+    // 与后面的帧的差异会被误判成"放大跳了布局"。
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
     let before = app.ui().window().take_snapshot().expect("基线快照");
 
     // 放大：焦点落在继续观看行第 2 张卡；推过 400ms 延迟 + 200ms 过渡。

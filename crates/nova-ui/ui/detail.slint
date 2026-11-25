@@ -25,6 +25,15 @@ export component DetailPage inherits Rectangle {
     in-out property <bool> drop-open: false;
 
     property <length> backdrop-height: self.height * Theme.detail-backdrop-ratio;
+    // ---- 入场（数据 / 页面到达）----
+    // 标题块从 +8px 归位 + 淡入，backdrop 同时淡入：共用一条进度 `reveal`（0 → 1）。
+    // 用自定义 float 而不是直接 `animate opacity`：opacity 默认 1，未被求值过的元素上
+    // 动画会从 1 到 1（等于没动画）；float 默认 0 = 隐藏态（详见 home.slint CardRow 注释）。
+    property <float> reveal: root.data.title != "" ? 1 : 0;
+    animate reveal {
+        duration: Theme.motion-slow;
+        easing: ease-out;
+    }
 
     flick := Flickable {
         width: parent.width;
@@ -47,6 +56,8 @@ export component DetailPage inherits Rectangle {
                 source: root.data.backdrop;
                 image-fit: cover;
                 visible: root.data.backdrop.width > 0;
+                // backdrop 到达时淡入（跟随页面级 `reveal`）。
+                opacity: root.reveal;
             }
 
             // 无 backdrop 时的底板：只用一层极暗渐变，**不画首字母**。
@@ -115,13 +126,15 @@ export component DetailPage inherits Rectangle {
             // 整块贴住 backdrop 下缘（`alignment: end`），长标题不再被 160px 固定高度裁切。
             title-block := VerticalLayout {
                 x: 0;
-                y: 0;
+                // 入场上浮量由同一条 `reveal` 反推（+8px → 0）。
+                y: Theme.motion-rise-hero * (1 - root.reveal);
                 width: parent.width;
                 height: root.backdrop-height;
                 padding-left: Theme.detail-gutter;
                 padding-right: Theme.detail-gutter;
                 alignment: end;
                 spacing: Theme.space-1;
+                opacity: root.reveal;
 
                 // 标题：48px bold（Netflix 实测）。Text 直接放进布局时，无头渲染器
                 // 会按极窄宽度算 preferred-height（一行字撑成几十行），所以外面套一层
@@ -215,7 +228,26 @@ export component DetailPage inherits Rectangle {
                             height: parent.height;
                             border-radius: parent.border-radius;
                             background: Theme.wash;
-                            visible: play-area.has-hover;
+                            opacity: play-area.has-hover ? 1 : 0;
+                            animate opacity {
+                                // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+                                duration: Theme.motion-button;
+                                easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                            }
+                        }
+
+                        // 按压反馈（scale 0.98 的近似，见 Theme.press-wash）。
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.press-wash;
+                            opacity: play-area.pressed ? 1 : 0;
+                            animate opacity {
+                                // 官方 Hawkins 令牌：Button-DurationPressed 0ms。
+                                duration: Theme.motion-press;
+                                easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                            }
                         }
 
                         play-label := Text {
@@ -258,7 +290,23 @@ export component DetailPage inherits Rectangle {
                             height: parent.height;
                             border-radius: parent.border-radius;
                             background: Theme.wash;
-                            visible: list-area.has-hover;
+                            opacity: list-area.has-hover ? 1 : 0;
+                            animate opacity {
+                                duration: Theme.motion-button;
+                                easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                            }
+                        }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.press-wash;
+                            opacity: list-area.pressed ? 1 : 0;
+                            animate opacity {
+                                duration: Theme.motion-press;
+                                easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                            }
                         }
 
                         Text {

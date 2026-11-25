@@ -30,6 +30,13 @@ export component CardZoom inherits Rectangle {
     property <length> image-height: root.base-height * root.zoom-factor;
     // 圆角 4 → 6 随放大走。
     property <length> image-radius: root.zoom-factor > 1.04 ? Theme.radius-panel : Theme.radius-poster;
+    // 信息面板出现得比图片放大晚一点：直接由 zoom-factor 驱动（放大过 1.05 才开始现形，
+    // 1.05 → 1.20 映射到 0 → 1），不引入定时器；再叠一层 `Theme.motion` 让收尾更柔。
+    property <float> panel-reveal: clamp((root.zoom-factor - 1.05) / 0.15, 0, 1);
+    animate panel-reveal {
+        duration: Theme.motion;
+        easing: ease-out;
+    }
 
     image := Rectangle {
         x: 0;
@@ -75,6 +82,9 @@ export component CardZoom inherits Rectangle {
         height: Theme.zoom-info-height;
         border-radius: Theme.radius-panel;
         background: Theme.zoom-panel-bg;
+        opacity: root.panel-reveal;
+        // opacity 归零后不再占命中区（面板本身没有 TouchArea，这里只是省绘制）。
+        visible: root.panel-reveal > 0.01;
 
         // 标题：14px bold。
         panel-title := Text {

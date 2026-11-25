@@ -17,6 +17,15 @@ export component EmptyState inherits Rectangle {
 
     background: transparent;
 
+    // ---- 入场：**没做**（如实记录）----
+    //
+    // 原计划的"opacity 0 → 1 + 上浮 6px"在 Slint 里做不到：空态是
+    // **元素被创建/从隐藏变可见的那一刻**出现的，而 Slint 对"属性第一次求值"
+    // 不播动画（`animate` 只在后续变化时过渡；已用无头测试实测：init 里置位、
+    // 或从 `visible: false` 变 true 的第一帧，都是直接到终值）。
+    // 补这一下就需要定时器/每帧轮询（任务硬约束禁止），所以这里保持即时显示。
+    // 另外 `scale 0.98 → 1` 也做不到：Slint 1.19 的 `Transform` 是 internal 元素。
+
     // 面板：直接按中心定位（不靠 layout 的 alignment 做外层居中）。
     panel := Rectangle {
         x: (root.width - self.width) / 2;
@@ -90,8 +99,17 @@ export component EmptyState inherits Rectangle {
                         height: Theme.button-primary-height;
                         width: primary-label.preferred-width + Theme.space-6 * 2;
                         border-radius: Theme.radius-pill;
-                        background: primary-area.has-hover ? Theme.accent-hover : Theme.accent;
+                        // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed。
+                        background: primary-area.pressed ? Theme.accent-pressed
+                            : (primary-area.has-hover ? Theme.accent-hover : Theme.accent);
                         visible: root.primary-label != "";
+                        animate background {
+                            // Button-Duration 250ms / Button-DurationPressed 0ms；
+                            // Button-EasingHovered / Button-Easing 照抄官方贝塞尔。
+                            duration: primary-area.pressed ? Theme.motion-press : Theme.motion-button;
+                            easing: primary-area.has-hover
+                                ? cubic-bezier(0.32, 0.94, 0.6, 1) : cubic-bezier(0.4, 0, 0.68, 0.06);
+                        }
 
                         primary-label := Text {
                             x: Theme.space-6;
@@ -123,6 +141,25 @@ export component EmptyState inherits Rectangle {
                         border-width: 1px;
                         border-color: Theme.hairline;
                         visible: root.secondary-label != "";
+                        animate background {
+                            // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+                            duration: Theme.motion-button;
+                            easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                        }
+
+                        Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: parent.border-radius;
+                            background: Theme.press-wash;
+                            opacity: secondary-area.pressed ? 1 : 0;
+                            animate opacity {
+                                duration: Theme.motion-press;
+                                easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                            }
+                        }
 
                         secondary-label := Text {
                             x: Theme.space-6;

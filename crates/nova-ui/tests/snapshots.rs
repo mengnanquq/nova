@@ -16,6 +16,22 @@ use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
 fn capture(app: &App, name: &str) {
+    // 无头后端不会自己走时间（`mock_time` 的动画/定时器只在 mock_elapsed_time 里推进），
+    // 而截图前数据刚变过 → 声明式入场动画还停在起始值。这里推一段时间让动画结算到终态，
+    // 快照拍的始终是"动画结束后的稳定帧"，不为了好看去删动效。
+    //
+    // 播放页的 250ms 定时器会在推进时累计"静默时间"，推多了控制层会被自动隐藏。
+    // 另外：元素在"第一次绘制之前"改属性不会起动画（Slint 首次求值不播动画），
+    // 所以入场淡入本身在快照里就是终态；这里的推进主要保证放大 / 顶栏 / 骨架等
+    // "已经画过一帧之后才开始"的动画不会停在中间帧。
+    // 播放页 260ms：盖住按钮 250ms 的底色/描边过渡，同时 9 次截图的累计推进
+    // （≈2.3s）仍小于播放器 3s 的自动隐藏阈值。
+    let settle = if app.page() == Page::Player {
+        260
+    } else {
+        1000
+    };
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(settle));
     // 窗口在创建时已定为 1280x800；这里不能再 set_size ——
     // 重新设置尺寸会把 Flickable 的滚动偏移重置为 0，快照会拍到未滚动的帧。
     let snapshot = app.ui().window().take_snapshot().unwrap();

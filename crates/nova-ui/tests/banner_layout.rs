@@ -20,6 +20,8 @@ const HEIGHT: usize = 800;
 const BANNER: usize = 48;
 
 fn capture(app: &App) -> SharedPixelBuffer<i_slint_core::graphics::Rgba8Pixel> {
+    // 推过声明式入场动画（无头后端不自行走时间），两帧都在终态比较。
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
     app.ui().window().take_snapshot().unwrap()
 }
 

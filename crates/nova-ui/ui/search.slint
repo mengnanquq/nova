@@ -145,6 +145,26 @@ export component SearchPage inherits Rectangle {
             height: 28px;
             border-radius: Theme.radius-pill;
             background: clear-area.has-hover ? Theme.wash : transparent;
+            animate background {
+                // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+                duration: Theme.motion-button;
+                easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+            }
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                background: Theme.press-wash;
+                opacity: clear-area.pressed ? 1 : 0;
+                animate opacity {
+                    // 官方 Hawkins 令牌：Button-DurationPressed 0ms。
+                    duration: Theme.motion-press;
+                    easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                }
+            }
 
             Text {
                 width: parent.width;
@@ -181,13 +201,15 @@ export component SearchPage inherits Rectangle {
 
     // ---- 结果网格（Ready 态可见；其余状态隐藏，但组件始终存在，
     //      这样探针属性与焦点索引在四态之间不会失效）----
+    // 不按 `state` 门控 `visible`：Slint 首次求值不播动画，网格若在数据到达前
+    // 是隐藏的，入场淡入会被跳过。空/错误态面板在它之后绘制，会盖在上面；
+    // 卡片列表为空时网格本身不画东西，所以常驻是安全的（`interactive` 关掉）。
     results := Flickable {
-        visible: root.data.state == 2;
         x: 0;
         y: root.results-y;
         width: parent.width;
         height: parent.height - root.results-y;
-        interactive: true;
+        interactive: root.data.state == 2;
         content-width: self.width;
         content-height: content.height;
 
@@ -195,8 +217,10 @@ export component SearchPage inherits Rectangle {
             width: parent.width;
             height: grid.content-height;
 
-            // 结果头：「{term}」的搜索结果 + 共 N 部。
+            // 结果头：「{term}」的搜索结果 + 共 N 部（非 Ready 态藏起来，
+            // 别在空/错误态面板后面露出空的"共 0 部"）。
             HorizontalLayout {
+                visible: root.data.state == 2;
                 x: Theme.content-gutter;
                 y: 0;
                 width: parent.width - Theme.content-gutter * 2;

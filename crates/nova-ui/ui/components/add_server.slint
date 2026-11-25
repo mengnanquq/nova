@@ -45,6 +45,13 @@ export component AddServerDialog inherits Rectangle {
     height: 100%;
     visible: root.open;
 
+    // ---- 入场：**没做**（如实记录）----
+    //
+    // 对话框是"`visible` 从 false 变 true"的那一刻出现的，而 Slint 对属性的
+    // 第一次求值不播动画（实测：`visible: false` → true 的第一帧直接到终值；
+    // `init` 里置位同理），要补这一下就得引定时器/每帧轮询（硬约束禁止）。
+    // 所以这里保持即时显示，`scale 0.98 → 1` 也做不到（`Transform` 是 internal 元素）。
+
     // 半透明遮罩：压住下层内容但保持可见；点击遮罩 = 取消。
     TouchArea {
         clicked => {
@@ -299,6 +306,26 @@ export component AddServerDialog inherits Rectangle {
                     background: cancel-area.has-hover ? Theme.surface-raised : Theme.surface;
                     border-width: 1px;
                     border-color: Theme.hairline;
+                    animate background {
+                        // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+                        duration: Theme.motion-button;
+                        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                    }
+
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        border-radius: parent.border-radius;
+                        background: Theme.press-wash;
+                        opacity: cancel-area.pressed ? 1 : 0;
+                        animate opacity {
+                            // Button-DurationPressed 0ms。
+                            duration: Theme.motion-press;
+                            easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                        }
+                    }
 
                     cancel-label := Text {
                         x: Theme.space-6;
@@ -325,11 +352,18 @@ export component AddServerDialog inherits Rectangle {
                     height: Theme.button-primary-height;
                     width: connect-label.preferred-width + Theme.space-6 * 2;
                     border-radius: Theme.radius-pill;
-                    // 禁用时半透明；连接中固定显示“连接中…”。
-                    opacity: root.submit-disabled ? 0.5 : 1.0;
-                    background: connect-area.has-hover && !root.submit-disabled
-                        ? Theme.accent-hover
-                        : Theme.accent;
+                    // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed / Disabled。
+                    // 连接中固定显示“连接中…”；禁用态直接用 Disabled 底色（不再叠 opacity）。
+                    background: root.submit-disabled ? Theme.accent-disabled
+                        : (connect-area.pressed ? Theme.accent-pressed
+                        : (connect-area.has-hover ? Theme.accent-hover : Theme.accent));
+                    animate background {
+                        // Button-Duration 250ms / Button-DurationPressed 0ms；
+                        // Button-EasingHovered / Button-Easing 照抄官方贝塞尔。
+                        duration: connect-area.pressed ? Theme.motion-press : Theme.motion-button;
+                        easing: connect-area.has-hover
+                            ? cubic-bezier(0.32, 0.94, 0.6, 1) : cubic-bezier(0.4, 0, 0.68, 0.06);
+                    }
 
                     connect-label := Text {
                         x: Theme.space-6;

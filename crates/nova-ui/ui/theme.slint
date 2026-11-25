@@ -25,8 +25,13 @@ export global Theme {
     // 详情页元信息分隔点：实测 `rgba(255,255,255,.4)`（比 text-faint 更中性）。
     in property <color> detail-meta-dot: #FFFFFF66;
     // 品牌红：只用于 logo 点、选中态、进度条，不大面积铺。
+    // === 官方 Hawkins 令牌原文（Button-*） ===
+    // Button-Surface: rgb(229,9,20) / Button-SurfaceHovered: rgb(193,17,25)
+    // Button-SurfacePressed: rgb(153,22,29) / Button-SurfaceDisabled: rgba(229,9,20,0.4)
     in property <color> accent: #E50914;
-    in property <color> accent-hover: #F6121D;
+    in property <color> accent-hover: #C11119;
+    in property <color> accent-pressed: #99161D;
+    in property <color> accent-disabled: #E5091466;
     // 红底上的文字 / 图标。
     in property <color> accent-contrast: #FFFFFF;
     in property <color> danger: #E50914;
@@ -36,6 +41,9 @@ export global Theme {
     in property <color> hero-scrim: #000000CC;
     in property <color> badge-bg: #000000B3;
     in property <color> wash: #FFFFFF1F;
+    // 按压态叠色：Slint 1.19 的 `Transform`（transform-scale）是 internal 元素，
+    // 用户代码拿不到，所以按钮按下的 scale 0.98 用一层压暗叠色近似（见第 9 节）。
+    in property <color> press-wash: #00000033;
     // 主按钮（播放）：白底黑字。
     in property <color> btn-primary-bg: #FFFFFF;
     in property <color> btn-primary-fg: #000000;
@@ -114,11 +122,16 @@ export global Theme {
     in property <length> card-frame-padding: 8px;
     in property <length> card-frame-border-width: 2px;
 
-    // ---- 卡片放大（清单：1.35 倍、延迟 400ms、200ms ease-out、上移 12px）----
+    // ---- 卡片放大（1.35 倍、延迟 400ms、`motion-zoom` ease-in-out、上移 12px）----
     in property <float> zoom-factor: 1.35;
-    in property <duration> zoom-delay: 400ms;
-    in property <duration> zoom-duration: 200ms;
+    // 延迟复用动效 token：400ms 是公开资料里的"悬停后展开延迟"，见第 9 节。
+    in property <duration> zoom-delay: root.motion-delay;
     in property <length> zoom-rise: 12px;
+    // 骨架占位底：官方 CSS `background-color: rgb(35,35,35)`（即 #232323）。
+    in property <color> skeleton-bg: #232323;
+    // 骨架占位不透明度的上下限（近似做法：不循环，见 `poster_card.slint`）。
+    in property <float> skeleton-opacity-low: 0.55;
+    in property <float> skeleton-opacity-high: 0.75;
     // 放大卡底部信息面板：56px、#181818。
     in property <length> zoom-info-height: 56px;
     in property <color> zoom-panel-bg: #181818;
@@ -184,10 +197,45 @@ export global Theme {
     in property <length> radius-pill: 999px;
     in property <length> radius-badge: 4px;
 
-    // ---- 动效（只这三种，180–200ms、ease-out）----
-    in property <duration> motion: 180ms;
+    // ---- 动效 ----
+    //
+    // 全部时长 / 缓动集中在这里：组件里只许引用 token，不写裸时长
+    // （`grep -n "duration: [0-9]" crates/nova-ui/ui/*.slint` 应为空）。
+    //
+    // 取值口径见 `docs/ui-netflix-1to1.md` 第 9 节：标「官方 CSS」的来自 Netflix
+    // 一手样式表（`akiraClient.css` / 详情页内联 Hawkins CSS），其余是工程取值。
+    in property <duration> motion-fast: 120ms; // 微交互（箭头悬停、字色）：我们自定
+    in property <duration> motion: 180ms; // 默认过渡（透明度、顶栏变色、控件显隐）：我们自定
+    in property <duration> motion-slow: 300ms; // 内容 / 页面入场：我们自定
+    in property <duration> motion-page: 220ms; // 主要区域切换：我们自定
+    // 官方 CSS 的骨架周期：`animation: loading 4000ms infinite linear`。
+    // 我们**没有**做循环扫光（禁止定时器），骨架是静态占位；这个 token 留着对齐口径。
+    in property <duration> motion-pulse: 4000ms;
+    in property <duration> motion-delay: 400ms; // 卡片悬停后展开的延迟（公开资料 + 我们自定）
+    // 官方 CSS：卡片悬停 `transition: transform 0.2s ease-in-out`。
+    in property <duration> motion-zoom: 200ms;
+    // 官方 Hawkins 令牌：Button-Duration 250ms / Button-DurationPressed 0ms。
+    in property <duration> motion-button: 250ms;
+    in property <duration> motion-press: 0ms;
+    // 官方 CSS：`.lolomoRow,.rowContainer{transition:transform .54s cubic-bezier(.5,0,.1,1) 0s}`。
+    // （官方用在"行展开"；官方没给行入场时长，我们借它当行入场的"大位移"缓动。）
+    in property <duration> motion-row: 540ms;
+    // 入场位移量：内容/行进场 6px，详情页标题块 +8px 归位。
+    in property <length> motion-rise: 6px;
+    in property <length> motion-rise-hero: 8px;
     in property <length> focus-offset: 4px;
     in property <length> focus-width: 2px;
+
+    // ---- 缓动曲线（写在各 `animate` 里，原因见下）----
+    //
+    // 缓动没有做成 token：Slint 1.19 会为 `in property <easing>` 发
+    // "Properties of type easing are not supported yet for public API" 的构建警告。
+    // 所以曲线直接写在各个 `animate` 里，**只写官方原文里的值**，不自己编贝塞尔：
+    //   - 官方 CSS（卡片悬停）：`ease-in-out`
+    //   - 官方 Hawkins 令牌 Button-EasingHovered：`cubic-bezier(0.32, 0.94, 0.6, 1)`
+    //   - 官方 Hawkins 令牌 Button-Easing（离开 / 按下）：`cubic-bezier(0.4, 0, 0.68, 0.06)`
+    //   - 官方 CSS `.lolomoRow`（借作行入场）：`cubic-bezier(0.5, 0, 0.1, 1)`
+    //   - 其余（我们自定）：`ease-out`
 
     // ---- 布局 ----
     // Billboard：88vh、最大 720px（页面里按视口高度算）；左侧留白跟随 4vw gutter。

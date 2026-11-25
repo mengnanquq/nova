@@ -28,6 +28,17 @@ export component PosterCard inherits Rectangle {
     border-color: Theme.card-frame-border;
     property <length> content-inset: Theme.card-frame-padding + Theme.card-frame-border-width;
 
+    // ---- 加载骨架（**近似：静态占位**）----
+    //
+    // 官方 CSS 原文：`background-color: rgb(35,35,35); animation: loading 4000ms infinite linear`
+    // （斜向扫光，`Theme.motion-pulse` 就是那个 4000ms 周期）。
+    //
+    // 我们**不复刻扫光，也不做循环呼吸**：任务硬约束是不许引定时器 / 每帧重绘，
+    // 而"首帧之后再触发一次"在 Slint 里没有可靠的声明式时机（首次求值不播动画，
+    // 实测 `init` 里置位也会被跳过一次），所以这里只做**静态占位**：
+    // 官方底色 `Theme.skeleton-bg` + `Theme.skeleton-opacity-high`。
+    // 呼吸区间留在 `Theme.skeleton-opacity-low/high`，将来有真动画时直接用。
+
     // 图片区：内缩到外框内衬里，自己带 16px 圆角（占位底 + 首字母同区）。
     Rectangle {
         x: root.content-inset;
@@ -36,7 +47,18 @@ export component PosterCard inherits Rectangle {
         height: parent.height - root.content-inset * 2;
         clip: true;
         border-radius: Theme.radius-poster;
-        background: root.card.image.width > 0 ? transparent : Theme.surface-raised;
+        background: transparent;
+
+        // 骨架占位底：只在该卡没有图片时可见（静态，见文件头说明）。
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: Theme.radius-poster;
+            // 官方 CSS 的骨架底色：`background-color: rgb(35,35,35)`。
+            background: Theme.skeleton-bg;
+            opacity: Theme.skeleton-opacity-high;
+            visible: root.card.image.width <= 0;
+        }
 
         Text {
             text: root.card.initial;

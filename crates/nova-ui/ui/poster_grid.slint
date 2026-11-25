@@ -52,6 +52,19 @@ export component PosterGrid inherits Rectangle {
     // 放大卡可以穿出左右 gutter 与首行上沿（由 CardZoom 自己钳位）。
     clip: false;
 
+    // 内容入场：结果/媒体库数据到达（空 → 非空）时网格整体淡入。
+    // 网格没有单个"内容层"可以整体位移（卡片是绝对定位的 `for` 子项），
+    // 所以这里只做透明度；行级 6px 上浮由首页的 `CardRow.rise` 负责。
+    //
+    // 用自定义 float 进度（默认 0 = 隐藏态）而不是直接 `animate opacity`：
+    // opacity 默认 1，未被求值过的元素会从 1 到 1，等于没有动画。
+    property <float> reveal: root.cards.length > 0 ? 1 : 0;
+    animate reveal {
+        duration: Theme.motion-slow;
+        easing: ease-out;
+    }
+    opacity: root.reveal;
+
     property <float> zoom-factor: 1.0;
     property <int> zoom-index: root.focus-index;
 
@@ -60,15 +73,16 @@ export component PosterGrid inherits Rectangle {
             zoom-factor: Theme.zoom-factor;
             in {
                 animate zoom-factor {
-                    duration: Theme.zoom-duration;
+                    // 官方 CSS：`transition: transform 0.2s ease-in-out`。
+                    duration: Theme.motion-zoom;
                     delay: Theme.zoom-delay;
-                    easing: ease-out;
+                    easing: ease-in-out;
                 }
             }
             out {
                 animate zoom-factor {
-                    duration: Theme.zoom-duration;
-                    easing: ease-out;
+                    duration: Theme.motion-zoom;
+                    easing: ease-in-out;
                 }
             }
         }

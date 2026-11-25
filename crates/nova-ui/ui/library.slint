@@ -43,31 +43,23 @@ export component LibraryPage inherits Rectangle {
     // 网格几何：行高含放大信息区。
     property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.font-34 + Theme.space-4;
 
-    if (root.data.empty) :
-        EmptyState {
-            width: parent.width;
-            height: parent.height;
-            title: root.data.title + " 里还没有内容";
-            message: "同步完成后，海报会出现在这里。";
-            primary-label: "重新搜索";
-            primary => {
-                root.search();
-            }
-        }
-
+    // 不用 `visible` 门控网格：Slint 对属性的"第一次求值"不播动画，
+    // 若数据到达之前它是隐藏的，网格入场淡入（`PosterGrid.reveal`）会被跳过。
+    // 网格在卡片为空时不画任何东西，所以"常驻 + 内含空网格"与"隐藏"视觉一致；
+    // `interactive` 关掉，避免不可见的滚动区抢走空态面板的输入。
     grid-flick := Flickable {
-        visible: !root.data.empty;
         width: parent.width;
         height: parent.height;
-            interactive: true;
+            interactive: !root.data.empty;
             content-width: self.width;
             content-height: content.height;
 
             content := Rectangle {
                 width: parent.width;
 
-                // 标题 + 数量 + 排序。
+                // 标题 + 数量 + 排序（空数据时藏起来，别在空态面板后面露出"0 部"）。
                 HorizontalLayout {
+                    visible: !root.data.empty;
                     x: Theme.content-gutter;
                     y: Theme.navbar-height + Theme.space-5;
                     width: parent.width - Theme.content-gutter * 2;
@@ -137,6 +129,18 @@ export component LibraryPage inherits Rectangle {
                 }
 
                 height: grid.content-height;
+            }
+        }
+
+    if (root.data.empty) :
+        EmptyState {
+            width: parent.width;
+            height: parent.height;
+            title: root.data.title + " 里还没有内容";
+            message: "同步完成后，海报会出现在这里。";
+            primary-label: "重新搜索";
+            primary => {
+                root.search();
             }
         }
 

@@ -31,6 +31,8 @@ fn capture(app: &App, name: &str) {
     app.ui()
         .window()
         .set_size(slint::LogicalSize::new(1280.0, 800.0));
+    // 推过对话框入场动画（`Theme.motion-page`；无头后端不自行走时间）。
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
     let snapshot = app.ui().window().take_snapshot().unwrap();
     let path = snapshots_dir().join(name);
     write_png(&path, &snapshot);

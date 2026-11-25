@@ -139,6 +139,12 @@ export component Navbar inherits Rectangle {
                         // 纯文字态：当前项白、其余 text-secondary，悬停变白。
                         color: i == root.current-index || tab-area.has-hover
                             ? Theme.text : Theme.text-muted;
+                        // 颜色过渡 `motion-fast`；字重不可动画（激活仍是 semibold），
+                        // 且本顶栏本来就没有下划线指示条（第 9 节已注明）。
+                        animate color {
+                            duration: Theme.motion-fast;
+                            easing: ease-out;
+                        }
                         font-family: Theme.font-family;
                         font-size: Theme.font-14;
                         font-weight: i == root.current-index
@@ -166,6 +172,10 @@ export component Navbar inherits Rectangle {
                 ? Theme.surface-raised : (search-area.has-hover ? Theme.wash : transparent);
             animate width {
                 duration: Theme.motion;
+                easing: ease-out;
+            }
+            animate background {
+                duration: Theme.motion-fast;
                 easing: ease-out;
             }
 

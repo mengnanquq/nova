@@ -35,7 +35,12 @@ pub fn write_png(path: &Path, buffer: &SharedPixelBuffer<Rgba8Pixel>) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let file = std::fs::File::create(path).unwrap();
+    // 先写临时文件再 rename：同一个快照名可能被两个测试（并行跑）同时写
+    // （`add_server.rs` 的 `error_lands_in_the_error_area` 与 `dialog_snapshots`
+    // 都写 `add-server-error.png`），直接 `File::create` 会让两个线程互相截断，
+    // 落盘出"两个 PNG 拼接"的坏文件。临时名带线程 id，rename 是原子的。
+    let tmp = path.with_extension(format!("png.{:?}.tmp", std::thread::current().id()));
+    let file = std::fs::File::create(&tmp).unwrap();
     let writer = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(writer, buffer.width(), buffer.height());
     encoder.set_color(png::ColorType::Rgba);
@@ -46,6 +51,8 @@ pub fn write_png(path: &Path, buffer: &SharedPixelBuffer<Rgba8Pixel>) {
         bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
     }
     writer.write_image_data(&bytes).unwrap();
+    drop(writer);
+    std::fs::rename(&tmp, path).unwrap();
 }
 
 fn hash(text: &str) -> u32 {

@@ -50,20 +50,39 @@ component CardRow inherits Rectangle {
     property <length> title-off: Theme.section-title-height + Theme.space-3;
     property <float> zoom-factor: 1.0;
 
+    // ---- 内容入场（数据到达）----
+    //
+    // 数据从空变为非空时：整行淡入（reveal 0 → 1）+ 整体上浮 6px（只动绘制位置，
+    // 行高与子元素尺寸不变，所以"放大不跳布局"的断言仍成立）。没有定时器。
+    //
+    // 为什么用自定义 `reveal` 而不是直接 `animate opacity`：`opacity` 的默认值是 1，
+    // 而"创建时不可见 / 还没被求值过"的元素上，动画会从默认值 1 过渡到 1，
+    // 看上去就像没动画（Slint 的 animate 从属性当前值过渡）。`property <float>`
+    // 的默认值是 0（恰好是隐藏态），所以从 0 起步一定看得见。
+    property <float> reveal: root.cards.length > 0 ? 1 : 0;
+    animate reveal {
+        duration: Theme.motion-row;
+        easing: cubic-bezier(0.5, 0, 0.1, 1);
+    }
+    opacity: root.reveal;
+    // 位移由同一条进度反推（length 属性默认 0 = 终态，不能直接 animate）。
+    property <length> rise: Theme.motion-rise * (1 - root.reveal);
+
     states [
         zoomed when root.zoom-index >= 0 : {
             zoom-factor: Theme.zoom-factor;
             in {
                 animate zoom-factor {
-                    duration: Theme.zoom-duration;
+                    // 官方 CSS：`transition: transform 0.2s ease-in-out`。
+                    duration: Theme.motion-zoom;
                     delay: Theme.zoom-delay;
-                    easing: ease-out;
+                    easing: ease-in-out;
                 }
             }
             out {
                 animate zoom-factor {
-                    duration: Theme.zoom-duration;
-                    easing: ease-out;
+                    duration: Theme.motion-zoom;
+                    easing: ease-in-out;
                 }
             }
         }
@@ -75,7 +94,7 @@ component CardRow inherits Rectangle {
     // 行标题 + 查看全部（与卡同起于 gutter）。
     HorizontalLayout {
         x: Theme.gutter;
-        y: 0;
+        y: root.rise;
         width: parent.width - Theme.gutter * 2;
         height: Theme.section-title-height;
         spacing: Theme.space-3;
@@ -125,7 +144,7 @@ component CardRow inherits Rectangle {
     // 滚动时卡片只在窗口边缘被裁掉（外层纵向视口即遮罩）。
     flick := Flickable {
         x: 0;
-        y: title-off;
+        y: title-off + root.rise;
         width: parent.width;
         height: root.card-height;
         interactive: true;
@@ -168,7 +187,7 @@ component CardRow inherits Rectangle {
             + root.card-width / 2 - flick.content-x;
         // 放大卡可以穿出左右 gutter（钳到窗口边缘）；上移 12px。
         x: clamp(center-x - zw / 2, 0px, parent.width - zw);
-        y: title-off + root.card-height / 2 - zh / 2 - Theme.zoom-rise;
+        y: title-off + root.rise + root.card-height / 2 - zh / 2 - Theme.zoom-rise;
         width: zw;
         visible: root.cards.length > 0 && root.zoom-index >= 0
             && root.zoom-index < root.cards.length;
@@ -193,12 +212,18 @@ component CardRow inherits Rectangle {
     // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
     arrow-left := Rectangle {
         x: 0;
-        y: title-off + (root.card-height - Theme.arrow-size) / 2;
+        y: title-off + root.rise + (root.card-height - Theme.arrow-size) / 2;
         width: Theme.arrow-size;
         height: Theme.arrow-size;
         border-radius: Theme.radius-badge;
         background: Theme.badge-bg;
         visible: root.zoom-index >= 0 || arrow-left-area.has-hover;
+        // 悬停微交互：只降不透明度，图标本体不位移。
+        opacity: arrow-left-area.has-hover ? 0.85 : 1;
+        animate opacity {
+            duration: Theme.motion-fast;
+            easing: ease-out;
+        }
 
         // ‹ 箭头：字体字形（Inter / DejaVu 都有 U+2039，实测不豆腐；
         // transform-rotation 在 1.19 渲染器里不生效，不能用短棒旋转拼）。
@@ -215,7 +240,13 @@ component CardRow inherits Rectangle {
 
         arrow-left-area := TouchArea {
             clicked => {
-                flick.content-x = max(flick.content-x - root.width, 0px);
+                // 箭头翻页用 Flickable 内置的平滑滚动（`ScrollBehavior.smooth`）。
+                //
+                // 不直接给 `content-x` 加 `animate`：那会把用户拖拽/滚轮也套上缓动
+                // （拖拽必须跟手，硬要求）。内置平滑滚动只影响这一次程序化定位，
+                // 用户手势仍然逐帧跟手；缓动曲线是 Slint 库内的 spring 模拟，
+                // 不走 `Theme` 时长 token（见 docs/ui-netflix-1to1.md 第 9 节说明）。
+                flick.scroll-to({ x: -flick.content-x - root.width, y: -flick.content-y }, ScrollBehavior.smooth);
             }
         }
     }
@@ -228,6 +259,11 @@ component CardRow inherits Rectangle {
         border-radius: Theme.radius-badge;
         background: Theme.badge-bg;
         visible: root.zoom-index >= 0 || arrow-right-area.has-hover;
+        opacity: arrow-right-area.has-hover ? 0.85 : 1;
+        animate opacity {
+            duration: Theme.motion-fast;
+            easing: ease-out;
+        }
 
         // › 箭头：与左侧镜像（U+203A）。
         Text {
@@ -243,8 +279,7 @@ component CardRow inherits Rectangle {
 
         arrow-right-area := TouchArea {
             clicked => {
-                flick.content-x = min(flick.content-x + root.width,
-                    max(flick.content-width - root.width, 0px));
+                flick.scroll-to({ x: -flick.content-x + root.width, y: -flick.content-y }, ScrollBehavior.smooth);
             }
         }
     }
@@ -315,6 +350,12 @@ export component HomePage inherits Rectangle {
     // 键盘焦点落到行内的局部索引（焦点不在该行时为 -1）。
     property <int> continue-focus: root.focus-index < root.continue-count
         ? root.focus-index : -1;
+    // 页面级内容入场：数据到达时整块淡入（reveal 默认 0 = 隐藏态，见 CardRow 注释）。
+    property <float> reveal: root.data.empty ? 0 : 1;
+    animate reveal {
+        duration: Theme.motion-slow;
+        easing: ease-out;
+    }
     // 焦点不在本行（越界）时必须是 -1：大下标不能点亮下一行的箭头/放大。
     property <int> recent-focus: root.focus-index >= root.continue-count
         && root.focus-index - root.continue-count < root.recent-count
@@ -329,29 +370,20 @@ export component HomePage inherits Rectangle {
     out property <bool> row0-zoom-on: row0.zoom-on;
     out property <length> row0-arrow-y: row0.arrow-y + row0.y - flick.content-y;
 
-    if (root.data.empty) :
-        EmptyState {
-            width: parent.width;
-            height: parent.height;
-            title: "媒体库还是空的";
-            message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
-            primary-label: "连接服务器";
-            secondary-label: "搜索本地缓存";
-            primary => {
-                root.connect-server();
-            }
-            secondary => {
-                root.search();
-            }
-        }
-
+    // 注意：这里**不用** `visible` 门控，改成 opacity 驱动（`reveal`）。
+    // 原因：Slint 对"属性第一次求值"不播动画，若用 `visible: false` 藏起来，
+    // 数据到达的那一刻才是它第一次被绘制 → 入场淡入会被跳过。
+    // 空数据时 flick 里没有任何可见内容（billboard / 行都不实例化），
+    // 所以"常驻 + opacity 0"与原来的"隐藏"视觉一致；同时把 `interactive` 关掉，
+    // 避免一层不可见的滚动区抢走空态面板的滚轮/点击。
     flick := Flickable {
-        visible: !root.data.empty;
         width: parent.width;
         height: parent.height;
-        interactive: true;
+        interactive: !root.data.empty;
         content-width: self.width;
         content-height: root.content-total;
+        // 内容入场：数据到达（空 → 非空）时整块淡入。行自己再叠 6px 上浮（CardRow.rise）。
+        opacity: root.reveal;
 
         content := VerticalLayout {
             width: parent.width;
@@ -396,12 +428,14 @@ export component HomePage inherits Rectangle {
 
                     // 文案块：底边锚在距 billboard 底 18% 处（清单数值）。
                     // 用固定高度容器 + alignment: end，不依赖 preferred-height 反推。
+                    // 入场：随内容整体上浮 6px 归位（由页面级 `reveal` 反推，不再单独 animate）。
                     Rectangle {
                         x: Theme.billboard-left;
                         width: parent.width - Theme.billboard-left - Theme.gutter;
                         // 有简介：标题 58 + 元信息 20 + 简介 78 + 按钮 44 + 间距；无简介收紧。
                         height: root.data.hero.overview != "" ? 240px : 160px;
-                        y: parent.height * 0.82 - self.height;
+                        y: parent.height * 0.82 - self.height
+                            + Theme.motion-rise * (1 - root.reveal);
                         background: transparent;
 
                         VerticalLayout {
@@ -456,12 +490,32 @@ export component HomePage inherits Rectangle {
                                 border-radius: Theme.radius-badge;
                                 background: Theme.btn-primary-bg;
 
+                                // 悬停洗色：opacity 过渡而不是 visible 硬切。
                                 Rectangle {
                                     width: parent.width;
                                     height: parent.height;
                                     border-radius: parent.border-radius;
                                     background: Theme.wash;
-                                    visible: hero-play-area.has-hover;
+                                    opacity: hero-play-area.has-hover ? 1 : 0;
+                                    animate opacity {
+                                        // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+                                        duration: Theme.motion-button;
+                                        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                                    }
+                                }
+
+                                // 按压反馈（scale 0.98 的近似，见 Theme.press-wash 注释）。
+                                Rectangle {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: Theme.press-wash;
+                                    opacity: hero-play-area.pressed ? 1 : 0;
+                                    animate opacity {
+                                        // 官方 Hawkins 令牌：Button-DurationPressed 0ms（按下立即生效）。
+                                        duration: Theme.motion-press;
+                                        easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                                    }
                                 }
 
                                 Text {
@@ -495,7 +549,23 @@ export component HomePage inherits Rectangle {
                                     height: parent.height;
                                     border-radius: parent.border-radius;
                                     background: Theme.wash;
-                                    visible: hero-info-area.has-hover;
+                                    opacity: hero-info-area.has-hover ? 1 : 0;
+                                    animate opacity {
+                                        duration: Theme.motion-button;
+                                        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: Theme.press-wash;
+                                    opacity: hero-info-area.pressed ? 1 : 0;
+                                    animate opacity {
+                                        duration: Theme.motion-press;
+                                        easing: cubic-bezier(0.4, 0, 0.68, 0.06);
+                                    }
                                 }
 
                                 HorizontalLayout {
@@ -612,6 +682,22 @@ export component HomePage inherits Rectangle {
                 }
         }
     }
+
+    if (root.data.empty) :
+        EmptyState {
+            width: parent.width;
+            height: parent.height;
+            title: "媒体库还是空的";
+            message: "连接一个 Emby 或 Jellyfin 服务器后，这里会出现最近添加与继续观看。";
+            primary-label: "连接服务器";
+            secondary-label: "搜索本地缓存";
+            primary => {
+                root.connect-server();
+            }
+            secondary => {
+                root.search();
+            }
+        }
 
     // 顶栏最后绘制：透明浮在 billboard 上；滚动 40px 后变实底。
     nav := Navbar {

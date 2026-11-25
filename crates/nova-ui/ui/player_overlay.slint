@@ -111,6 +111,11 @@ component VolumeButton inherits Rectangle {
     background: volume-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
     border-width: Theme.player-icon-border-width;
     border-color: Theme.player-icon-border;
+    animate background {
+        // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+        duration: Theme.motion-button;
+        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+    }
 
     VolumeGlyph {
         x: (parent.width - self.width) / 2;
@@ -139,6 +144,15 @@ component TransportButton inherits Rectangle {
     background: area.has-hover ? Theme.surface-raised : (root.active ? Theme.player-menu-selected : Theme.player-icon-bg);
     border-width: Theme.player-icon-border-width;
     border-color: root.active ? Theme.hairline-strong : Theme.player-icon-border;
+    animate background {
+        // 官方 Hawkins 令牌：Button-Duration 250ms + Button-EasingHovered。
+        duration: Theme.motion-button;
+        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+    }
+    animate border-color {
+        duration: Theme.motion-button;
+        easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+    }
 
     area := TouchArea {
         mouse-cursor: pointer;
@@ -169,9 +183,16 @@ component PlayButton inherits Rectangle {
     width: Theme.player-play-size;
     height: Theme.player-play-size;
     border-radius: Theme.radius-pill;
-    background: area.has-hover ? Theme.accent-hover : Theme.accent;
+    // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed。
+    background: area.pressed ? Theme.accent-pressed
+        : (area.has-hover ? Theme.accent-hover : Theme.accent);
     border-width: Theme.player-icon-border-width;
     border-color: Theme.player-icon-border;
+    animate background {
+        // Button-Duration 250ms / Button-DurationPressed 0ms。
+        duration: area.pressed ? Theme.motion-press : Theme.motion-button;
+        easing: area.has-hover ? cubic-bezier(0.32, 0.94, 0.6, 1) : cubic-bezier(0.4, 0, 0.68, 0.06);
+    }
 
     area := TouchArea {
         mouse-cursor: pointer;
@@ -567,6 +588,16 @@ export component PlayerOverlay inherits Rectangle {
     background: transparent;
 
     property <bool> controls-visible: root.data.controls-visible;
+    // ---- 控制层显隐：opacity 过渡 ----
+    //
+    // 直接用 `visible` 切控制层会把淡出掐断，所以改成"保持结构、opacity 过渡"：
+    // 淡出期间 `visible: controls-fade > 0.01` 仍为真（能看到渐变），
+    // 归零后元素不再参与命中测试，透明层不会吃掉点击。
+    property <float> controls-fade: root.controls-visible ? 1 : 0;
+    animate controls-fade {
+        duration: Theme.motion;
+        easing: ease-out;
+    }
     property <bool> scrubbing: false;
     property <float> drag-ratio: 0;
     property <float> shown-ratio: root.scrubbing ? root.drag-ratio : root.data.progress;
@@ -604,7 +635,8 @@ export component PlayerOverlay inherits Rectangle {
 
     // ---- 左上返回 ----
     Rectangle {
-        visible: root.controls-visible;
+        visible: root.controls-fade > 0.01;
+        opacity: root.controls-fade;
         x: Theme.gutter;
         y: Theme.space-5;
         width: 44px;
@@ -613,6 +645,10 @@ export component PlayerOverlay inherits Rectangle {
         background: back-area.has-hover ? Theme.surface-raised : Theme.player-icon-bg;
         border-width: Theme.player-icon-border-width;
         border-color: Theme.player-icon-border;
+        animate background {
+            duration: Theme.motion-button;
+            easing: cubic-bezier(0.32, 0.94, 0.6, 1);
+        }
 
         back-text := Text {
             x: 0;
@@ -661,7 +697,8 @@ export component PlayerOverlay inherits Rectangle {
     }
 
     // ---- 中央大播放图标（暂停时，半透明，不挡字幕）----
-    if root.show-center-play && root.controls-visible : Rectangle {
+    if root.show-center-play && root.controls-fade > 0.01 : Rectangle {
+        opacity: root.controls-fade;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         width: Theme.player-icon-size;
@@ -721,7 +758,14 @@ export component PlayerOverlay inherits Rectangle {
                 height: Theme.button-primary-height;
                 width: retry-text.preferred-width + Theme.space-6 * 2;
                 border-radius: Theme.radius-pill;
-                background: retry-area.has-hover ? Theme.accent-hover : Theme.accent;
+                // 官方 Hawkins 令牌：Button-Surface / Hovered / Pressed。
+                background: retry-area.pressed ? Theme.accent-pressed
+                    : (retry-area.has-hover ? Theme.accent-hover : Theme.accent);
+                animate background {
+                    duration: retry-area.pressed ? Theme.motion-press : Theme.motion-button;
+                    easing: retry-area.has-hover
+                        ? cubic-bezier(0.32, 0.94, 0.6, 1) : cubic-bezier(0.4, 0, 0.68, 0.06);
+                }
 
                 retry-area := TouchArea {
                     mouse-cursor: pointer;
@@ -749,7 +793,8 @@ export component PlayerOverlay inherits Rectangle {
     // ---- 底部遮罩 ----
     // 两段式渐变：底部到 60% 高度是 0.85 的不透明平台，60% → 100% 才淡出。
     Rectangle {
-        visible: root.controls-visible;
+        visible: root.controls-fade > 0.01;
+        opacity: root.controls-fade;
         x: 0;
         y: root.height - self.height;
         width: 100%;
