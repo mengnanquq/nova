@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 详情页（Netflix 风格）：全宽 backdrop（60vh）+ 上下双向渐变、
-//! 42px 标题、`·` 分隔的元信息、640px 简介、`▶ 播放` + `+ 我的列表`、
+//! 详情页（Netflix 风格）：全宽 backdrop（78vh —— 实测 hero 845px / 视口 1080px = 0.782）+ 上下双向渐变、
+//! 48px 标题、`·` 分隔的元信息、697px 简介、`▶ 播放` + `+ 我的列表`、
 //! NETFLIX 风格的版本下拉（替换三行列表）。
 
 import { Theme } from "theme.slint";
@@ -17,7 +17,8 @@ export component DetailPage inherits Rectangle {
     callback play();
     callback source-selected(string);
 
-    background: Theme.bg;
+    // 详情页底色：实测 rgb(15,15,15)，与其它页的纯黑不同。
+    background: Theme.detail-bg;
 
     // "我的列表"是纯视觉态：点击切换，不落数据。
     in-out property <bool> in-my-list: false;
@@ -37,7 +38,7 @@ export component DetailPage inherits Rectangle {
             // backdrop + 下方文字区（简介 / 按钮 / 版本）。
             height: max(parent.height, root.backdrop-height + lower.preferred-height + Theme.space-8);
 
-            // ---- Backdrop（60vh）----
+            // ---- Backdrop（78vh）----
             Image {
                 x: 0;
                 y: 0;
@@ -58,30 +59,34 @@ export component DetailPage inherits Rectangle {
                     y: 0;
                     width: parent.width;
                     height: root.backdrop-height;
-                    background: @linear-gradient(180deg, Theme.surface 0%, Theme.bg 100%);
+                    background: @linear-gradient(180deg, Theme.surface 0%, Theme.detail-bg 100%);
                 }
 
-            // 上下双向渐变到 bg：下缘全渐变，上缘浅渐变压住顶栏。
+            // 底部压暗渐变。实测 CSS 是作用在**整个 hero** 上的
+            // `linear-gradient(rgba(0,0,0,0) 40%, …, rgba(0,0,0,.6) 100%)`：
+            // 变暗从 hero 的 40% 处开始、到底部达到 0.6 不透明度。
+            // Slint 里等价写法是「只盖 hero 下半段 60%，渐变从 0% 走到 100%」——
+            // 若沿用 40%→100% 的 stops，变暗起点会被推迟到 hero 的 76%，画面明显不对。
             Rectangle {
                 x: 0;
-                y: root.backdrop-height - self.height;
+                y: root.backdrop-height * 0.4;
                 width: parent.width;
-                height: root.backdrop-height * 0.55;
-                background: @linear-gradient(180deg, #00000000 0%, Theme.bg 100%);
+                height: root.backdrop-height * 0.6;
+                background: @linear-gradient(180deg, #00000000 0%, #00000099 100%);
             }
 
             Rectangle {
                 x: 0;
                 y: 0;
                 width: parent.width;
-                height: root.backdrop-height * 0.25;
+                height: root.backdrop-height * 0.15;
                 background: @linear-gradient(180deg, Theme.scrim-soft 0%, #00000000 100%);
                 visible: root.data.backdrop.width > 0;
             }
 
             // 返回按钮（左上）。
             Rectangle {
-                x: Theme.gutter;
+                x: Theme.detail-gutter;
                 y: Theme.space-4;
                 width: back-label.preferred-width + Theme.space-5;
                 height: 36px;
@@ -106,91 +111,92 @@ export component DetailPage inherits Rectangle {
             }
 
             // ---- 标题 / 元信息（压在 backdrop 下缘）----
-            // 标题 / 元信息：手工定位（底边锚在 backdrop 下缘上方 24px），
-            // 全部显式高度 —— 无头渲染器对 CJK 回退字体的 preferred-height 测量不可靠。
-            property <length> title-top: root.backdrop-height - 160px;
+            // 高度自适应：48px 标题 + 原文名 + 元信息交给 VerticalLayout 自己撑开，
+            // 整块贴住 backdrop 下缘（`alignment: end`），长标题不再被 160px 固定高度裁切。
+            title-block := VerticalLayout {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: root.backdrop-height;
+                padding-left: Theme.detail-gutter;
+                padding-right: Theme.detail-gutter;
+                alignment: end;
+                spacing: Theme.space-1;
 
-            title-block := Rectangle {
-                x: Theme.gutter;
-                width: parent.width - Theme.gutter * 2;
-                y: title-top;
-                height: 160px;
-                background: transparent;
+                // 标题：48px bold（Netflix 实测）。Text 直接放进布局时，无头渲染器
+                // 会按极窄宽度算 preferred-height（一行字撑成几十行），所以外面套一层
+                // 定宽 Rectangle，用 Text 自己的 preferred-height 撑开（长标题换行不裁切）。
+                Rectangle {
+                    height: title-text.preferred-height;
+                    background: transparent;
 
-                Text {
-                    y: 0;
-                    width: parent.width;
-                    height: 52px;
-                    text: root.data.title;
-                    color: Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-42;
-                    font-weight: Theme.weight-bold;
-                    overflow: elide;
-                    wrap: no-wrap;
-                    visible: root.data.original-title == "";
-                }
-
-                // 有原文名时标题上移，给原文名留一行。
-                Text {
-                    y: root.data.original-title == "" ? 0px : -16px;
-                    width: parent.width;
-                    height: 52px;
-                    text: root.data.title;
-                    color: Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-42;
-                    font-weight: Theme.weight-bold;
-                    overflow: elide;
-                    wrap: no-wrap;
-                    visible: root.data.original-title != "";
+                    title-text := Text {
+                        width: parent.width;
+                        text: root.data.title;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-48;
+                        font-weight: Theme.weight-bold;
+                        min-height: 56px;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                        visible: root.data.title != "";
+                    }
                 }
 
                 Text {
-                    y: 52px;
-                    width: parent.width;
-                    height: 20px;
                     text: root.data.original-title;
                     color: Theme.text-muted;
                     font-family: Theme.font-family;
                     font-size: Theme.font-14;
-                    visible: root.data.original-title != "";
+                    min-height: 20px;
                     overflow: elide;
                     wrap: no-wrap;
+                    visible: root.data.original-title != "";
                 }
 
+                // 元信息：实测 14px / 字重 500。
+                // 注意：`·` 分隔与项间距 30px 都在数据层（`detail_meta_line`）拼好的
+                // 单串里，Slint 侧无法逐字符上色 / 逐项调间距（见 docs/ui-netflix-1to1.md 第 7 节）。
                 Text {
-                    y: 52px + (root.data.original-title == "" ? 0px : 20px);
-                    width: parent.width;
-                    height: 20px;
                     text: root.data.meta-line;
                     color: Theme.text-muted;
                     font-family: Theme.font-family;
                     font-size: Theme.font-14;
+                    font-weight: Theme.weight-medium;
+                    min-height: 20px;
+                    overflow: elide;
+                    wrap: no-wrap;
                     visible: root.data.meta-line != "";
                 }
-
-                // 不再单独画类型行：meta-line 已经是 `·` 分隔的完整元信息
-                // （年份 · 时长 · 类型），重复一同样式反而成了两个类型行。
             }
 
             // ---- 简介 / 按钮 / 版本下拉（backdrop 下方的黑底区）----
             lower := VerticalLayout {
-                x: Theme.gutter;
-                width: parent.width - Theme.gutter * 2;
+                x: Theme.detail-gutter;
+                width: parent.width - Theme.detail-gutter * 2;
+                // 内容块现在落在 hero **下方**。Netflix 实测是叠在 hero 下半部
+                // （内容底端距 hero 下缘 112px），但把 VerticalLayout 上移后子项
+                // 会互相重叠（标题压住简介），需要先重排内部定位才能做，见文档备注。
                 y: root.backdrop-height + Theme.space-5;
                 spacing: Theme.space-4;
 
-                Text {
-                    text: root.data.overview;
-                    color: Theme.text;
-                    font-family: Theme.font-family;
-                    font-size: Theme.font-16;
-                    width: 640px;
-                    height: 90px;
-                    wrap: word-wrap;
-                    overflow: elide;
-                    visible: root.data.overview != "";
+                // 简介：实测宽 697px、16px / 行高 24px、不限行数（Slint 无 line-height，
+                // 行距用字体默认；高度由文字行数自适应，不再 90px 截断 + elide）。
+                Rectangle {
+                    width: 697px;
+                    height: overview-text.preferred-height;
+                    background: transparent;
+
+                    overview-text := Text {
+                        width: parent.width;
+                        text: root.data.overview;
+                        color: Theme.text;
+                        font-family: Theme.font-family;
+                        font-size: Theme.font-16;
+                        wrap: word-wrap;
+                        visible: root.data.overview != "";
+                    }
                 }
 
                 HorizontalLayout {

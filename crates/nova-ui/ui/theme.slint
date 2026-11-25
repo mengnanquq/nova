@@ -9,6 +9,8 @@ export global Theme {
     // ---- 颜色 ----
     // Netflix 是纯黑底，不是深灰。
     in property <color> bg: #000000;
+    // 详情页底色：Netflix 详情页实测 `background-color: rgb(15,15,15)`（非纯黑）。
+    in property <color> detail-bg: #0F0F0F;
     // 顶栏实底 / 菜单 / 面板。
     in property <color> surface: #141414;
     // 卡片 / 按钮悬停。
@@ -20,6 +22,8 @@ export global Theme {
     in property <color> text-muted: #B3B3B3;
     // 次要说明。
     in property <color> text-faint: #808080;
+    // 详情页元信息分隔点：实测 `rgba(255,255,255,.4)`（比 text-faint 更中性）。
+    in property <color> detail-meta-dot: #FFFFFF66;
     // 品牌红：只用于 logo 点、选中态、进度条，不大面积铺。
     in property <color> accent: #E50914;
     in property <color> accent-hover: #F6121D;
@@ -67,6 +71,8 @@ export global Theme {
     in property <length> space-8: 48px;
     // 页面左右留白：4vw（1280 → 51px），≥1920 固定 60px。
     in property <length> gutter: root.viewport-width >= 1920px ? 60px : root.viewport-width * 0.04;
+    // 详情页正文左右留白：1920 实测各 200px（正文列宽 1520px）。
+    in property <length> detail-gutter: root.viewport-width >= 1920px ? 200px : root.gutter;
     in property <length> block-gap: 40px;
     in property <length> section-gap: 40px;
     // 行内卡间距：Netflix 实测常量 12px（`margin-right: .75rem`，首末项归零）。
@@ -82,7 +88,8 @@ export global Theme {
     // - 竖版卡 `width: 15rem; height: 21rem` = 240×336（1920 断点），5:7。
     // - 卡间距 `margin-right: .75rem` = 12px，首末项归零。
     // 之前用「视口宽 × 0.166」线性缩放，1280→1920 之间会与 Netflix 明显偏离。
-    in property <length> card-landscape-w: root.viewport-width >= 1920px ? 447px
+    // 1920 同样是 327px（实测「集數」行卡宽 327；447px 只属于「预告」行，我们没有那种行）。
+    in property <length> card-landscape-w: root.viewport-width >= 1920px ? 327px
         : root.viewport-width >= 1280px ? 327px
         : min(root.viewport-width * 0.25, 283px);
     in property <length> card-landscape-h: root.card-landscape-w * 9 / 16;
@@ -90,6 +97,16 @@ export global Theme {
         : root.viewport-width >= 1280px ? 184px
         : min(root.viewport-width * 0.16, 130px);
     in property <length> card-portrait-h: root.card-portrait-w * 7 / 5;
+
+    // ---- 卡片外框（Netflix 集数卡实测）----
+    //
+    // 卡片自带一层 8px 内衬：容器底 `rgba(255,255,255,.1)`、2px 描边
+    // `rgba(255,255,255,.04)`、圆角 16px，图片内缩后圆角同为 16px。
+    // 327 宽的卡：327 - 2×(8 + 2) = 307 宽缩略图，与实测 307×173 吻合。
+    in property <color> card-frame-bg: #FFFFFF1A;
+    in property <color> card-frame-border: #FFFFFF0A;
+    in property <length> card-frame-padding: 8px;
+    in property <length> card-frame-border-width: 2px;
 
     // ---- 卡片放大（清单：1.35 倍、延迟 400ms、200ms ease-out、上移 12px）----
     in property <float> zoom-factor: 1.35;
@@ -131,11 +148,13 @@ export global Theme {
     in property <length> font-16: 16px;
     in property <length> font-20: 20px;
     in property <length> font-22: 22px;
+    // 详情页区块标题：实测 32px / 700 / 行高 46px / 下距 12px。
+    in property <length> font-32: 32px;
     in property <length> font-34: 34px;
     in property <length> font-42: 42px;
     in property <length> font-48: 48px;
-    // 详情页 backdrop 占窗口高度比例（60vh）。
-    in property <float> detail-backdrop-ratio: 0.6;
+    // 详情页 backdrop 占窗口高度比例：实测 hero 845px / 视口 1080px = 0.782。
+    in property <float> detail-backdrop-ratio: 0.78;
     // 顶栏搜索框：展开宽度 / 高度。
     in property <length> search-box-width: 240px;
     in property <length> search-box-height: 36px;

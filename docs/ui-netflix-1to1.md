@@ -54,7 +54,7 @@
 
 - **Home**：billboard → 继续观看（16:9，带进度）→ 最近添加（2:3）→ 各库前 20 条（16:9）。
 - **Library**：标题 34px + 数量 14px `#B3B3B3`；网格 6 列（≥1440 为 7 列），卡 2:3，间距 8px。
-- **Detail**：backdrop 60vh + 上下渐变；标题 42px；元信息 `·` 分隔；简介宽 640px；`▶ 播放` + `+ 我的列表`；版本下拉。
+- **Detail**：backdrop 78vh + 上下渐变；标题 48px（高度自适应）；元信息 `·` 分隔、14px/500；简介宽 697px、不限行数；`▶ 播放` + `+ 我的列表`；版本下拉。逐项实测值见第 7 节。
 - **Player**：控制层保持现有结构，进度条与按钮换 Netflix 红/白。
 
 ## 5. 明确不做
@@ -71,3 +71,46 @@
 | 放大卡覆盖层级 | 放大卡压住相邻卡，不被裁切 |
 | 顶栏滚动变色 | 滚轮下滚 40px 后截一张，对比顶栏底色 |
 | 中文不豆腐 | 快照目视 |
+
+## 7. Netflix 实测值（1920×1080，netflix.com/tw/title/80100172）
+
+口径：1920×1080 视口、**免登录 non-member 版**详情页，取值方式是 DevTools 读
+`getComputedStyle` / `getBoundingClientRect`（已知条目 `80100172`）。
+
+> **「播放」/「更多信息」双按钮与播放器控件因未登录无法实测**（该区域被登录引导替代），
+> 所以按钮尺寸**沿用我们现有值**（高 44px、白底/半透明白底），本节其余项均为实测。
+
+| 项 | 实测值 | 落在代码哪里 |
+|---|---|---|
+| 页面底色 | `background-color: rgb(15,15,15)` | `Theme.detail-bg`（**不动** `Theme.bg`，其它页仍然纯黑） |
+| hero 高度 | 845px / 视口 1080px = 0.782 | `Theme.detail-backdrop-ratio: 0.78` |
+| hero 底部渐变 | `linear-gradient(rgba(0,0,0,0) 40%, rgba(0,0,0,.6) 100%)`，占 hero 高 60% | `detail.slint` 底部层：高 `backdrop-height * 0.6`、`@linear-gradient(180deg, #00000000 40%, #00000099 100%)` |
+| hero 顶部压暗 | 浅黑渐变压住顶栏 | 顶部层高 `backdrop-height * 0.15`，`Theme.scrim-soft` → 透明 |
+| 正文左右 padding | 200px（1920） | `Theme.detail-gutter`（≥1920 为 200px，否则沿用 `Theme.gutter`） |
+| 正文列宽 | 1520px（1920 − 200×2） | 同上 |
+| section 间距 | 40px | `Theme.section-gap: 40px` |
+| 区块标题 | 32px / 700 / 行高 46px / 下距 12px | `Theme.font-32` + `Theme.weight-bold`（详情页当前没有 section 标题，故仅立 token） |
+| 主标题 | 48px / 700（有 logo 图时用图，无图回退文字 48px bold） | `Theme.font-48`；标题块高度**自适应**（`min-height: 56px` + 换行，不再 160px 固定高度） |
+| 元信息 | 14px / 500 / 项间距 30px（`margin-left: 30px`）/ 分隔点 `rgba(255,255,255,.4)` | 字号 14px、字重 `Theme.weight-medium` 已对齐；**项间距与点色在数据层字符串内**（`detail_meta_line` 用 `·` 拼成一串），Slint 侧不能逐项调间距 / 逐字上色，`Theme.detail-meta-dot: #FFFFFF66` 先立 token |
+| 简介 | 16px / 行高 24px / 宽 696.95px（≈697）/ 不限行数 | 宽 697px、`wrap: word-wrap`、去掉 `elide` 与 90px 固定高（Slint 无 `line-height`，行距用字体默认） |
+| 集数（横版）卡 | 327×322（容器）；缩略图 307×173 | `Theme.card-landscape-w` = 327px（≥1280，含 1920；447px 只属于「预告」行，我们没有那种行）；`card-landscape-h = w × 9/16` |
+| 集数卡外框 | `padding 8px` / `radius 16px` / `background rgba(255,255,255,.1)` / `border 2px solid rgba(255,255,255,.04)` | `Theme.card-frame-bg` / `card-frame-border` / `card-frame-padding` / `card-frame-border-width`；`poster_card.slint` 统一生效（首页行卡同步带上内衬，属预期） |
+| 缩略图圆角 | 16px | `Theme.radius-poster`（图片内缩后自己带圆角） |
+| 时长角标 | `rgba(0,0,0,.9)` 底 / `radius 4px` / `padding 1px 12px` / 13px | 现有 `Theme.badge-bg`（`#000000B3`）+ `radius-badge` 4px + 12px 字号；**未逐项对齐**（我们的角标在卡右上角，Netflix 在缩略图右下角） |
+| 竖版（海报）卡 | 240×336（5:7） | `Theme.card-portrait-w/h` |
+| 卡间距 | 12px（`margin-right: .75rem`，首末归零） | `Theme.card-gap` |
+| 主 CTA（播放按钮） | 266×48 / `radius 100` / `#E50914` / 18px 500 | **无法实测**（登录墙）；沿用现有白底 44 高按钮，不改 |
+
+实现备注（实测值的边界）：
+
+1. 底部渐变层取 hero 的 60% 高、内部 stops 40%→100%，因此实际变暗起点落在 hero 的
+   76% 处；若按「整段 hero 上 40% 处开始变暗」解释，应改为占满 hero 高、stops 仍 40%→100%。
+   当前按本节表格实现（层高 60% + stops 40/100）。
+2. `Text` 直接作为 `VerticalLayout` 子项时，无头渲染器（`i-slint-backend-testing` 的
+   parley 测量）会把换行文本的 preferred-height 算成按极窄宽度折行的结果（实测 80 字简介
+   被算成 ≈711px），导致后续按钮被挤出视口。因此标题与简介都套一层定宽 `Rectangle` 容器，
+   用 `Text.preferred-height` 撑开高度。
+3. 元信息行的「项间距 30px」与「点 `.4` 白」都在 `viewmodel::detail_meta_line` 拼好的
+   单串里，不碰 Rust 逻辑就无法逐项生效——需要后续把元信息拆成分段字段。
+4. 集数卡外框对 `PosterCard` 是全局改动，放大覆盖层（`CardZoom`）保持原样式（它是一张
+   独立的放大卡，本次未纳入实测范围）。

@@ -21,14 +21,22 @@ export component PosterCard inherits Rectangle {
     height: card-height;
     clip: true;
     border-radius: Theme.radius-poster;
-    background: Theme.surface;
+    // 卡片外框（Netflix 集数卡实测）：8px 内衬 + 2px 极淡描边 + 16px 圆角。
+    // 327 宽的横版卡：327 - 2×(8 + 2) = 307 宽缩略图（实测 307×173）。
+    background: Theme.card-frame-bg;
+    border-width: Theme.card-frame-border-width;
+    border-color: Theme.card-frame-border;
+    property <length> content-inset: Theme.card-frame-padding + Theme.card-frame-border-width;
 
-    // 占位底色 + 首字母（图片为空时才可见）。
+    // 图片区：内缩到外框内衬里，自己带 16px 圆角（占位底 + 首字母同区）。
     Rectangle {
-        width: parent.width;
-        height: parent.height;
-        background: root.card.image.width > 0 ? transparent : Theme.surface-raised;
+        x: root.content-inset;
+        y: root.content-inset;
+        width: parent.width - root.content-inset * 2;
+        height: parent.height - root.content-inset * 2;
+        clip: true;
         border-radius: Theme.radius-poster;
+        background: root.card.image.width > 0 ? transparent : Theme.surface-raised;
 
         Text {
             text: root.card.initial;
@@ -40,19 +48,19 @@ export component PosterCard inherits Rectangle {
             vertical-alignment: center;
             visible: root.card.image.width <= 0;
         }
-    }
 
-    Image {
-        width: parent.width;
-        height: parent.height;
-        source: root.card.image;
-        image-fit: cover;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.card.image;
+            image-fit: cover;
+        }
     }
 
     if (root.card.badge != "") :
         Rectangle {
-            x: parent.width - self.width - Theme.space-2;
-            y: Theme.space-2;
+            x: parent.width - self.width - root.content-inset;
+            y: root.content-inset;
             width: badge-label.preferred-width + Theme.space-3;
             height: 20px;
             border-radius: Theme.radius-badge;
@@ -74,9 +82,9 @@ export component PosterCard inherits Rectangle {
     // 底部进度条：3px 红，距卡底 6px，左右各 6px。
     if (root.card.progress >= 0) :
         Rectangle {
-            x: 6px;
-            y: parent.height - self.height - 6px;
-            width: parent.width - 12px;
+            x: root.content-inset;
+            y: parent.height - self.height - root.content-inset;
+            width: parent.width - root.content-inset * 2;
             height: 3px;
             border-radius: 1.5px;
             background: Theme.player-track;
