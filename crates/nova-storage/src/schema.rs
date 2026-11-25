@@ -182,6 +182,19 @@ WHERE server_id = ?1
 ORDER BY index_number IS NULL, index_number, sort_title
 ";
 
+/// 同 [`SQL_SELECT_CHILDREN`]，但按**加入时间倒序**（"最近添加"排序）。
+///
+/// `updated_at` 是同步时写入的时间戳（有 `idx_items_updated_at` 索引）。
+/// 之前"最近添加"直接沿用 `SQL_SELECT_CHILDREN` 的顺序，而那一条是按
+/// `index_number, sort_title` 排的——电影没有集号，于是变成**字母序**，
+/// 与标签写的"最近添加"根本不是一回事。
+pub(crate) const SQL_SELECT_CHILDREN_RECENT: &str = "
+SELECT server_id, id, payload FROM items
+WHERE server_id = ?1
+  AND ((?2 IS NULL AND parent_id IS NULL) OR parent_id = ?2)
+ORDER BY updated_at DESC, sort_title, id
+";
+
 /// "继续观看"：过滤条件在 SQL 侧完成，等价于 `MediaItem::is_in_progress(min_seconds)`。
 ///
 /// `resume_ms * 100 < runtime_ms * 95` 是 `progress_fraction() < 0.95` 的整数形式

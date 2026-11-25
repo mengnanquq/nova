@@ -72,7 +72,8 @@ impl LibrarySort {
     /// 顺序仍然确定，不会因为 `sort` 的不稳定性导致每次点击结果不同。
     pub fn apply(self, items: &mut [MediaItem]) {
         match self {
-            // 数据库顺序就是"最近添加"，保持原样（不要在客户端重新洗一遍）。
+            // 查询已经按 `updated_at` 倒序取回（`Database::children_recent`），
+            // 这里保持原样，不要再按标题洗一遍。
             Self::RecentlyAdded => {}
             Self::TitleAsc => items.sort_by(|left, right| {
                 title_key(left)
@@ -181,7 +182,13 @@ pub fn library_view(
     } else {
         Some(ItemId::new(tab.id.clone()))
     };
-    let mut items = db.children(server_id, parent.as_ref())?;
+    // 「最近添加」要真的按加入时间排（`updated_at`），不能用 `children` 的顺序
+    // ——那是 `index_number, sort_title`，电影没有集号时就退化成字母序。
+    let mut items = if sort == LibrarySort::RecentlyAdded {
+        db.children_recent(server_id, parent.as_ref())?
+    } else {
+        db.children(server_id, parent.as_ref())?
+    };
     let mut sort_label = sort.label().to_owned();
     if items.is_empty() && parent.is_some() {
         let top_level = db.children(server_id, None)?;

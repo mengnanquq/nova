@@ -85,6 +85,18 @@ impl Database {
         }
     }
 
+    /// 列出某个父项的子项，按**加入时间倒序**（"最近添加"用）。
+    pub fn children_recent(
+        &self,
+        server_id: &ServerId,
+        parent_id: Option<&ItemId>,
+    ) -> Result<Vec<MediaItem>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(schema::SQL_SELECT_CHILDREN_RECENT)?;
+        let mut rows = stmt.query(params![server_id.as_str(), parent_id.map(ItemId::as_str)])?;
+        read_items(&mut rows)
+    }
+
     /// 列出某个父项的子项，按 `index_number` 升序（缺集号的排最后）。
     ///
     /// `parent_id == None` 时列出该服务器的顶层条目（电影、剧集）。
