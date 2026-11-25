@@ -20,10 +20,11 @@ import { EmptyState } from "empty_state.slint";
 // focused-index 是键盘焦点在本行内的局部索引（-1 表示焦点不在本行）；
 // 悬停（hot）优先于键盘焦点，同一时刻只放大一张卡。
 //
-// 卡片放大：scale 1.35、延迟 400ms 触发、200ms ease-out、上移 12px；
+// 卡片放大：官方 `scale(1.05)`、延迟 400ms 触发、200ms ease-in-out、**无位移**
+// （官方卡片结构就是"海报 + 卡下标题"，没有悬停信息面板，也不需要上移）；
 // 放大卡是独立覆盖层（不参与行布局，其它卡坐标零跳动），且可以横向溢出
-// 到左右 4vw 留白区（裁切只发生在窗口边缘：纵向 Flickable 视口即遮罩）。
-// 行两端各留 gutter：基础卡从 gutter 开始滚动，放大卡可以穿出到留白上。
+// 到左右留白区（裁切只发生在窗口边缘：纵向 Flickable 视口即遮罩）。
+// 每边只溢出 6px / 10px，而行距 / 标题下距都是 12px，所以不会盖住行标题。
 component CardRow inherits Rectangle {
     in property <string> title;
     in property <[CardData]> cards;
@@ -32,8 +33,11 @@ component CardRow inherits Rectangle {
     in property <int> focused-index: -1;
     callback open-item(string);
 
-    property <length> card-width: root.portrait ? Theme.card-portrait-w : Theme.card-landscape-w;
-    property <length> card-height: root.portrait ? Theme.card-portrait-h : Theme.card-landscape-h;
+    // 图区宽 / 图区高（"图高"）：**不含**卡下标题。
+    property <length> poster-width: root.portrait ? Theme.card-portrait-w : Theme.card-landscape-w;
+    property <length> poster-height: root.portrait ? Theme.card-portrait-h : Theme.card-landscape-h;
+    // 卡片总高 = 图高 + 卡下标题块（官方 `li` 结构）。
+    property <length> card-height: root.poster-height + Theme.card-caption-height;
     property <int> hot: -1;
     // 悬停锁存：指针从基础卡移到放大后的加宽区/箭头上时，基础卡不再有悬停，
     // 用 latch 记住最后悬停的卡，只要覆盖层或箭头仍被悬停就保持放大。
@@ -46,8 +50,10 @@ component CardRow inherits Rectangle {
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
             ? root.latch : root.focused-index);
-    property <length> gap: Theme.card-gap;
-    property <length> title-off: Theme.section-title-height + Theme.space-3;
+    // 卡间距：官方 12px（`margin-right:.75rem`），且必须 ≥ 放大卡横向溢出（6px）。
+    property <length> gap: max(Theme.card-gap, Theme.zoom-allowance-x);
+    // 标题下沿到卡顶：官方 12px（`row-title-gap` 已含放大余量下限的校验）。
+    property <length> title-off: Theme.section-title-height + Theme.row-title-gap;
     property <float> zoom-factor: 1.0;
 
     // ---- 内容入场（数据到达）----
@@ -88,8 +94,10 @@ component CardRow inherits Rectangle {
         }
     ]
 
-    // 行高：标题区 + 卡 + 放大下探预留（覆盖层可能溢出行底）。
-    height: title-off + root.card-height + Theme.zoom-allowance;
+    // 行高 = 行标题 + 标题下距 + 卡片总高（图高 + 卡下标题）。
+    // 不需要额外的放大预留：1.05 最多向上溢出 10px（1.05×368 的一半），标题下距 12px 兜住；
+    // 向下溢出落在 40px 的 `section-gap` 里。
+    height: root.title-off + root.card-height;
 
     // 行标题 + 查看全部（与卡同起于 content-gutter）。
     HorizontalLayout {
@@ -162,8 +170,8 @@ component CardRow inherits Rectangle {
 
             for card[i] in root.cards : PosterCard {
                 card: card;
-                card-width: root.card-width;
-                card-height: root.card-height;
+                card-width: root.poster-width;
+                image-height: root.poster-height;
                 clicked => {
                     root.open-item(card.id);
                 }
@@ -183,20 +191,21 @@ component CardRow inherits Rectangle {
     zoom-ov := CardZoom {
         property <int> zi: root.cards.length > 0
             ? clamp(root.zoom-index, 0, root.cards.length - 1) : 0;
-        property <length> zw: root.card-width * root.zoom-factor;
+        property <length> zw: root.poster-width * root.zoom-factor;
         property <length> zh: root.card-height * root.zoom-factor;
-        // 基础卡中心（视口坐标）= gutter + idx*(w+gap) + w/2 - 滚动偏移。
-        property <length> center-x: Theme.gutter + zi * (root.card-width + root.gap)
-            + root.card-width / 2 - flick.content-x;
-        // 放大卡可以穿出左右 gutter（钳到窗口边缘）；上移 12px。
+        // 基础卡中心（视口坐标）= 正文列起点 + idx*(w+gap) + w/2 - 滚动偏移。
+        // 注意是 `content-gutter`（行内容真正的 x），不是装饰性的 `gutter`。
+        property <length> center-x: Theme.content-gutter + zi * (root.poster-width + root.gap)
+            + root.poster-width / 2 - flick.content-x;
+        // 放大卡可以穿出左右留白（钳到窗口边缘）；纵向对齐卡片总高的中心。
         x: clamp(center-x - zw / 2, 0px, parent.width - zw);
-        y: title-off + root.rise + root.card-height / 2 - zh / 2 - Theme.zoom-rise;
+        y: title-off + root.rise + root.card-height / 2 - zh / 2;
         width: zw;
         visible: root.cards.length > 0 && root.zoom-index >= 0
             && root.zoom-index < root.cards.length;
         card: root.cards[zi];
-        base-width: root.card-width;
-        base-height: root.card-height;
+        base-width: root.poster-width;
+        base-image-height: root.poster-height;
         zoom-factor: root.zoom-factor;
         clicked => {
             root.open-item(root.cards[root.zoom-index].id);
@@ -210,13 +219,19 @@ component CardRow inherits Rectangle {
     out property <length> zoom-rect-w: zoom-ov.width;
     out property <length> zoom-rect-h: zoom-ov.height;
     out property <length> arrow-y: arrow-left.y;
+    // 测试探针：卡下标题的下沿（放大卡上沿必须不低于它 = 不遮挡行标题）。
+    out property <length> row-title-bottom: root.rise + Theme.section-title-height;
+    // 测试探针：图宽 / 图高 / 卡片总高。
+    out property <length> poster-width-probe: root.poster-width;
+    out property <length> poster-height-probe: root.poster-height;
+    out property <length> card-total-height: root.card-height;
 
     // 行左右箭头：官方 24×80 胶囊（`width:1.5rem;height:5rem;border-radius:16rem`、
     // 底色 `rgba(128,128,128,.4)`），垂直居中于卡区，悬停行时出现；
     // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
     arrow-left := Rectangle {
         x: 0;
-        y: title-off + root.rise + (root.card-height - Theme.arrow-height) / 2;
+        y: title-off + root.rise + (root.poster-height - Theme.arrow-height) / 2;
         width: Theme.arrow-width;
         height: Theme.arrow-height;
         border-radius: Theme.radius-pill;
@@ -340,10 +355,13 @@ export component HomePage inherits Rectangle {
     // billboard 槽位比 88vh 少 16px：块间距 40px，补回后首行标题正好
     // 落在 billboard（88vh）底 24px 处。
     property <length> billboard-slot: root.data.has-hero ? billboard-height - 16px : 0px;
-    property <length> continue-row-h: Theme.section-title-height + Theme.space-3
-        + Theme.card-landscape-h + Theme.zoom-allowance;
-    property <length> recent-row-h: Theme.section-title-height + Theme.space-3
-        + Theme.card-portrait-h + Theme.zoom-allowance;
+    // 行高 = 行标题（`section-title-height`）+ 标题下距（`row-title-gap`）
+    // + 卡片总高（图高 + 卡下标题）。不需要放大预留：1.05 的溢出（上下共 16.8px）
+    // 全部落在标题下距 12px 与行间距 40px 里（见 `Theme.zoom-allowance-*`）。
+    property <length> continue-row-h: Theme.section-title-height + Theme.row-title-gap
+        + Theme.card-landscape-h + Theme.card-caption-height;
+    property <length> recent-row-h: Theme.section-title-height + Theme.row-title-gap
+        + Theme.card-portrait-h + Theme.card-caption-height;
     property <length> library-row-h: continue-row-h;
     property <int> visible-blocks: (root.data.has-hero ? 1 : 0)
         + (root.continue-count > 0 ? 1 : 0) + (root.recent-count > 0 ? 1 : 0)
@@ -382,6 +400,16 @@ export component HomePage inherits Rectangle {
     out property <length> zoom-rect-h: row0.zoom-rect-h;
     out property <bool> row0-zoom-on: row0.zoom-on;
     out property <length> row0-arrow-y: row0.arrow-y + row0.y - flick.content-y;
+    // 测试用：行标题下沿 / 图高 / 卡片总高（验收"放大卡不遮盖行标题"与
+    // "卡片总高 = 图高 + 卡下标题"两条）。
+    out property <length> row0-title-bottom: row0.row-title-bottom + row0.y - flick.content-y;
+    out property <length> row0-poster-width: row0.poster-width-probe;
+    out property <length> row0-poster-height: row0.poster-height-probe;
+    out property <length> row0-card-height: row0.card-total-height;
+    // 竖版行（最近添加）同一组探针：官方 240×336 的 5:7 海报在这里。
+    out property <length> row1-poster-width: row1.poster-width-probe;
+    out property <length> row1-poster-height: row1.poster-height-probe;
+    out property <length> row1-card-height: row1.card-total-height;
 
     // 注意：这里**不用** `visible` 门控，改成 opacity 驱动（`reveal`）。
     // 原因：Slint 对"属性第一次求值"不播动画，若用 `visible: false` 藏起来，

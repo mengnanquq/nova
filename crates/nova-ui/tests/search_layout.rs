@@ -45,7 +45,10 @@ fn search_grid_is_six_columns_of_five_by_seven_posters() {
     let ui = app.ui();
     let columns = ui.get_search_columns();
     let card_w = f64::from(ui.get_search_card_w());
+    // 图高（5:7 的海报本体）与卡片总高（图高 + 卡下标题块）是两个语义，别混。
+    let poster_h = f64::from(ui.get_search_poster_h());
     let card_h = f64::from(ui.get_search_card_h());
+    let row_h = f64::from(ui.get_search_row_h());
     let card_step = f64::from(ui.get_search_card_step());
     let gutter = f64::from(ui.get_search_content_gutter());
     let first_x = f64::from(ui.get_search_first_card_x());
@@ -67,18 +70,30 @@ fn search_grid_is_six_columns_of_five_by_seven_posters() {
         "6 列总宽 {span} 应等于正文列宽 {body}（列数或间距算错了）"
     );
 
-    // 4) 竖版海报 5:7（卡高 = 卡宽 × 7 / 5，±1px）。
+    // 4) 竖版海报 5:7：**图高** = 卡宽 × 7 / 5（±1px），卡下标题不算在图里。
     let expected_h = card_w * 7.0 / 5.0;
     assert!(
-        (card_h - expected_h).abs() <= 1.0,
-        "卡高 {card_h} 应为卡宽 {card_w} 的 7/5（期望 {expected_h}）"
+        (poster_h - expected_h).abs() <= 1.0,
+        "图高 {poster_h} 应为卡宽 {card_w} 的 7/5（期望 {expected_h}）"
     );
-    assert!(card_w > 0.0 && card_h > 0.0, "网格尺寸不能为 0");
+    assert!(card_w > 0.0 && poster_h > 0.0, "网格尺寸不能为 0");
 
-    // 5) 第二轮卡片整体落在第一轮下方（行高 > 卡高，放得下放大信息区）。
-    let row_height = card_h + 56.0;
+    // 5) 卡片总高 = 图高 + 卡下标题块（1280 档官方 4 + 21 = 25px，±1px）。
+    let caption_h = 25.0;
     assert!(
-        row_height > card_h,
-        "行高必须大于卡高，否则放大卡会压到下一行"
+        (card_h - (poster_h + caption_h)).abs() <= 1.0,
+        "卡片总高 {card_h} 应等于图高 {poster_h} + 标题块 {caption_h}"
+    );
+
+    // 6) 行高 = 卡片总高 + 行间距（12px）；行间距必须 ≥ 放大卡竖向溢出的一半（10px），
+    //    否则 1.05 放大后会压到下一行。
+    let row_spacing = row_h - card_h;
+    assert!(
+        (row_spacing - 12.0).abs() <= 1.0,
+        "行间距 {row_spacing} 应为 12px（官方未给网格行距，沿用 card-gap）"
+    );
+    assert!(
+        row_spacing >= 10.0,
+        "行间距 {row_spacing} 小于 1.05 放大的竖向溢出（20px / 2），放大卡会压到下一行"
     );
 }

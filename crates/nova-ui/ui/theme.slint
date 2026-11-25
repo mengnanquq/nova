@@ -144,25 +144,54 @@ export global Theme {
     in property <length> card-frame-padding: 8px;
     in property <length> card-frame-border-width: 2px;
 
-    // ---- 卡片放大（1.35 倍、延迟 400ms、`motion-zoom` ease-in-out、上移 12px）----
-    in property <float> zoom-factor: 1.35;
+    // ---- 卡下标题（官方卡片结构：海报在上、一行标题在下，**没有**悬停信息面板）----
+    //
+    // 官方原文（`/tmp/genre_inline.css`，`li` 里的标题 `p`，类名 `.…-xyhsll`）：
+    //   `.…-xyhsll{color:#fff;text-align:center;font-weight:400;
+    //              display:-webkit-box;-webkit-line-clamp:3;overflow:hidden;
+    //              text-overflow:ellipsis}`
+    //   `@media all{line-height:1.125rem;font-size:0.75rem}`
+    //   `@media all and (min-width: 960px){line-height:1.3125rem;font-size:0.875rem}`
+    //   `@media all and (min-width: 1280px){margin-top:0.25rem}`
+    //   `@media all and (min-width: 1920px){margin-top:0.5rem;line-height:1.5rem;font-size:1rem}`
+    // 换算：960–1919 → margin-top 4px + 行高 21px（字号 14px）；
+    //       ≥1920 → margin-top 8px + 行高 24px（字号 16px）。
+    // 即**标题块高 = margin-top + line-height**：1280–1919 = 4 + 21 = 25px、
+    // ≥1920 = 8 + 24 = **32px**。竖向合计（≥1920）：
+    // `li` = 10.4（padding）+ 336（图）+ 32（标题块）+ 10.4（padding）= 388.8 ✓
+    // 与官方 `li` 实测高 388.78 对齐（15rem = 240 宽 / 21rem = 336 高，5:7）。
+    // 字号直接复用 Hawkins 梯度（0.875rem = `text-label-size`、1rem = `text-body-size`）。
+    in property <length> card-caption-gap: root.viewport-width >= 1920px ? 8px : 4px;
+    in property <length> card-caption-line-height: root.viewport-width >= 1920px ? 24px : 21px;
+    in property <length> card-caption-size: root.viewport-width >= 1920px ? root.text-body-size
+        : root.text-label-size;
+    // 标题块高：标题块就是卡片的最后一段，卡片总高 = 图高 + `card-caption-height`。
+    in property <length> card-caption-height: root.card-caption-gap + root.card-caption-line-height;
+
+    // ---- 卡片放大（官方 1.05 倍、延迟 400ms、`motion-zoom` ease-in-out、无位移）----
+    //
+    // 官方原文（`/tmp/genre_inline.css`，卡片的 anchor 元素）：
+    //   `.…-dx6epf{transition:transform 0.2s ease-in-out}`
+    //   `.…-dx6epf:hover{transform:scale(1.05);z-index:2}`
+    // 官方**没有**悬停信息面板（`li` 里只有海报 + 一行标题），所以也没有"上移"。
+    in property <float> zoom-factor: 1.05;
     // 延迟复用动效 token：400ms 是公开资料里的"悬停后展开延迟"，见第 9 节。
     in property <duration> zoom-delay: root.motion-delay;
-    in property <length> zoom-rise: 12px;
+    // 放大余量：1.05 倍在官方 240 宽海报上多 12px、336 高上多 16.8px。
+    // 官方兜住这点溢出的正是 `li` 的 padding（`/tmp/genre_inline.css`）：
+    //   `@media all and (min-width: 1280px){.…-mi00gi{padding:0.65rem 0.375rem}}`
+    // 即左右 0.375rem = 6px、上下 0.65rem = 10.4px（上下合计 20.8px ≥ 16.8px）。
+    // 我们的行距 / 卡间距按这两个值立下限：放大卡每边只溢出 allowance/2
+    // （横向 6px、竖向 10px），12px 的 `card-gap` 与 12px 的标题下距都够，
+    // 所以放大卡不可能盖住行标题、也不可能盖住下一行（原来 1.35 + 96px 预留是为了
+    // 盖不住的 56px 信息面板，官方结构下不再需要）。
+    in property <length> zoom-allowance-x: 12px;
+    in property <length> zoom-allowance-y: 20px;
     // 骨架占位底：官方 CSS `background-color: rgb(35,35,35)`（即 #232323）。
     in property <color> skeleton-bg: #232323;
     // 骨架占位不透明度的上下限（近似做法：不循环，见 `poster_card.slint`）。
     in property <float> skeleton-opacity-low: 0.55;
     in property <float> skeleton-opacity-high: 0.75;
-    // 放大卡底部信息面板：56px、#181818。
-    in property <length> zoom-info-height: 56px;
-    in property <color> zoom-panel-bg: #181818;
-    // 行高里为放大卡下探预留的空间（覆盖 2:3 卡放大的最大下探量 ≈92px）。
-    //
-    // Netflix 的做法更含蓄：放大上限只有 scale(1.05)，余量预留在卡片容器的
-    // padding 里（上下 10.4px ≥ 5% 放大所需的 8.4px），行高本身由内容撑开。
-    // 我们放大到 1.35，余量必须显式留，否则会压到下一行。
-    in property <length> zoom-allowance: 96px;
     // 行左右箭头尺寸见上方 `arrow-width` / `arrow-height`（官方 24×80）。
     // 顶栏链接间距：1.5vw（1280 → 19px）。
     in property <length> nav-link-gap: root.viewport-width * 0.015;
@@ -362,6 +391,10 @@ export global Theme {
     // 行标题区高度：官方 1920 实测 h2 框高 46px（字号 32），即字号 +14px；
     // 其它断点按同一增量推导（20px 字号 → 34px，与改动前一致）。
     in property <length> section-title-height: root.row-title-size + 14px;
+    // 行标题下沿到卡片上沿的间距：官方 12px（1920 实测 h2 下距 12px）。
+    // 同时必须 ≥ 放大卡向上的溢出（`zoom-allowance-y` / 2 = 10px），否则 1.05 放大
+    // 会压到行标题——这正是旧 1.35 版的问题（见 docs/ui-netflix-1to1.md §10.8）。
+    in property <length> row-title-gap: max(root.space-3, root.zoom-allowance-y / 2);
     in property <length> section-title-reveal: 96px;
     // 主按钮统一尺寸（billboard / 详情）：44 高。
     in property <length> button-primary-height: 44px;

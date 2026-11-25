@@ -50,11 +50,23 @@ export component AppWindow inherits Window {
     out property <bool> row0-zoom-on: home-page.row0-zoom-on;
     out property <length> row0-y: home-page.row0-y;
     out property <length> row0-arrow-y: home-page.row0-arrow-y;
+    // 测试用：继续观看行的行标题下沿 / 图高 / 卡片总高（验收"放大不盖标题"
+    // 与"卡片总高 = 图高 + 卡下标题块"）。
+    out property <length> row0-title-bottom: home-page.row0-title-bottom;
+    out property <length> row0-poster-width: home-page.row0-poster-width;
+    out property <length> row0-poster-height: home-page.row0-poster-height;
+    out property <length> row0-card-height: home-page.row0-card-height;
+    // 竖版行（最近添加）：官方 240×336 的 5:7 海报。
+    out property <length> row1-poster-width: home-page.row1-poster-width;
+    out property <length> row1-poster-height: home-page.row1-poster-height;
+    out property <length> row1-card-height: home-page.row1-card-height;
 
     // 测试用：搜索页结果网格几何（6 列 / 5:7 / 起点 = content-gutter）。
     out property <int> search-columns: search-page.probe-columns;
     out property <length> search-card-w: search-page.probe-card-w;
+    out property <length> search-poster-h: search-page.probe-poster-h;
     out property <length> search-card-h: search-page.probe-card-h;
+    out property <length> search-row-h: search-page.probe-row-h;
     out property <length> search-card-step: search-page.probe-card-step;
     out property <length> search-content-gutter: search-page.probe-gutter;
     out property <length> search-first-card-x: search-page.probe-first-x;

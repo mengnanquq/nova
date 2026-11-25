@@ -4,10 +4,11 @@
 //! 竖版海报网格（5:7）：媒体库页与搜索页共用的**唯一**一套网格几何。
 //!
 //! 几何（改一处两页同时生效）：
-//! - 列宽 = (`width` - 2×`content-gutter` - `card-gap`×(列数-1)) / 列数；
-//! - 卡高 = 列宽 × 7 / 5（Netflix 实测 240×336 = 5:7）；
-//! - 列起点 = `content-gutter` + 列号 × (列宽 + `card-gap`)；
-//! - 行高 = 卡高 + 放大信息面板高度，避免放大卡压到下一行。
+//! - 列宽 = (`width` - 2×`content-gutter` - 卡间距×(列数-1)) / 列数；
+//! - 图高 = 列宽 × 7 / 5（Netflix 实测 240×336 = 5:7）；
+//! - 卡片总高 = 图高 + 卡下标题块（官方 `li` 结构，见 `theme.slint`）；
+//! - 列起点 = `content-gutter` + 列号 × (列宽 + 卡间距)；
+//! - 行高 = 卡片总高 + 行间距（行间距 12px，且 ≥ 放大卡竖向溢出的一半）。
 //!
 //! 网格放在页面（或页面 Flickable 的内容区）里，原点是内容区左上角：
 //! `grid-top` 给"内容区顶部到第一行卡片"的距离（媒体库是标题行高，
@@ -35,14 +36,23 @@ export component PosterGrid inherits Rectangle {
     callback open(string);
 
     // ---- 几何（媒体库与搜索页都只读这些）----
+    // 列宽（同时也是海报区宽，含外框内衬）。
     out property <length> card-width: (root.width - root.content-gutter * 2
-        - Theme.card-gap * (root.columns - 1)) / root.columns;
-    // 竖版海报严格 5:7（比例常量在 Theme 里，与首页行的竖版卡同一份真值）。
-    out property <length> card-height: root.card-width * Theme.poster-ratio-h / Theme.poster-ratio-w;
-    out property <length> card-step: root.card-width + Theme.card-gap;
+        - root.column-gap * (root.columns - 1)) / root.columns;
+    // 图高：竖版海报严格 5:7（比例常量在 Theme 里，与首页行的竖版卡同一份真值）。
+    out property <length> poster-height: root.card-width * Theme.poster-ratio-h / Theme.poster-ratio-w;
+    // 卡片总高 = 图高 + 卡下标题块（官方卡片结构：海报在上、标题在下）。
+    out property <length> card-height: root.poster-height + Theme.card-caption-height;
+    // 列间距：官方 12px，且必须 ≥ 放大卡横向溢出（`zoom-allowance-x`）。
+    out property <length> column-gap: max(Theme.card-gap, Theme.zoom-allowance-x);
+    // 行间距：官方类型页网格**没有**给出行距（`/tmp/genre_inline.css` 里没有
+    // `rowContainer` / `lolomoRow` 的 margin/gap，那套样式只描述横向行），
+    // 沿用 `card-gap` 12px；同时必须 ≥ 放大卡竖向溢出的一半（`zoom-allowance-y`/2 = 10px）。
+    out property <length> row-spacing: max(Theme.card-gap, Theme.zoom-allowance-y / 2);
+    out property <length> card-step: root.card-width + root.column-gap;
     out property <length> first-card-x: root.content-gutter;
     out property <int> row-count: (root.cards.length + root.columns - 1) / root.columns;
-    out property <length> row-height: root.card-height + Theme.zoom-info-height;
+    out property <length> row-height: root.card-height + root.row-spacing;
     // 内容区需要的总高度（含底部留白），页面据此设置 Flickable 的 content-height。
     out property <length> content-height: root.grid-top + root.row-count * root.row-height
         + Theme.space-8;
@@ -89,13 +99,13 @@ export component PosterGrid inherits Rectangle {
         }
     ]
 
-    // 网格：手工定位（列数固定，位置可计算），行高含放大信息区。
+    // 网格：手工定位（列数固定，位置可计算），行高 = 卡片总高 + 行间距。
     for card[i] in root.cards : PosterCard {
         x: root.first-card-x + mod(i, root.columns) * root.card-step;
         y: root.grid-top + floor(i / root.columns) * root.row-height;
         card: card;
         card-width: root.card-width;
-        card-height: root.card-height;
+        image-height: root.poster-height;
         clicked => {
             root.open(card.id);
         }
@@ -124,7 +134,7 @@ export component PosterGrid inherits Rectangle {
             width: zw;
             card: root.cards[root.zoom-index];
             base-width: root.card-width;
-            base-height: root.card-height;
+            base-image-height: root.poster-height;
             zoom-factor: root.zoom-factor;
             clicked => {
                 root.open(root.cards[root.zoom-index].id);

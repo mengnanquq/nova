@@ -70,7 +70,10 @@ export component SearchPage inherits Rectangle {
     // ---- 探针（测试用：6 列 / 5:7 / 起点 = content-gutter）----
     out property <int> probe-columns: root.columns;
     out property <length> probe-card-w: grid.card-width;
+    // 图高（5:7）与卡片总高（图高 + 卡下标题块）分开报，别混。
+    out property <length> probe-poster-h: grid.poster-height;
     out property <length> probe-card-h: grid.card-height;
+    out property <length> probe-row-h: grid.row-height;
     out property <length> probe-card-step: grid.card-step;
     out property <length> probe-gutter: grid.content-gutter;
     out property <length> probe-first-x: grid.first-card-x;

@@ -38,9 +38,9 @@ export component LibraryPage inherits Rectangle {
     // 网格几何：用 `content-gutter`（≥1920 为 200px），列数按实测反推
     // ——Netflix 1920 下正文列宽 1520，6 张 240 宽海报 + 12px 间距正好铺满，
     // 所以 1920 是 6 列而不是 7 列；更窄的视口沿用 6 列，仅靠列宽自适应。
-    // 卡宽 / 卡高 / 行高 / 列起点由 `PosterGrid` 统一计算（搜索页共用同一套）。
+    // 卡宽 / 图高 / 卡片总高 / 行高 / 列起点由 `PosterGrid` 统一计算（搜索页共用同一套）。
     property <int> columns: 6;
-    // 网格几何：行高含放大信息区。
+    // 网格起点：标题行下沿（行高 = 卡片总高 + 行间距，由 `PosterGrid` 算）。
     property <length> grid-y: Theme.navbar-height + Theme.space-5 + Theme.text-h4-size
         + Theme.space-4;
 
