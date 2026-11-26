@@ -480,6 +480,9 @@ export global Theme {
     // 左上返回：官方 `.player-exit{width:1.4em;height:1.4em;opacity:.5;transition:opacity .2s ease-out}`。
     in property <length> player-back-size: root.player-unit * 1.4;
     in property <float> player-back-opacity: 0.5;
+    // 不可用控件（错误态下没有意义的 seek 类控件）的整控件透明度。
+    // 禁用后仍保留布局位置与尺寸：错误卡弹出时底部控制行不跳动。
+    in property <float> player-disabled-opacity: 0.45;
     // 顶部渐变高度：官方 loading 层 `height:11.11111111em`。
     in property <length> player-top-scrim-height: root.player-unit * 11.11111111;
     // 按钮盒：官方 `.nfp-button-control.default-control-button{height:3.22222222em}`；

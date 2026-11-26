@@ -51,48 +51,47 @@ fn home_with_many_recent() -> HomeView {
     home
 }
 
-/// 焦点卡必须完全落在视口里（`-scroll` 是可视窗口在内容坐标里的原点）。
+/// 焦点卡必须完全落在视口里。
+///
+/// 探针报的是**视口相对**坐标（体检 R3-2：内容坐标 + 页面 / 行滚动偏移），所以
+/// 直接与 `[0, viewport_h]` 比；`scroll_y` / `row_scroll_x` 只用于确认"真的滚了"。
 fn assert_focus_card_visible(
     label: &str,
-    scroll_y: f32,
     viewport_h: f32,
     focus_top: f32,
     focus_bottom: f32,
     pad: f32,
 ) {
-    let view_top = -f64::from(scroll_y);
-    let view_bottom = view_top + f64::from(viewport_h);
+    let view_bottom = f64::from(viewport_h);
     let top = f64::from(focus_top);
     let bottom = f64::from(focus_bottom);
     assert!(
-        top - f64::from(pad) >= view_top - 0.5,
-        "{label}: 焦点卡上沿 {top}（含 {pad}px 放大余量）在可视区上沿 {view_top} 之上（scroll-y = {scroll_y}）"
+        top - f64::from(pad) >= -0.5,
+        "{label}: 焦点卡上沿 {top}（含 {pad}px 放大余量）在视口上沿之上（视口高 {viewport_h}）"
     );
     assert!(
         bottom + f64::from(pad) <= view_bottom + 0.5,
-        "{label}: 焦点卡下沿 {bottom}（含 {pad}px 放大余量）超出可视区下沿 {view_bottom}（scroll-y = {scroll_y}）"
+        "{label}: 焦点卡下沿 {bottom}（含 {pad}px 放大余量）超出视口下沿 {view_bottom}"
     );
 }
 
 fn assert_focus_card_visible_horizontally(
     label: &str,
-    row_scroll_x: f32,
     row_viewport_w: f32,
     focus_left: f32,
     focus_right: f32,
     pad: f32,
 ) {
-    let view_left = -f64::from(row_scroll_x);
-    let view_right = view_left + f64::from(row_viewport_w);
+    let view_right = f64::from(row_viewport_w);
     let left = f64::from(focus_left);
     let right = f64::from(focus_right);
     assert!(
-        left - f64::from(pad) >= view_left - 0.5,
-        "{label}: 焦点卡左沿 {left} 在行视口左沿 {view_left} 之外（row content-x = {row_scroll_x}）"
+        left - f64::from(pad) >= -0.5,
+        "{label}: 焦点卡左沿 {left} 在行视口左沿之外（行视口宽 {row_viewport_w}）"
     );
     assert!(
         right + f64::from(pad) <= view_right + 0.5,
-        "{label}: 焦点卡右沿 {right} 超出视口右沿 {view_right}（row content-x = {row_scroll_x}）"
+        "{label}: 焦点卡右沿 {right} 超出视口右沿 {view_right}（行视口宽 {row_viewport_w}）"
     );
 }
 
@@ -126,7 +125,6 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     );
     assert_focus_card_visible(
         "首页（最近添加第 1 块）",
-        app.ui().get_home_scroll_y(),
         app.ui().get_home_viewport_h(),
         app.ui().get_home_focus_top(),
         app.ui().get_home_focus_bottom(),
@@ -146,7 +144,6 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     );
     assert_focus_card_visible_horizontally(
         "首页（第 26 张）",
-        app.ui().get_home_row_scroll_x(),
         app.ui().get_home_row_viewport_w(),
         app.ui().get_home_focus_left(),
         app.ui().get_home_focus_right(),
@@ -154,7 +151,6 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     );
     assert_focus_card_visible(
         "首页（第 26 张，纵向）",
-        app.ui().get_home_scroll_y(),
         app.ui().get_home_viewport_h(),
         app.ui().get_home_focus_top(),
         app.ui().get_home_focus_bottom(),
@@ -168,7 +164,6 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     assert_eq!(app.focus_index(), 0, "Up 应回到继续观看第 1 张");
     assert_focus_card_visible(
         "首页（回到继续观看行）",
-        app.ui().get_home_scroll_y(),
         app.ui().get_home_viewport_h(),
         app.ui().get_home_focus_top(),
         app.ui().get_home_focus_bottom(),
@@ -176,7 +171,6 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     );
     assert_focus_card_visible_horizontally(
         "首页（回到继续观看行）",
-        app.ui().get_home_row_scroll_x(),
         app.ui().get_home_row_viewport_w(),
         app.ui().get_home_focus_left(),
         app.ui().get_home_focus_right(),

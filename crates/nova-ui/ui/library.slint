@@ -197,8 +197,10 @@ export component LibraryPage inherits Rectangle {
     // ---- 探针（测试用：键盘焦点卡是否真的在可视区内）----
     out property <length> probe-scroll-y: grid-flick.content-y;
     out property <length> probe-viewport-h: grid-flick.height;
-    out property <length> probe-focus-top: grid.probe-focus-top;
-    out property <length> probe-focus-bottom: grid.probe-focus-bottom;
+    // 探针：键盘焦点卡在**视口坐标**里的上下沿（内容坐标 + 页面滚动偏移，体检 R3-2）：
+    // `0 ≤ top` 且 `bottom ≤ viewport_h` 就是“焦点卡在视口内”。
+    out property <length> probe-focus-top: grid.probe-focus-top + grid-flick.content-y;
+    out property <length> probe-focus-bottom: grid.probe-focus-bottom + grid-flick.content-y;
     out property <bool> probe-zoom-on: grid.probe-zoom-on;
 
     if (root.data.empty) :

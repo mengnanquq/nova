@@ -626,7 +626,9 @@ impl Shell {
                     "nav_active": ui.get_nav_active(),
                     // 网格滚动 / 焦点卡几何（`ui/library.slint`、`ui/search.slint` 的
                     // `probe-*`）：验证"方向键移动焦点后网格自动滚动、焦点卡完全
-                    // 可见、有放大指示"。
+                    // 可见、有放大指示"。`focus_top/bottom` 是**视口相对**坐标
+                    // （内容坐标 + `scroll_y`，体检 R3-2），所以"焦点卡在视口内"就是
+                    // `0 <= top && bottom <= viewport_h`，不用再换算。
                     "library_geometry": {
                         "scroll_y": ui.get_library_scroll_y(),
                         "viewport_h": ui.get_library_viewport_h(),
@@ -648,8 +650,11 @@ impl Shell {
                         "scroll_y": ui.get_home_scroll_y(),
                         "row0_zoom_on": ui.get_row0_zoom_on(),
                         // 键盘焦点行 / 焦点卡（体检 R2-2：首页纵向 + 行内横向跟随）。
-                        // 焦点卡必须完整落在 `[-scroll_y, -scroll_y + viewport_h]` 与
-                        // `[-row_scroll_x, -row_scroll_x + row_viewport_w]` 之内。
+                        // `focus_top/bottom`（纵向）与 `focus_left/right`（焦点行自己的
+                        // 横向视口）都是**视口相对**坐标（体检 R3-2）：纵向加外层
+                        // `content-y`，横向加该行 `content-x`。所以"焦点卡在视口内"就是
+                        // `0 <= top && bottom <= viewport_h`（横向同理，上限换
+                        // `row_viewport_w`）；`scroll_y` / `row_scroll_x` 只报滚动偏移。
                         "viewport_h": ui.get_home_viewport_h(),
                         "focus_top": ui.get_home_focus_top(),
                         "focus_bottom": ui.get_home_focus_bottom(),

@@ -27,7 +27,15 @@ export component CardZoom inherits Rectangle {
     in property <length> base-image-height: 390px;
     // 缩放系数：1.0（未放大）→ `Theme.zoom-factor`（1.05）。由父级的状态动画驱动。
     in property <float> zoom-factor: 1.0;
+    // 本覆盖层画的是哪张卡（父级的 `zoom-index`）：悬停覆盖层时用它把键盘焦点对齐。
+    in property <int> index: 0;
     callback clicked();
+    // 覆盖层被悬停（`hovered` 的边沿 + 指针在覆盖层上移动）：参数是卡索引与是否仍悬停。
+    //
+    // 放大覆盖层盖在基础卡上面，指针停在这张卡上时命中区是覆盖层而不是底卡：
+    // 只靠底卡的 `has-hover` 跳变，重复悬停同一张卡（或键盘焦点离开后再移回来）
+    // 收不到任何事件，键盘焦点不会对齐（体检 R2-3）。这里把覆盖层的悬停转发给父级。
+    callback hover(int, bool);
     // 覆盖层是否正被悬停（放大完成后才接管，供父级锁存行激活态）。
     out property <bool> hovered: face.hovered;
 
@@ -48,6 +56,9 @@ export component CardZoom inherits Rectangle {
         // 基础卡，避免"覆盖层一出现就抢走悬停"导致的抖动）；走到 80% 之后启用，
         // 指针在放大后的加宽区域里也能维持行激活。
         interactive: root.zoom-factor > 1 + (Theme.zoom-factor - 1) * 0.8;
+        hover-changed(has) => {
+            root.hover(root.index, has);
+        }
         clicked => {
             root.clicked();
         }

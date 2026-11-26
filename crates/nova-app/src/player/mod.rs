@@ -704,6 +704,10 @@ impl Player {
         self.error = None;
         self.saw_first_frame = false;
         self.request = None;
+        self.auto_retry = 0;
+        self.retry_at = None;
+        self.pending = None;
+        self.target = None;
         self.post = Some(Arc::clone(post));
         self.session.reset();
         self.selector.clear();
@@ -712,6 +716,25 @@ impl Player {
         self.tracks = TrackSet::default();
         self.dirty = true;
         self.subtitle_margin = 0;
+
+        // 倍速 / 字幕延迟是 mpv 的引擎级属性：上一部片子调过的值如果不复位，
+        // 新片子会直接沿用（体检 R3-3 的“会话级状态全部复位”）。
+        if self.rate != 1.0 {
+            self.rate = 1.0;
+            let runtime = self.runtime.clone();
+            self.host.borrow_mut().set_rate(&runtime, 1.0);
+        }
+        if self.subtitle_delay != 0.0 {
+            self.subtitle_delay = 0.0;
+            let runtime = self.runtime.clone();
+            self.host.borrow_mut().set_subtitle_delay(&runtime, 0.0);
+        }
+
+        // 界面上的会话级状态先整体复位：即使后面在“取条目 / 取直链”这一步就失败，
+        // 错误页也不能显示上一部片子的进度、时长、标题、轨道（体检 R3-3）。
+        let mut view = self.app.player_view();
+        view.reset_session();
+        self.pending_view = Some(view);
 
         let Some(server) = self.local.server_id() else {
             self.fail(NO_SERVER_PLAYBACK);
@@ -767,7 +790,10 @@ impl Player {
         self.target = None;
 
         // 标题先上界面（起播期间不黑屏、不留空白标题）。
-        let mut view = self.app.player_view();
+        let mut view = self
+            .pending_view
+            .take()
+            .unwrap_or_else(|| self.app.player_view());
         view.title = title;
         view.duration = duration;
         view.position = resume_at;
@@ -1288,6 +1314,9 @@ impl Player {
         self.error = Some(message.to_owned());
         self.session.fail(PlaybackError::engine(message));
         self.dirty = true;
+        // 立刻把错误态排进待提交视图：早退路径（没有服务器 / 条目不在缓存）
+        // 不走 `tick`，不能等下一拍才把错误卡显示出来。
+        self.push_view(true);
     }
 
     /// 起播前刷新条目与资源（best effort，400ms 上限）。
@@ -1410,7 +1439,10 @@ impl Player {
         self.last_push = Instant::now();
         self.dirty = false;
 
-        let mut view = self.app.player_view();
+        let mut view = self
+            .pending_view
+            .take()
+            .unwrap_or_else(|| self.app.player_view());
         self.fill_view(&mut view);
         self.pending_view = Some(view);
     }
@@ -1426,7 +1458,12 @@ impl Player {
     /// 而 `set_player` 受 `VIEW_INTERVAL` 节流，读它会把"正在播放"读成"暂停"——
     /// 我就因为这个误判过"播放器按钮点不动"。
     pub(crate) fn live_view(&mut self) -> PlayerView {
-        let mut view = self.app.player_view();
+        // 用**尚未提交**的待提交视图做底：它比 `App` 里的上一拍视图新（`begin`
+        // 刚复位完会话、还没轮到 `Shell` 提交时，调试通道读到的也必须是新会话）。
+        let mut view = match self.pending_view.clone() {
+            Some(view) => view,
+            None => self.app.player_view(),
+        };
         self.fill_view(&mut view);
         view
     }
@@ -1525,6 +1562,195 @@ mod tests {
             bitrate: None,
             runtime: Some(Duration::from_secs(30)),
             streams: Vec::new(),
+        }
+    }
+
+    /// 体检 R3-3：错误会话不能继承上一部片子的进度 / 时长 / 标题 / 倍速 / 字幕延迟。
+    ///
+    /// 用真实 `Player` + 无头 Slint 后端 + 一个没有任何条目的本地缓存：
+    /// “本地缓存里没有这个条目”在**调用引擎之前**就早退，所以这条路径根本不需要 mpv。
+    /// 上一会话的界面与状态直接按真实播放后的样子摆好（播放位置 / 时长 / 倍速 /
+    /// 字幕延迟），再开始新会话，断言界面拿到的即时视图没有继承任何一项。
+    #[test]
+    fn failed_session_does_not_inherit_the_previous_sessions_progress() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&test_server_info(), 1).expect("写服务器");
+        }
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let post: Post = Arc::new(|_| {});
+        let mut player = Player::new(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+
+        // 上一部（6489）：界面停在 8:37 / 1:31:23，倍速与字幕延迟也都留着。
+        let previous = PlayerView::new("上一部")
+            .with_duration(Duration::from_secs(5483))
+            .with_position(Duration::from_secs(517))
+            .with_buffered(Duration::from_secs(900))
+            .with_playing(true)
+            .with_rate(1.25)
+            .with_audio_tracks(vec![nova_ui::TrackItem::new(1, "国语")]);
+        app.set_player(&previous);
+        player
+            .session
+            .begin(Duration::from_secs(517), Some(Duration::from_secs(5483)));
+        player.rate = 1.25;
+        player.subtitle_delay = 0.5;
+
+        // 新会话：条目不在本地缓存 → 不碰引擎的失败早退。
+        player.begin("999999999", None, &post);
+
+        let view = player.live_view();
+        assert!(view.error.is_some(), "应停在错误态：{:?}", view.error);
+        assert_eq!(
+            view.position,
+            Duration::ZERO,
+            "错误页不该显示上一部片子的进度"
+        );
+        assert_eq!(view.duration, None, "错误页不该显示上一部片子的时长");
+        assert_eq!(view.buffered, None);
+        assert_eq!(view.title, "", "错误页不该显示上一部片子的标题");
+        assert!(view.audio_tracks.is_empty(), "音轨列表也不属于新会话");
+        assert!(!view.playing);
+        assert_eq!(view.rate, 1.0, "倍速随会话复位");
+        assert_eq!(view.subtitle_delay, 0.0, "字幕延迟随会话复位");
+    }
+
+    /// 健康会话切换到新片子：在首帧到来之前，视图也不能闪现上一部片子的标题 /
+    /// 进度 / 时长 / 音轨 / 倍速（体检 R3-3 的同类残留）。
+    #[test]
+    fn a_new_session_starts_from_the_new_item_not_the_previous_one() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let server = test_server_info();
+        let server_id = server.id.clone();
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&server, 1).expect("写服务器");
+            let item = nova_core::MediaItem {
+                id: ItemId::new("b"),
+                kind: nova_core::MediaKind::Movie,
+                title: "新片 B".to_owned(),
+                sort_title: "新片 B".to_owned(),
+                original_title: None,
+                year: Some(2025),
+                overview: None,
+                genres: Vec::new(),
+                runtime: Some(Duration::from_secs(6917)),
+                parent_id: None,
+                index_number: None,
+                index_number_end: None,
+                child_count: None,
+                images: nova_core::ImageSet::default(),
+                user_data: nova_core::UserData::default(),
+            };
+            db.upsert_items(&server_id, &[item], 2).expect("写条目");
+            let source = nova_core::MediaSource {
+                id: nova_core::SourceId::new("src-b"),
+                item_id: ItemId::new("b"),
+                name: None,
+                container: None,
+                size: None,
+                bitrate: None,
+                runtime: Some(Duration::from_secs(6917)),
+                streams: Vec::new(),
+            };
+            db.upsert_sources(&server_id, &[source]).expect("写播放源");
+        }
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let post: Post = Arc::new(|_| {});
+        let mut player = Player::new(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+
+        // 上一部 A 的界面残留（真实播放后 `Shell` 最后一次 `set_player` 的形状）。
+        let previous = PlayerView::new("上一部 A")
+            .with_duration(Duration::from_secs(5483))
+            .with_position(Duration::from_secs(517))
+            .with_playing(true)
+            .with_rate(1.25)
+            .with_audio_tracks(vec![nova_ui::TrackItem::new(1, "上一部的音轨")]);
+        app.set_player(&previous);
+        player.rate = 1.25;
+
+        // 直接播放 B：首帧（引擎事件）还没到，先看界面看到了什么。
+        player.begin("b", None, &post);
+        let view = player.live_view();
+        assert_eq!(view.title, "新片 B", "不能闪现上一部的标题");
+        assert_eq!(
+            view.duration,
+            Some(Duration::from_secs(6917)),
+            "时长必须是 B 的"
+        );
+        assert_eq!(
+            view.position,
+            Duration::ZERO,
+            "B 没有续播点，不是 A 的 8:37"
+        );
+        assert_eq!(view.rate, 1.0, "倍速随会话复位");
+        assert!(view.audio_tracks.is_empty(), "A 的音轨不能漏到 B");
+        assert!(
+            view.error.is_none(),
+            "起播途中不该是错误态：{:?}",
+            view.error
+        );
+        assert!(view.playing, "起播期间视为播放中（不是上一部的暂停态）");
+    }
+
+    fn init_test_backend() {
+        let backend = i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        );
+        let _ = slint::platform::set_platform(Box::new(backend));
+    }
+
+    fn test_server_info() -> nova_core::ServerInfo {
+        nova_core::ServerInfo {
+            id: nova_core::ServerId::new("srv-player-test"),
+            kind: nova_core::ServerKind::Jellyfin,
+            name: "播放测试".to_owned(),
+            base_url: "http://127.0.0.1:1".to_owned(),
+            version: None,
+            user_id: None,
+            auth: nova_core::AuthState::Unauthorized,
+            metadata_language: nova_core::Language::undetermined(),
         }
     }
 

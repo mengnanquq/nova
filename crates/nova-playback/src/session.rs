@@ -198,9 +198,14 @@ impl Session {
         position
     }
 
-    /// 回到 `Idle`（退出播放页）。
+    /// 回到 `Idle`（退出播放页 / 开始新会话之前的复位）。
+    ///
+    /// 位置与时长也要清掉：它们属于**上一部片子**。只清状态会留下
+    /// “上一个会话播到哪里”的读数，错误页会把它当成当前条目的进度显示（体检 R3-3）。
     pub fn reset(&mut self) {
         self.state = SessionState::Idle;
+        self.position = Duration::ZERO;
+        self.duration = None;
         self.opening_since = None;
         self.last_activity = None;
         self.buffering_returns_to = SessionState::Playing;
@@ -447,6 +452,32 @@ mod tests {
 
         session.reset();
         assert_eq!(session.state(), SessionState::Idle);
+    }
+
+    /// 退出播放页 / 切到新条目时 `reset()` 必须把位置与时长一起清掉。
+    ///
+    /// 体检 R3-3：`reset()` 只清状态与轨道，保留了上一部片子的 position / duration，
+    /// 于是下一次起播在“本地缓存里没有这个条目”这种**不碰引擎**的早退路径上，
+    /// 错误页显示的是上一部片子的进度（`8:37 / 1:31:23`）。
+    #[test]
+    fn reset_returns_to_idle_without_the_previous_position_or_duration() {
+        let (mut session, _clock) = playing(600);
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(90)));
+        assert_eq!(session.position(), Duration::from_secs(90));
+
+        session.reset();
+
+        assert_eq!(session.state(), SessionState::Idle);
+        assert_eq!(
+            session.position(),
+            Duration::ZERO,
+            "Idle 会话不该保留上一部片子的播放位置"
+        );
+        assert_eq!(
+            session.duration(),
+            None,
+            "Idle 会话不该保留上一部片子的总时长"
+        );
     }
 
     #[test]

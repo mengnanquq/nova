@@ -2082,6 +2082,13 @@ fn player_play_pause(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 }
 
 fn player_seek_to(ui: &AppWindow, state: &Rc<RefCell<State>>, target: Duration) {
+    // 错误态没有可跳转的媒体：引擎会拒绝 seek，而这里的乐观更新会让进度数字
+    // 跳一下又回不去——界面上的进度条 / ±15s 已在错误态禁用，键盘与拖动同样不做。
+    if state.borrow().player.error.is_some() {
+        state.borrow_mut().player.note_input();
+        player_refresh(ui, state);
+        return;
+    }
     {
         let mut state = state.borrow_mut();
         state.player.position = target;

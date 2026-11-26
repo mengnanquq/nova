@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{detail_view, init_backend, player_controls_hidden, player_view};
+use common::{detail_view, init_backend, player_controls_hidden, player_error, player_view};
 use nova_ui::{App, AppWindow, Page, PlayerKey};
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Model};
@@ -500,6 +500,64 @@ fn volume_number_is_only_visible_while_adjusting() {
 }
 
 #[test]
+fn error_state_does_not_register_seek_or_time_targets() {
+    // 体检 R3-3：错误态下会话是 `Failed`，seek / 拖动 / 切换时间都没有意义。
+    // 它们如果还登记在目标清单里，就是个“点得中、但没有反应”的死控件；
+    // 这里断言错误态不登记它们，正常态照旧，与「重试只在错误态出现」对称。
+    let app = player_app();
+    app.ui().show().expect("显示窗口");
+
+    let seek_targets = [
+        "player.progress",
+        "player.seek-back",
+        "player.seek-forward",
+        "player.time",
+    ];
+    let normal = player_targets(&app);
+    for id in seek_targets {
+        assert!(
+            normal.iter().any(|target| target.id == id),
+            "正常播放时 {id} 必须可点（清单：{:?}）",
+            normal.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+
+    app.set_player(&player_error());
+    let failed = player_targets(&app);
+    for id in seek_targets {
+        assert!(
+            !failed.iter().any(|target| target.id == id),
+            "错误态不该登记没有意义的 {id}（清单：{:?}）",
+            failed.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        failed.iter().any(|target| target.id == "player.retry"),
+        "错误态必须保留「重试」"
+    );
+    assert!(
+        failed.iter().any(|target| target.id == "player.play-pause"),
+        "非 seek 控件（播放 / 暂停）仍然可用"
+    );
+    assert!(
+        !failed
+            .iter()
+            .any(|target| target.id == "player.center-play"),
+        "错误态不显示中央暂停图标"
+    );
+}
+
+/// 推进时间 + 让目标重新登记两轮，然后读当前页面的清单。
+fn player_targets(app: &App) -> Vec<nova_ui::TargetInfo> {
+    for _ in 0..2 {
+        app.refresh_targets();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+    }
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(80));
+    app.targets()
+}
+
+#[test]
 fn subtitle_margin_follows_control_visibility() {
     let app = player_app();
     let margins = Rc::new(RefCell::new(Vec::new()));
@@ -515,5 +573,32 @@ fn subtitle_margin_follows_control_visibility() {
         margins.borrow().as_slice(),
         &[0, 280],
         "控制层隐藏时归零，可见时抬起（800px 窗口 → 280px）"
+    );
+}
+
+/// 错误态下 ←/→ 不做"乐观 seek"：界面上的进度条 / ±15s 已禁用，键盘同理。
+///
+/// 回归：以前错误态按 → 会先把界面进度改成 +15s 并发出 seek 回调；引擎在 `Failed`
+/// 状态下拒绝 seek，于是进度数字跳了一下却永远回不去——"按了有变化、其实没生效"。
+#[test]
+fn arrow_keys_do_not_fake_a_seek_in_the_error_state() {
+    let app = player_app();
+    app.set_player(&player_error());
+    let seeks = record_seeks(&app);
+    let before = app.player_view().position;
+
+    press(&app, Key::RightArrow);
+    press(&app, Key::LeftArrow);
+    assert!(app.handle_player_key(PlayerKey::SeekForward60));
+
+    assert!(
+        seeks.borrow().is_empty(),
+        "错误态不该发出 seek：{:?}",
+        seeks.borrow()
+    );
+    assert_eq!(
+        app.player_view().position,
+        before,
+        "错误态进度不该被乐观改写"
     );
 }

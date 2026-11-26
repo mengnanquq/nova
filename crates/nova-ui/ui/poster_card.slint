@@ -217,6 +217,17 @@ export component PosterCard inherits Rectangle {
         changed has-hover => {
             root.hover-changed(self.has-hover);
         }
+        // 指针在卡上**移动**时也上报一次悬停（不只是 `has-hover` 的跳变）。
+        //
+        // `has-hover` 是边沿触发的：指针本来就停在这张卡上、或者放大覆盖层接管了
+        // 命中区之后再“悬停”同一张卡，都不会产生跳变，键盘焦点就一直对不上鼠标下
+        // 的那张卡（第三轮体检 R2-3 真机：hover card.1 → Right 从键盘旧位置 +1）。
+        // 移动事件是水平触发的，正好补上这个缺口（见 `card_zoom.slint` 的 `hover`）。
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.move && self.has-hover) {
+                root.hover-changed(true);
+            }
+        }
         clicked => {
             root.clicked();
         }

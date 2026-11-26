@@ -271,10 +271,18 @@ component CardRow inherits Rectangle {
         width: zw;
         visible: root.cards.length > 0 && root.zoom-index >= 0
             && root.zoom-index < root.cards.length;
+        index: root.zoom-index;
         card: root.cards[zi];
         base-width: root.poster-width;
         base-image-height: root.poster-height;
         zoom-factor: root.zoom-factor;
+        // 指针在放大覆盖层上（含“本来就停在这张卡上”的重复悬停）：焦点对齐到这张卡。
+        // 底卡的 `has-hover` 在覆盖层接管后不再跳变，只靠它会把焦点留在键盘旧位置。
+        hover(index, has) => {
+            if (has && index >= 0 && index < root.cards.length) {
+                root.focus-hover(index);
+            }
+        }
         clicked => {
             root.open-item(root.cards[root.zoom-index].id);
         }
@@ -562,21 +570,31 @@ export component HomePage inherits Rectangle {
         ? root.focus-index - root.continue-count : -1;
 
     // ---- 探针：键盘焦点行 / 焦点卡（首页滚动跟随的回归断言用）----
+    //
+    // 焦点矩形一律报**视口相对**坐标（与媒体库 / 搜索页同一口径）：纵向加外层
+    // `flick.content-y`，横向加焦点行自己的 `content-x`。
+    //
+    // 为什么必须加内层偏移（体检 R3-2）：首页行是**横向 Flickable**，「最近添加」
+    // 是一整条很长的横向行（不是嵌套网格），它的滚动完全不进 `scroll_y`。只报内容
+    // 坐标时，行内滚动一大截后 `focus_left/right` 仍是内容坐标，看起来“在视口内”，
+    // 实际早就滚出去了。现在“焦点卡在视口内”可以直接判断：
+    // `0 ≤ focus_top && focus_bottom ≤ viewport_h`、
+    // `0 ≤ focus_left && focus_right ≤ row_viewport_w`。
     out property <bool> probe-focus-in-continue: root.focus-index < root.continue-count;
     out property <length> probe-viewport-h: flick.height;
-    out property <length> probe-focus-top: root.probe-focus-in-continue
-        ? row0.y + row0.cards-top : row1.y + row1.cards-top;
-    out property <length> probe-focus-bottom: root.probe-focus-in-continue
+    out property <length> probe-focus-top: (root.probe-focus-in-continue
+        ? row0.y + row0.cards-top : row1.y + row1.cards-top) + flick.content-y;
+    out property <length> probe-focus-bottom: (root.probe-focus-in-continue
         ? row0.y + row0.cards-top + row0.cards-height
-        : row1.y + row1.cards-top + row1.cards-height;
+        : row1.y + row1.cards-top + row1.cards-height) + flick.content-y;
     out property <length> probe-row-content-x: root.probe-focus-in-continue
         ? row0.probe-content-x : row1.probe-content-x;
     out property <length> probe-row-viewport-w: root.probe-focus-in-continue
         ? row0.probe-viewport-w : row1.probe-viewport-w;
-    out property <length> probe-focus-left: root.probe-focus-in-continue
-        ? row0.probe-focus-left : row1.probe-focus-left;
-    out property <length> probe-focus-right: root.probe-focus-in-continue
-        ? row0.probe-focus-right : row1.probe-focus-right;
+    out property <length> probe-focus-left: (root.probe-focus-in-continue
+        ? row0.probe-focus-left : row1.probe-focus-left) + root.probe-row-content-x;
+    out property <length> probe-focus-right: (root.probe-focus-in-continue
+        ? row0.probe-focus-right : row1.probe-focus-right) + root.probe-row-content-x;
 
     // 测试用：继续观看行的几何（「放大不跳布局」断言的基准）。
     out property <length> row0-y: row0.y - flick.content-y;

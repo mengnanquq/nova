@@ -179,6 +179,14 @@ export component PosterGrid inherits Rectangle {
             changed hovered => {
                 root.overlay-hovered = self.hovered;
             }
+            // 覆盖层上的悬停（含指针本来就停在这张卡上的重复悬停）也要对齐键盘焦点：
+            // 底卡被覆盖层盖住后 `has-hover` 不再跳变，只靠底卡会让焦点留在旧位置（R2-3）。
+            index: root.zoom-index;
+            hover(index, has) => {
+                if (has && index >= 0 && index < root.cards.length) {
+                    root.focus-index = index;
+                }
+            }
             clicked => {
                 root.open(root.cards[root.zoom-index].id);
             }

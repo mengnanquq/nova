@@ -164,6 +164,21 @@ impl PlayerView {
         self
     }
 
+    /// 新播放会话开始：清掉**只属于上一部片子**的状态。
+    ///
+    /// 标题 / 进度 / 时长 / 缓冲 / 轨道 / 菜单 / 错误 / 倍速 / 字幕延迟都跟着会话走；
+    /// 音量与静音是用户偏好，跨会话保留。
+    ///
+    /// 失败早退（条目不在缓存 / 没有服务器）同样调用它——错误页不能显示上一部
+    /// 片子的进度与标题（体检 R3-3）。
+    pub fn reset_session(&mut self) {
+        let volume = self.volume;
+        let muted = self.muted;
+        *self = Self::new("");
+        self.volume = volume;
+        self.muted = muted;
+    }
+
     /// 设置当前播放位置。
     pub fn with_position(mut self, position: Duration) -> Self {
         self.position = position;
@@ -674,6 +689,47 @@ mod tests {
             .with_position(Duration::from_secs(12 * 60 + 34))
             .with_buffered(Duration::from_secs(25 * 60))
             .with_playing(true)
+    }
+
+    #[test]
+    fn reset_session_drops_the_previous_playback_but_keeps_volume() {
+        let mut view = sample()
+            .with_volume(0.4)
+            .with_muted(true)
+            .with_rate(1.25)
+            .with_audio_tracks(vec![TrackItem::new(1, "国语").with_selected(true)])
+            .with_subtitle_tracks(vec![TrackItem::new(2, "简体中文").with_selected(true)])
+            .with_engine_line("直连 · hwdec=vaapi")
+            .with_engine_detail(true)
+            .with_error("服务器不可达", "重试");
+        view.subtitle_delay = 0.5;
+        view.open_audio_menu();
+        view.toggle_time_mode();
+        view.note_volume_change();
+
+        view.reset_session();
+
+        assert_eq!(view.title, "");
+        assert_eq!(view.subtitle, None);
+        assert_eq!(view.position, Duration::ZERO);
+        assert_eq!(view.duration, None);
+        assert_eq!(view.buffered, None);
+        assert!(!view.playing);
+        assert!(!view.buffering);
+        assert_eq!(view.rate, 1.0, "倍速回到 1×");
+        assert_eq!(view.subtitle_delay, 0.0);
+        assert!(view.audio_tracks.is_empty());
+        assert!(view.subtitle_tracks.is_empty());
+        assert!(!view.menus_open());
+        assert_eq!(view.error, None);
+        assert_eq!(view.error_action, None);
+        assert_eq!(view.engine_line, None);
+        assert!(!view.show_engine_detail);
+        assert_eq!(view.time_mode, TimeMode::Remaining);
+        assert!(view.controls_visible);
+        // 用户偏好保留。
+        assert!((view.volume - 0.4).abs() < f32::EPSILON);
+        assert!(view.muted);
     }
 
     #[test]

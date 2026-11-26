@@ -115,3 +115,87 @@ fn home_arrow_navigation_continues_from_the_hovered_card() {
     press(&app, Key::RightArrow);
     assert_eq!(app.focus_index(), 3, "Right 应从悬停的卡（2）继续到 3");
 }
+
+// ---- 放大覆盖层接管命中区之后的悬停（第三轮体检 R2-3 真机回归）----
+
+/// 放大覆盖层出现需要 400ms 延迟 + 200ms 动画；等 1200ms 保证它已经接管命中区
+/// （`CardZoom` 的 `interactive` 在 `zoom-factor` 走到 80% 之后才打开）。
+fn wait_for_zoom() {
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+}
+
+/// 首页：悬停一张卡（放大覆盖层接管）→ 键盘移走 → **再**悬停同一张卡。
+///
+/// 真机复现路径：`hover home.row.continue.card.1` 之后指针就停在那张卡上，覆盖层
+/// 随后接管命中区；再 `hover` 同一张卡时 `has-hover` 没有跳变，底卡的
+/// `hover-changed` 不再触发，键盘焦点不会被对齐——于是 `Right` 从"上一次键盘
+/// 位置 +1"。本用例的初始焦点（0）与悬停卡（1）不同，并且悬停发生在放大层之上。
+#[test]
+fn home_rehovering_the_zoomed_card_resyncs_the_keyboard_focus() {
+    let app = app_1280x800();
+    app.set_home(&home_filled());
+    app.ui().set_billboard_ratio(0.2);
+    app.show_page(Page::Home);
+    app.ui().set_home_focus(0);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+
+    hover_target(&app, "home.row.continue.card.1");
+    wait_for_zoom();
+    assert!(
+        app.ui().get_row0_zoom_on(),
+        "悬停后放大覆盖层必须已经打开（否则本用例没经过覆盖层）"
+    );
+    assert_eq!(app.ui().get_home_focus(), 1, "首次悬停应对齐焦点");
+
+    // 键盘把焦点移走：覆盖层仍然留在悬停卡上（悬停优先），命中区归覆盖层。
+    press(&app, Key::RightArrow);
+    press(&app, Key::RightArrow);
+    assert_eq!(app.ui().get_home_focus(), 3, "键盘应正常前进到 3");
+
+    // 再悬停同一张卡（坐标重新解算：键盘移动可能把行滚过）。
+    hover_target(&app, "home.row.continue.card.1");
+    assert_eq!(
+        app.ui().get_home_focus(),
+        1,
+        "悬停放大覆盖层也必须把键盘焦点对齐到这张卡（R2-3：不能留在旧位置 3）"
+    );
+
+    press(&app, Key::RightArrow);
+    assert_eq!(
+        app.focus_index(),
+        2,
+        "Right 必须从悬停卡（1）继续到 2，而不是从旧键盘位置（3）+1"
+    );
+}
+
+/// 媒体库网格同一场景（同一套 `CardZoom` 覆盖层）。
+#[test]
+fn library_rehovering_the_zoomed_card_resyncs_the_keyboard_focus() {
+    let app = app_1280x800();
+    let library = library_view();
+    app.set_library(&library);
+    app.open_library(&library);
+    app.ui().set_library_focus(0);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1000));
+
+    hover_target(&app, "library.card.4");
+    wait_for_zoom();
+    assert_eq!(app.ui().get_library_focus(), 4, "首次悬停应对齐焦点");
+
+    // 6 列网格：Right 到行末（5），再 Down 到第二行（11）。
+    press(&app, Key::RightArrow);
+    press(&app, Key::DownArrow);
+    assert_eq!(app.ui().get_library_focus(), 11, "键盘应正常走到第二行末");
+
+    hover_target(&app, "library.card.4");
+    assert_eq!(
+        app.ui().get_library_focus(),
+        4,
+        "悬停放大覆盖层也必须把键盘焦点对齐到这张卡（R2-3）"
+    );
+
+    press(&app, Key::RightArrow);
+    assert_eq!(app.focus_index(), 5, "Right 必须从悬停卡（4）继续到 5");
+}

@@ -82,11 +82,44 @@ printf '{"cmd":"scroll","x":400,"y":300,"dy":360}\n' | socat - UNIX-CONNECT:/tmp
 把 `home_geometry.scroll_y` 从 0 推到 -420；媒体库 `dy:-360` 推到 -680.9，`dy:720` 又钳回 0。
 滚过一屏后原来在窗口外的卡片会进 `targets`，可以直接 `click` 验证。
 
+### `view` 里的几何探针：焦点矩形是**视口相对**坐标
+
+`view` 的 `library_geometry` / `search_geometry` / `home_geometry` 里的焦点矩形一律是
+**视口相对**坐标（相对结果区 / 首页内容区的可见窗口左上角，体检 R3-2 统一口径）：
+
+| 字段 | 含义 |
+|---|---|
+| `library_geometry.focus_top/focus_bottom` | 焦点卡上下沿（相对结果网格的视口） |
+| `search_geometry.focus_top/focus_bottom` | 同上（搜索页结果网格） |
+| `home_geometry.focus_top/focus_bottom` | 焦点卡上下沿（相对首页外层 Flickable 的视口） |
+| `home_geometry.focus_left/focus_right` | 焦点卡左右沿（相对**焦点行自己的**横向 Flickable 视口） |
+
+所以判断「焦点卡在视口内」**不需要**再拿 `scroll_y` 换算：
+
+- 纵向：`0 ≤ focus_top` 且 `focus_bottom ≤ viewport_h`；
+- 横向（首页行）：`0 ≤ focus_left` 且 `focus_right ≤ row_viewport_w`。
+
+`scroll_y` / `row_scroll_x` 仍然报滚动偏移本身（向下 / 向右为负），只用来看"滚没滚、
+滚了多少"。注意首页的「最近添加」是**一整条很长的横向行**（不是嵌套网格）：行内滚动
+只体现在 `row_scroll_x` / `focus_left/right` 上，`scroll_y` 可以一直不变。以前这里报的是
+内容坐标，行内滚出一屏后焦点矩形看起来仍在视口里，很容易误判成"不滚动"（R3-2）。
+
+快速连按方向键时，键盘跟随（`scroll-to-index`）是**直接写** `content-y` / `content-x`，
+没有平滑动画；但一次注入多个按键时渲染帧可能还没跟上（`targets` 里的坐标会短暂落后）。
+`Enter` 打开的是**焦点所在的条目**（`view.focus` / `focus_ui` 指向的那张卡），不是
+"屏幕上看起来"的那张——滚动只是视觉跟随，不影响按键语义。
+
 `view` 里还有一组悬停探针：`home_geometry.row0_zoom_on`（继续观看行的放大覆盖层是否
 打开），以及 `library_geometry` / `search_geometry` 里的 `zoom_on`。悬停卡片后从
 `false` 变 `true`、指针移开又变回 `false`，这就是“`hover` 真的命中了吗”的直接证据。
 网格与首页行用同一条放大规则：**悬停优先，其次键盘焦点**（键盘焦点只在按过方向键、
 `nav-active` 为真时才放大，避免一打开页面第一张卡就是放大状态）。
+
+悬停还会把**键盘焦点对齐到鼠标下的那张卡**：`hover` 之后的方向键从这张卡继续。
+这条规则在放大覆盖层（`CardZoom`，接管命中区）上同样生效——包括“指针本来就停在
+这张卡上、同一坐标再 `hover` 一次”（体检 R2-3：以前只有 `has-hover` 的边沿才同步，
+重复悬停是空操作，`Right` 就从键盘旧位置 +1）。判断焦点看 `view.focus_ui`（即时的
+UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时更新，悬停后可能是旧值。
 
 - **清单是两路合并的**：页面里固定摆放的控件写在 `.slint` 的 `targets` 数组里（活绑定，
   标签永远是最新的）；重复元素（卡片 / 标签 / 菜单行）和条件子树（hero / 空态 / 对话框）

@@ -48,26 +48,26 @@ fn many_cards(prefix: &str) -> Vec<CardView> {
 }
 
 /// 焦点卡（含放大余量）必须完全落在可视窗口内。
+///
+/// 探针报的是**视口相对**坐标（体检 R3-2：内容坐标 + 页面滚动偏移），所以这里
+/// 直接与 `[0, viewport_h]` 比，不需要再拿 `scroll_y` 换算。
 fn assert_focus_card_visible(
     label: &str,
-    scroll_y: f32,
     viewport_h: f32,
     focus_top: f32,
     focus_bottom: f32,
     pad: f32,
 ) {
-    // `content-y` 向下滚动时为负，可视窗口在内容坐标里是 `[-content-y, -content-y + h]`。
-    let view_top = -f64::from(scroll_y);
-    let view_bottom = view_top + f64::from(viewport_h);
+    let view_bottom = f64::from(viewport_h);
     let top = f64::from(focus_top);
     let bottom = f64::from(focus_bottom);
     assert!(
-        top - f64::from(pad) >= view_top - 0.5,
-        "{label}: 焦点卡上沿 {top}（含 {pad}px 放大余量）在可视区上沿 {view_top} 之上（scroll-y = {scroll_y}）"
+        top - f64::from(pad) >= -0.5,
+        "{label}: 焦点卡上沿 {top}（含 {pad}px 放大余量）在视口上沿之上（视口高 {viewport_h}）"
     );
     assert!(
         bottom + f64::from(pad) <= view_bottom + 0.5,
-        "{label}: 焦点卡下沿 {bottom}（含 {pad}px 放大余量）超出可视区下沿 {view_bottom}（scroll-y = {scroll_y}）"
+        "{label}: 焦点卡下沿 {bottom}（含 {pad}px 放大余量）超出视口下沿 {view_bottom}"
     );
 }
 
@@ -108,7 +108,6 @@ fn library_grid_zoom_and_scroll_follow_keyboard_focus() {
     let theme = app.ui().global::<Theme>();
     assert_focus_card_visible(
         "媒体库",
-        app.ui().get_library_scroll_y(),
         app.ui().get_library_viewport_h(),
         app.ui().get_library_focus_top(),
         app.ui().get_library_focus_bottom(),
@@ -129,7 +128,6 @@ fn library_grid_zoom_and_scroll_follow_keyboard_focus() {
     assert_eq!(app.focus_index(), 0);
     assert_focus_card_visible(
         "媒体库（回到首行）",
-        app.ui().get_library_scroll_y(),
         app.ui().get_library_viewport_h(),
         app.ui().get_library_focus_top(),
         app.ui().get_library_focus_bottom(),
@@ -169,7 +167,6 @@ fn search_grid_zoom_and_scroll_follow_keyboard_focus() {
     let theme = app.ui().global::<Theme>();
     assert_focus_card_visible(
         "搜索页",
-        app.ui().get_search_scroll_y(),
         app.ui().get_search_viewport_h(),
         app.ui().get_search_focus_top(),
         app.ui().get_search_focus_bottom(),

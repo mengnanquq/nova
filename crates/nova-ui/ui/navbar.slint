@@ -98,9 +98,23 @@ export component Navbar inherits Rectangle {
         }
     }
 
-    /// 让搜索输入框拿到键盘焦点（Ctrl+F 由 Rust 侧调到这里）。
+    // 见 `focus-input`：`set-selection-offsets` 用的是 UTF-8 字节偏移（超出会被
+    // clamp 到文本长度），不能拿 `string.length`（字素簇个数）当偏移。
+    property <int> text-end: 2147483647;
+
+    /// 让搜索输入框拿到键盘焦点（Ctrl+F / 点放大镜由 Rust 侧调到这里）。
     public function focus-input() {
+        // 已经在本框里打字时不碰光标：在中间改字不能被强行跳到末尾。
+        if (search-input.has-focus) {
+            return;
+        }
         search-input.focus();
+        // 顶栏输入框的文本是**常驻**的（`search-text` 与 AppWindow 双向同步，回首页
+        // 也保留旧查询词），展开时 TextInput 的光标停在旧位置（通常是 0）：点开就
+        // 打字会把首字符插到旧词前面（体检 R3-1：旧词 `沙丘` + 立即输入 `1234`
+        // → `1沙丘234`）。交接时把光标与锚点一起推到末尾，与搜索页大输入框
+        // `SearchPage.focus-input` 同一口径。
+        search-input.set-selection-offsets(root.text-end, root.text-end);
     }
 
     height: Theme.navbar-height;

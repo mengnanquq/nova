@@ -288,12 +288,16 @@ component VolumeControl inherits Rectangle {
 component TransportButton inherits Rectangle {
     in property <string> label: "";
     in property <bool> active: false;
+    // 错误态下 ±15s 没有意义（会话是 `Failed`，引擎不会再接受 seek）：
+    // 禁用命中区并降到 `player-disabled-opacity`，布局位置不变（控制行不跳）。
+    in property <bool> interactive: true;
     callback clicked();
 
     width: label-text.preferred-width + Theme.player-control-padding * 2;
     height: Theme.player-control-size;
     border-radius: Theme.radius-pill;
-    background: area.has-hover ? Theme.player-control-hover : transparent;
+    opacity: root.interactive ? 1 : Theme.player-disabled-opacity;
+    background: root.interactive && area.has-hover ? Theme.player-control-hover : transparent;
     border-width: Theme.player-focus-width;
     // 官方 `:focus{outline:3px solid #fff}`。播放页目前没有逐控件的键盘焦点模型
     // （键位由 app.slint 的全局 FocusScope 分派给 Rust），所以把官方焦点环画在
@@ -310,6 +314,7 @@ component TransportButton inherits Rectangle {
     }
 
     area := TouchArea {
+        enabled: root.interactive;
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
@@ -664,6 +669,8 @@ component PlayerProgress inherits Rectangle {
     in property <float> buffered: 0;
     in property <bool> scrubbing: false;
     in property <string> bubble: "";
+    // 错误态下没有可 seek 的会话：禁用拖动（保留几何，控制行不跳）。
+    in property <bool> interactive: true;
     callback bar-start();
     callback bar-move(float);
     callback bar-commit(float);
@@ -673,10 +680,11 @@ component PlayerProgress inherits Rectangle {
     // 官方 `.nfp .scrubber-container{height:3.3em}`：可点区就是这 3.3em（16px 基数 ≈ 53px）。
     height: Theme.player-hit-height;
     background: transparent;
+    opacity: root.interactive ? 1 : Theme.player-disabled-opacity;
 
     // 官方 `.scrubber-container:hover .track` / `.nfp .is-scrubbing .track{height:1em}`（静息 `.5em`），
     // 两条都是 `transition:height .2s ease`。
-    property <bool> hot: bar-area.has-hover || root.scrubbing;
+    property <bool> hot: root.interactive && (bar-area.has-hover || root.scrubbing);
     property <length> bar-height: root.hot ? Theme.player-bar-height-hover : Theme.player-bar-height;
     // 官方 `.scrubber-head{height:2.3em;width:2.3em;margin:-1.15em;transition:transform .2s ease}`，
     // `:hover` 与 `.is-scrubbing` 都 `scale(1.2)`。
@@ -764,6 +772,7 @@ component PlayerProgress inherits Rectangle {
     }
 
     bar-area := TouchArea {
+        enabled: root.interactive;
         mouse-cursor: pointer;
 
         // 按下开始拖动，移动只更新气泡与把手（不发 seek），松手才提交。
@@ -914,13 +923,22 @@ export component PlayerOverlay inherits Rectangle {
         },
     ];
 
+    // 错误态下 seek 没有意义（会话已经是 `Failed`，引擎不会再接受 seek）：
+    // 进度条 / ±15s / 时间切换不再登记为可交互目标，否则它们就是“点得中、
+    // 点了没反应”的死控件（体检 R3-3）。正常态照旧全部登记。
+    pure function is-seek-target(id: string) -> bool {
+        return id == "player.progress" || id == "player.seek-back"
+            || id == "player.seek-forward" || id == "player.time";
+    }
+
     for target in root.targets : Rectangle {
         width: 0px;
         height: 0px;
         visible: false;
         property <int> target-gen: TargetBus.gen;
         changed target-gen => {
-            if (root.data.controls-visible && root.visible) {
+            if (root.data.controls-visible && root.visible
+                && !(root.data.has-error && root.is-seek-target(target.id))) {
                 TargetBus.register(target);
             }
         }
@@ -1290,6 +1308,7 @@ export component PlayerOverlay inherits Rectangle {
             // 第二行：进度条（3.3em = 53px 命中区）。
             progress := PlayerProgress {
                 height: Theme.player-hit-height;
+                interactive: !root.data.has-error;
                 played: root.shown-ratio;
                 buffered: max(root.data.buffered, root.shown-ratio);
                 scrubbing: root.scrubbing;
@@ -1360,6 +1379,7 @@ export component PlayerOverlay inherits Rectangle {
                 // （与键盘 ←/→ 一致），形态统一但步长是我们的选择，见 §11.6。
                 seek-back-btn := TransportButton {
                     label: "-15s";
+                    interactive: !root.data.has-error;
                     clicked => {
                         root.seek-relative(-15);
                     }
@@ -1367,6 +1387,7 @@ export component PlayerOverlay inherits Rectangle {
 
                 seek-forward-btn := TransportButton {
                     label: "+15s";
+                    interactive: !root.data.has-error;
                     clicked => {
                         root.seek-relative(15);
                     }
@@ -1418,10 +1439,12 @@ export component PlayerOverlay inherits Rectangle {
                 }
 
                 // 剩余时间（最右）：点击在"剩余"与"已播/总长"之间切换，不同时渲染两份。
+                // 错误态下没有时长可切（剩余/已播都是 0:00），禁用命中并降低不透明度。
                 Rectangle {
                     width: time-label.preferred-width + Theme.space-2 * 2;
                     height: Theme.player-control-size;
                     border-radius: Theme.radius-poster;
+                    opacity: root.data.has-error ? Theme.player-disabled-opacity : 1;
                     background: time-area.has-hover ? Theme.player-control-hover : transparent;
 
                     time-label := Text {
@@ -1440,6 +1463,7 @@ export component PlayerOverlay inherits Rectangle {
                     }
 
                     time-area := TouchArea {
+                        enabled: !root.data.has-error;
                         mouse-cursor: pointer;
                         clicked => {
                             root.time-toggle();
