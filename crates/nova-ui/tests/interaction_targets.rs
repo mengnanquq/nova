@@ -1044,9 +1044,8 @@ fn retry_target_disappears_once_the_error_clears() {
     // 体检 R2-7：错误卡（`has-error`）是条件子树，元素消失后登记总线只增不减，
     // 旧的 `player.retry` 会留在清单里——用户看到一个“看得见、点了没反应”的死按钮。
     //
-    // `App::targets()` 是双缓冲合并（上一代的 `targets` + 新一代的 `staging`），
-    // 所以元素消失后**第一轮刷新**里它仍然会被报出来。这里故意只刷新一轮就断言，
-    // 因为调试通道的 `targets` / 按 id 的 `click` 都可能在两轮之间读清单。
+    // 以前 `App::targets()` 合并上一代与本代，元素消失后**第一轮刷新**里它仍会被
+    // 报出来。这里故意只刷新一轮就断言：现在每轮刷新整张替换，不得有旧代残留。
     let app = window();
     app.set_player(&player_error());
     app.show_page(Page::Player);
@@ -1238,4 +1237,33 @@ fn aggregate_rows_have_no_more_target() {
     let path = common::snapshots_dir().join("home-row-more-only-for-libraries.png");
     common::write_png(&path, &snapshot);
     println!("snapshot 首页行「查看全部」: {}", path.display());
+}
+
+/// 通用护栏：任何条件子树消失后，**一次** `refresh_targets` 就不得再列出它的目标。
+///
+/// 回归：目标清单曾合并"上一代 + 本代"，条件子树（错误卡「重试」、对话框、暂停时的
+/// 中央图标）消失后旧坐标会多留一代，只能逐个按视图状态打补丁过滤。这里用一个
+/// **从没打过补丁**的条件目标（暂停时的中央大图标）证明根因已在清单层面解决。
+#[test]
+fn a_vanished_conditional_target_is_gone_after_one_refresh() {
+    let app = window();
+    app.set_player(&player_view().with_playing(false));
+    app.show_page(Page::Player);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    assert!(
+        settle(&app, 80)
+            .iter()
+            .any(|t| t.id == "player.center-play"),
+        "前提：暂停时应有中央大图标"
+    );
+
+    app.set_player(&player_view().with_playing(true));
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    app.refresh_targets();
+    let ids: Vec<String> = app.targets().into_iter().map(|t| t.id).collect();
+    assert!(
+        !ids.iter().any(|id| id == "player.center-play"),
+        "恢复播放后一次刷新就不该再有中央大图标：{ids:?}"
+    );
 }

@@ -360,15 +360,14 @@ pub struct App {
     /// Slint 1.19 的数组属性没有推导与拼接，这类目标没法写进父组件的
     /// `targets` 数组，只能经 `TargetBus` 报到 Rust（见 `docs/ui-architecture.md`）。
     targets: Rc<RefCell<BTreeMap<String, TargetInfo>>>,
-    /// 上一代的登记结果（双缓冲的另一半）。
+    /// 本代登记的收集区：`refresh_targets` 推进代次期间由 `TargetBus.register` 写入，
+    /// 推进完成后整张换进 `targets`。
     ///
-    /// 登记发生在**下一个事件循环回合**，而 `refresh_targets` 会推进代次让所有
-    /// 元素重新上报。如果推进时把注册表直接清空，中间就有一段"清单是空的"的
-    /// 空窗期——这时候按 id 点任何东西都会得到 `unknown target`（调试通道的
-    /// 定时刷新每 50ms 就制造一次这种空窗，表现为"点一会儿行一会儿不行"）。
-    ///
-    /// 所以改成双缓冲：推进代次时把上一代结果留在 `targets`，新一代写进 `staging`，
-    /// 读取时两者合并（新一代优先）。这样任何时刻清单都是"至少有上一帧的完整内容"。
+    /// 历史：这里曾是"双缓冲"——读取时把上一代与本代合并，以避开登记要等下一个
+    /// 事件回合才发生的空窗期。副作用是条件子树（错误卡「重试」、对话框、暂停时的
+    /// 中央图标）消失后，旧坐标会多留一代，只能逐个按视图状态打补丁过滤。
+    /// 现在 `refresh_targets` 用 `ensure_tree_instantiated` 当场跑完登记回调，
+    /// 不再有空窗期，也就不需要合并旧代。
     staging: Rc<RefCell<BTreeMap<String, TargetInfo>>>,
 }
 
@@ -406,29 +405,23 @@ impl App {
         }
     }
 
-    /// 让所有登记型目标（卡片 / 标签 / 菜单行 / 条件子树）重新上报一次。
+    /// 让所有登记型目标（卡片 / 标签 / 菜单行 / 条件子树）重新上报一次，并**当场**
+    /// 用本代结果整张替换清单。
     ///
-    /// 顺序不能颠倒：
-    ///
-    /// 1. **先实例化重复元素**（见 [`App::instantiate_items`]）。`for` 项是惰性创建的，
-    ///    推进 `gen` 只让**已存在**的元素重新求值，不会把实例创建出来；
-    /// 2. 再把 `staging` 推进 `targets`、推进 `TargetBus.gen`：Slint 会重新求值所有
-    ///    依赖它的绑定并触发登记回调——调用方必须等一拍（真实窗口是调试定时器的
-    ///    下一拍，测试是 `mock_elapsed_time`）再读 [`App::targets`]。
-    ///
-    /// 双缓冲：把上一代的结果推进 `targets`，清空 `staging` 收新一代，
-    /// 再推进 `TargetBus.gen` 触发表达式重新求值。**不清空 `targets`**——
-    /// 空窗期会让按 id 的点击随机失败（原因见 `staging` 字段的注释）。
+    /// 1. 先实例化重复元素（见 [`App::instantiate_items`]）：`for` 项是惰性创建的，
+    ///    推进 `gen` 只让已存在的元素重新求值；
+    /// 2. 推进 `TargetBus.gen`，再调一次 `instantiate_items`——它内部会同步跑掉
+    ///    `changed target-gen` 回调，登记在返回前就已完成；
+    /// 3. 用本代结果替换 `targets`。消失的条件子树不会留下旧坐标。
     pub fn refresh_targets(&self) {
         self.instantiate_items();
-        {
-            let mut staging = self.staging.borrow_mut();
-            if !staging.is_empty() {
-                *self.targets.borrow_mut() = std::mem::take(&mut *staging);
-            }
-        }
+        self.staging.borrow_mut().clear();
         let bus = self.ui.global::<TargetBus>();
         bus.set_gen(bus.get_gen().wrapping_add(1));
+        // `ensure_tree_instantiated` 会同步跑掉 `changed target-gen` 回调：
+        // 本代登记就在这里当场完成，然后整张替换。
+        self.instantiate_items();
+        *self.targets.borrow_mut() = std::mem::take(&mut *self.staging.borrow_mut());
     }
 
     /// 把 item tree 里的重复元素实例化出来（惰性 `for` 项不会自己出现）。
@@ -456,10 +449,8 @@ impl App {
     ///   ——隐藏页面里已登记的元素不会混进来；
     /// - 宽高必须为正，中心点必须落在窗口内（横向溢出视口一半的卡点不到中心）；
     /// - 「添加服务器」对话框打开时只保留 `dialog.` 目标（下层被遮罩挡住，
-    ///   点它们只会得到"没反应"的假结论）；关闭后 `dialog.` 目标一律不列。
-    ///   登记总线是只增不减的：关框后旧的 `dialog.*` 还在 `staging`/`targets` 里，
-    ///   不看 `add-server-open` 就会在页面上凭空多出几个“对话框目标”（实测：
-    ///   点「取消」后 `targets` 仍返回 5 个 dialog.*）。
+    ///   点它们只会得到"没反应"的假结论）；关闭后 `dialog.` 目标一律不列
+    ///   （声明式清单里的对话框目标是活绑定，关框后仍有坐标，所以要按状态挡掉）。
     pub fn targets(&self) -> Vec<TargetInfo> {
         // 窗口尺寸是物理像素，目标坐标是逻辑像素：用缩放因子换算。
         let scale = self.ui.window().scale_factor();
@@ -471,10 +462,6 @@ impl App {
         for (id, info) in self.targets.borrow().iter() {
             merged.insert(id.clone(), info.clone());
         }
-        // 新一代（上一帧推进代次后回填的）覆盖旧值——它反映最新的可见性与坐标。
-        for (id, info) in self.staging.borrow().iter() {
-            merged.insert(id.clone(), info.clone());
-        }
         let declared = self.ui.get_targets();
         for index in 0..declared.row_count() {
             if let Some(target) = declared.row_data(index) {
@@ -484,16 +471,9 @@ impl App {
         }
         let dialog_open = self.ui.get_add_server_open();
         let prefix = target_prefix(self.page());
-        // 条件子树里的目标只在条件为真时才存在于界面上，但登记总线只增不减
-        // （双缓冲为了避开"清单是空的"空窗期，会把上一代的结果继续合并进来）。
-        // 所以这里按视图模型的实际状态过滤一遍：否则"播放失败"过去的
-        // `player.retry` 会在错误卡消失后继续被列出来，变成"看得见、点了没反应"
-        // 的死按钮（体检 R2-7）。
-        let retry_available = self.ui.get_player().has_error;
         let mut out: Vec<TargetInfo> = merged
             .into_values()
             .filter(|target| target.is_clickable())
-            .filter(|target| target.id != "player.retry" || retry_available)
             .filter(|target| target.center_in_window(window_w, window_h))
             .filter(|target| {
                 if dialog_open {
