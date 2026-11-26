@@ -101,6 +101,9 @@ pub struct Credentials {
     /// 令牌是否会持久化（`false` 表示进程退出即丢）。
     pub persistent: bool,
     /// 退化为进程内存储时的说明文本。
+    ///
+    /// 这段文字会显示在**桌面界面**（过期 / 缺令牌横幅的 `note`、添加服务器对话框的
+    /// 说明行），所以只说应用内的入口，不让用户去终端敲命令。
     pub note: Option<String>,
 }
 
@@ -115,7 +118,7 @@ pub fn open_credentials(mode: CredentialMode) -> Credentials {
             persistent: false,
             note: Some(
                 "已按 NOVA_CREDENTIALS=memory 使用进程内存储：令牌不会持久化，\
-                 每次启动都需要重新 `nova login`"
+                 每次启动都需要重新登录（Ctrl+N，或首页「连接服务器」）"
                     .to_owned(),
             ),
         },
@@ -138,7 +141,7 @@ pub fn open_credentials(mode: CredentialMode) -> Credentials {
                     persistent: false,
                     note: Some(format!(
                         "{reason} → 已退化为进程内存储：令牌只在本次运行内有效，\
-                         需要先在终端重新 `nova login`"
+                         需要先在应用内重新登录（Ctrl+N，或首页「连接服务器」）"
                     )),
                 }
             }
@@ -207,6 +210,41 @@ mod tests {
                 .note
                 .as_deref()
                 .is_some_and(|note| note.contains("NOVA_CREDENTIALS=memory"))
+        );
+    }
+
+    /// 凭证退化的说明文本会进**桌面界面**（横幅 note / 添加服务器对话框），
+    /// 所以不能把用户推回终端敲 `nova login`，只能指向应用内入口。
+    ///
+    /// 最后一层断言是“从 note 到横幅文案”的整条链：GUI 上真正看到的那句话里
+    /// 不能出现终端命令（这是上一轮体检剩下的那批终端口径文案）。
+    #[test]
+    fn credential_notes_never_send_the_user_to_the_terminal() {
+        let memory = open_credentials(CredentialMode::Memory)
+            .note
+            .expect("memory 模式一定有说明文本");
+        // 密钥环可用的机器上 `Auto` / `Keyring` 没有 note，那就没有文案要检查。
+        let notes = [
+            Some(memory.clone()),
+            open_credentials(CredentialMode::Auto).note,
+            open_credentials(CredentialMode::Keyring).note,
+        ];
+        for note in notes.into_iter().flatten() {
+            assert!(!note.contains("nova login"), "{note}");
+            assert!(!note.contains("终端"), "{note}");
+            assert!(note.contains("Ctrl+N"), "{note}");
+        }
+
+        let banner = crate::status::Status::MissingToken {
+            url: "http://host:8096".to_owned(),
+            note: Some(memory),
+        }
+        .banner_data()
+        .expect("缺令牌时应有横幅");
+        assert!(
+            !banner.text.contains("nova login") && !banner.text.contains("终端"),
+            "横幅是桌面界面，不能把用户推回终端：{}",
+            banner.text
         );
     }
 }

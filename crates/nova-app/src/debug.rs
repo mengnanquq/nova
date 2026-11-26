@@ -20,10 +20,12 @@
 //! - 不监听网络，只监听本地文件；socket 权限跟随用户目录，**没有鉴权也没有加密**——
 //!   它只该在开发机上开启。
 //! - 交互是通过 Slint 自己的 `Window::dispatch_event` 注入的（`PointerMoved` /
-//!   `PointerPressed` / `PointerReleased` / `KeyPressed`），不需要操作系统级工具，
-//!   也不会干扰用户桌面。目标清单由界面在 `ui/*.slint` 里登记（`Target` / `TargetBus`）。
-//! - `targets` / `sweep` / `dead` 需要"界面把目标重新登记一遍"：命令先排队等一拍
-//!   事件循环（`TargetBus.gen` 推进后 Slint 才会重新求值），见 `ui.rs` 的调试定时器。
+//!   `PointerPressed` / `PointerReleased` / `PointerScrolled` / `KeyPressed`），
+//!   不需要操作系统级工具，也不会干扰用户桌面。目标清单由界面在 `ui/*.slint` 里
+//!   登记（`Target` / `TargetBus`）。
+//! - `targets` / `sweep` / `dead` 与按 id 的 `click` / `hover` / `scroll` 需要"界面把
+//!   目标重新登记一遍"：命令先排队等一拍事件循环（`TargetBus.gen` 推进后 Slint 才会
+//!   重新求值），见 `ui.rs` 的调试定时器。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -82,6 +84,17 @@ pub(crate) enum Command {
         x: Option<f32>,
         y: Option<f32>,
     },
+    /// 滚轮：把指针移到目标（或坐标）再发 `PointerScrolled`
+    /// （`dx` / `dy` 是逻辑像素，语义同 winit：正 `dy` = 向上滚，负 `dy` = 向下滚）。
+    Scroll {
+        target: Option<String>,
+        x: Option<f32>,
+        y: Option<f32>,
+        /// 横向滚动量。
+        dx: f32,
+        /// 纵向滚动量。
+        dy: f32,
+    },
     /// 一个按键（命名键或单字符）。
     Key {
         key: String,
@@ -106,8 +119,19 @@ pub(crate) enum Command {
 
 impl Command {
     /// 是否需要先让界面把目标重新登记一遍（推进 `TargetBus.gen` 并等一拍）。
+    ///
+    /// 按 id 操作的命令（`click` / `hover` / `scroll` 给了 `target`）也要：
+    /// 清单里的坐标来自上一次登记，页面刚换过 / 刚滚过时是**旧位置**，
+    /// 直接派发会落到空处（甚至报 `unknown target`，实测媒体库滚一屏后就能重现）。
+    /// 按 `x`/`y` 给坐标的不需要，省掉这 100ms。
     pub(crate) const fn needs_settle(&self) -> bool {
-        matches!(self, Self::Targets | Self::Sweep | Self::Dead)
+        match self {
+            Self::Targets | Self::Sweep | Self::Dead => true,
+            Self::Click { target, .. }
+            | Self::Hover { target, .. }
+            | Self::Scroll { target, .. } => target.is_some(),
+            _ => false,
+        }
     }
 
     /// 命令自身要求的等待时间（`wait` 用；其余命令不需要等）。
@@ -181,6 +205,29 @@ impl Command {
                 } else {
                     Ok(Self::Hover { target, x, y })
                 }
+            }
+            "scroll" => {
+                let target = text("target");
+                let (x, y) = match (number("x"), number("y")) {
+                    (Some(x), Some(y)) => (Some(x as f32), Some(y as f32)),
+                    _ => (None, None),
+                };
+                if target.is_none() && x.is_none() {
+                    return Err("scroll 需要 target，或同时给 x 与 y".to_owned());
+                }
+                // 滚动量：`dy` 必备（只写 `{"cmd":"scroll",...}` 是最常见的误用），`dx` 缺省 0。
+                let dy = number("dy").ok_or_else(|| "scroll 需要 dy".to_owned())? as f32;
+                let dx = number("dx").unwrap_or(0.0) as f32;
+                if dy == 0.0 && dx == 0.0 {
+                    return Err("scroll 的 dx 与 dy 不能同时为 0".to_owned());
+                }
+                Ok(Self::Scroll {
+                    target,
+                    x,
+                    y,
+                    dx,
+                    dy,
+                })
             }
             "key" => Ok(Self::Key {
                 key: text("key").ok_or_else(|| "key 需要 key".to_owned())?,
@@ -354,6 +401,27 @@ mod tests {
             })
         );
         assert_eq!(
+            Command::parse(r#"{"cmd":"scroll","x":400,"y":300,"dy":-360}"#),
+            Ok(Command::Scroll {
+                target: None,
+                x: Some(400.0),
+                y: Some(300.0),
+                dx: 0.0,
+                dy: -360.0
+            })
+        );
+        // 按目标滚动：`dx` / `dy` 都可给；`dx` 缺省 0。
+        assert_eq!(
+            Command::parse(r#"{"cmd":"scroll","target":"library.grid","dy":360,"dx":12}"#),
+            Ok(Command::Scroll {
+                target: Some("library.grid".to_owned()),
+                x: None,
+                y: None,
+                dx: 12.0,
+                dy: 360.0
+            })
+        );
+        assert_eq!(
             Command::parse(r#"{"cmd":"key","key":"Enter"}"#),
             Ok(Command::Key {
                 key: "Enter".to_owned(),
@@ -388,6 +456,42 @@ mod tests {
         assert!(Command::Targets.needs_settle());
         assert!(Command::Sweep.needs_settle());
         assert!(Command::Dead.needs_settle());
+        // 按 id 操作也要等一拍：清单位置可能已经过期。
+        assert!(
+            Command::Hover {
+                target: Some("library.card.0".to_owned()),
+                x: None,
+                y: None
+            }
+            .needs_settle()
+        );
+        assert!(
+            Command::Click {
+                target: Some("library.sort".to_owned()),
+                x: None,
+                y: None
+            }
+            .needs_settle()
+        );
+        assert!(
+            Command::Scroll {
+                target: Some("library.grid".to_owned()),
+                x: None,
+                y: None,
+                dx: 0.0,
+                dy: -360.0
+            }
+            .needs_settle()
+        );
+        // 纯坐标的不需要（省 100ms）。
+        assert!(
+            !Command::Click {
+                target: None,
+                x: Some(1.0),
+                y: Some(2.0)
+            }
+            .needs_settle()
+        );
         assert!(!Command::View.needs_settle());
         assert_eq!(Command::Wait { ms: 400 }.wait_ms(), 400);
         assert_eq!(Command::View.wait_ms(), 0);
@@ -421,6 +525,22 @@ mod tests {
             Command::parse(r#"{"cmd":"click","x":1}"#)
                 .unwrap_err()
                 .contains("x")
+        );
+        // `scroll`：位置和滚动量缺一不可（只给位置等于什么都没滚）。
+        assert!(
+            Command::parse(r#"{"cmd":"scroll","x":1,"y":2}"#)
+                .unwrap_err()
+                .contains("dy")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"scroll","dy":100}"#)
+                .unwrap_err()
+                .contains("target")
+        );
+        assert!(
+            Command::parse(r#"{"cmd":"scroll","x":1,"y":2,"dy":0}"#)
+                .unwrap_err()
+                .contains("0")
         );
         assert!(
             Command::parse(r#"{"cmd":"key"}"#)

@@ -633,6 +633,12 @@ impl Shell {
                         "zoom_on": ui.get_search_zoom_on(),
                     },
                     "detail_drop_open": ui.get_detail_drop_open(),
+                    // 首页整页滚动 / 继续观看行放大（`ui/home.slint` 的 `scroll-y` /
+                    // `row0-zoom-on`）：验证滚轮真的滚了、悬停真的打开了放大层。
+                    "home_geometry": {
+                        "scroll_y": ui.get_home_scroll_y(),
+                        "row0_zoom_on": ui.get_row0_zoom_on(),
+                    },
                     "home": {
                         "hero": state.home.hero.as_ref().map(|card| card.title.clone()),
                         "recent": state.home.recently_added.len(),
@@ -800,6 +806,26 @@ impl Shell {
                 },
                 Err(reply) => reply,
             },
+            Cmd::Scroll {
+                target,
+                x,
+                y,
+                dx,
+                dy,
+            } => match shell.resolve_point(target.as_deref(), x, y) {
+                Ok((x, y, resolved)) => match shell.scroll_at(x, y, dx, dy) {
+                    Ok(()) => serde_json::json!({
+                        "ok": true,
+                        "target": resolved.as_ref().map(|target| target.id.clone()),
+                        "x": x,
+                        "y": y,
+                        "dx": dx,
+                        "dy": dy,
+                    }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                },
+                Err(reply) => reply,
+            },
             Cmd::Key { key, ctrl, shift } => match key_event_text(&key) {
                 Some(text) => {
                     let result = shell.dispatch_key_with_modifiers(&text, ctrl, shift);
@@ -867,6 +893,21 @@ impl Shell {
             })?;
         }
         Ok(())
+    }
+
+    /// 在 `x,y` 处滚一下：先发 `PointerMoved`（真机的滚轮事件也带一个当前位置，
+    /// 悬停态与命中测试都会用到它），再发 `PointerScrolled`。
+    ///
+    /// 符号跟 winit / Slint 原始语义：正 `dy` 是向上滚（`content-y` 加上 `dy`，
+    /// 即内容下移），负 `dy` 向下滚。实测这就是真机滚轮的等效方向。
+    fn scroll_at(&self, x: f32, y: f32, dx: f32, dy: f32) -> Result<(), String> {
+        let position = slint::LogicalPosition::new(x, y);
+        self.dispatch(WindowEvent::PointerMoved { position })?;
+        self.dispatch(WindowEvent::PointerScrolled {
+            position,
+            delta_x: dx,
+            delta_y: dy,
+        })
     }
 
     /// 发一次按键（按下 + 松开）。

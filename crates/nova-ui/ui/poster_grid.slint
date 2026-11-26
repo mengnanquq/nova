@@ -97,7 +97,21 @@ export component PosterGrid inherits Rectangle {
     opacity: root.reveal;
 
     property <float> zoom-factor: 1.0;
-    property <int> zoom-index: root.nav-active ? root.focus-index : -1;
+    // 放大谁：与首页 `CardRow` 同一规则——**悬停优先**，其次键盘焦点。
+    //
+    // 以前只看 `nav-active`（只有按过方向键才为真），于是用鼠标悬停媒体库 / 搜索
+    // 结果卡片只移动焦点、不放大——同一个应用里首页行悬停会放大、网格不会。
+    // `hot` 记悬停的卡；指针移到放大覆盖层上时基础卡失去悬停，用 `latch` 锁住。
+    property <int> hot: -1;
+    property <int> latch: -1;
+    changed hot => {
+        if (root.hot >= 0) {
+            root.latch = root.hot;
+        }
+    }
+    property <bool> overlay-hovered: false;
+    property <int> zoom-index: root.hot >= 0 ? root.hot
+        : (root.overlay-hovered ? root.latch : (root.nav-active ? root.focus-index : -1));
 
     states [
         zoomed when root.zoom-index >= 0 && root.zoom-index < root.cards.length : {
@@ -133,9 +147,12 @@ export component PosterGrid inherits Rectangle {
             root.open(card.id);
         }
         hover-changed(has) => {
-            // 网格的放大跟随键盘焦点；悬停时移过去。
+            // 悬停：放大这张，同时把键盘焦点移过来（之后按方向键从这里继续）。
             if (has) {
+                root.hot = i;
                 root.focus-index = i;
+            } else if (root.hot == i) {
+                root.hot = -1;
             }
         }
     }
@@ -159,6 +176,9 @@ export component PosterGrid inherits Rectangle {
             base-width: root.card-width;
             base-image-height: root.poster-height;
             zoom-factor: root.zoom-factor;
+            changed hovered => {
+                root.overlay-hovered = self.hovered;
+            }
             clicked => {
                 root.open(root.cards[root.zoom-index].id);
             }

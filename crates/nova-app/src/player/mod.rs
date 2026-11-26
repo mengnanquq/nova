@@ -66,6 +66,13 @@ const PRESENT_STALL: Duration = Duration::from_millis(400);
 /// 兜底驱动的最小间隔（`take_snapshot()` 会把整帧读回 CPU，别跑太密）。
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(16);
 
+/// 没有服务器时播放失败的用户可见文案。
+///
+/// 这段文字直接进播放页的 `error`（桌面界面），所以只说应用内的入口
+/// （与 `status.rs` 的横幅同一套措辞），不让用户去终端敲命令。
+const NO_SERVER_PLAYBACK: &str =
+    "还没有连接服务器：先在应用内连接（Ctrl+N，或首页「连接服务器」）再播放";
+
 /// `--play` 的启动参数。
 #[derive(Clone, Debug)]
 pub struct StartPlay {
@@ -707,7 +714,7 @@ impl Player {
         self.subtitle_margin = 0;
 
         let Some(server) = self.local.server_id() else {
-            self.fail("还没有连接服务器：先在终端运行 `nova login`");
+            self.fail(NO_SERVER_PLAYBACK);
             return;
         };
         let id = ItemId::new(item_id);
@@ -769,7 +776,7 @@ impl Player {
         self.pending_view = Some(view);
 
         let Some(provider) = self.local.provider_dyn() else {
-            self.fail("没有可用的服务器连接：先在终端运行 `nova login`");
+            self.fail(NO_SERVER_PLAYBACK);
             return;
         };
         let post = Arc::clone(post);
@@ -1537,6 +1544,25 @@ mod tests {
             Some("a".to_owned())
         );
         assert!(pick_source(&[], None).is_none());
+    }
+
+    /// 播放页的失败文案是**桌面界面**里的文字：不能把用户推回终端敲 `nova login`，
+    /// 只能指向应用内的入口（Ctrl+N / 首页「连接服务器」），与 `status.rs` 的横幅一致。
+    #[test]
+    fn playback_failure_copy_never_sends_the_user_to_the_terminal() {
+        assert!(
+            !NO_SERVER_PLAYBACK.contains("nova login"),
+            "{NO_SERVER_PLAYBACK}"
+        );
+        assert!(!NO_SERVER_PLAYBACK.contains("终端"), "{NO_SERVER_PLAYBACK}");
+        assert!(
+            NO_SERVER_PLAYBACK.contains("Ctrl+N"),
+            "{NO_SERVER_PLAYBACK}"
+        );
+        assert!(
+            NO_SERVER_PLAYBACK.contains("连接服务器"),
+            "{NO_SERVER_PLAYBACK}"
+        );
     }
 
     #[test]
