@@ -365,7 +365,8 @@ impl Local {
     /// 把 provider 当前看到的服务器信息写回本地库（与 CLI 的 `persist_info` 同规则）。
     ///
     /// 关键点：从令牌恢复的会话里 `user_name` 是空串，不能用它覆盖登录时存下的名字。
-    pub fn persist_info(&self, provider: &Provider) -> Result<(), AppError> {
+    /// 收 `&dyn MediaProvider`：刷新路径只需要 `server_info()`，不必要求具体类型。
+    pub fn persist_info(&self, provider: &dyn MediaProvider) -> Result<(), AppError> {
         let mut info = provider.server_info();
         let stored = self.db.server(&info.id)?;
         if let Some(stored) = &stored {

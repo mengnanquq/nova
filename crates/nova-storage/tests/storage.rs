@@ -779,3 +779,158 @@ fn insert_5000_items_single_transaction_prints_duration() {
         );
     }
 }
+
+/// 刷新后的清理：按库删除过期条目（含递归到季 / 集），以及"父项不可用"的判定。
+#[test]
+fn library_cleanup_queries_and_tree_delete() {
+    let db = Database::open_in_memory().expect("内存库");
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let items = vec![
+        item("s1", MediaKind::Series, Some("lib"), None),
+        item("s1-1", MediaKind::Season, Some("s1"), Some(1)),
+        item("s1-1-1", MediaKind::Episode, Some("s1-1"), Some(1)),
+        item("gone", MediaKind::Movie, Some("lib"), None),
+        item("keep", MediaKind::Movie, Some("lib"), None),
+        // 归属坏掉：父项既不是库也不是本地条目。
+        item("dangling", MediaKind::Movie, Some("no-such-parent"), None),
+        // 层级断掉：季 / 集没有父项。
+        item("stray-episode", MediaKind::Episode, None, Some(2)),
+        // 顶层条目（父项 NULL）是合法状态。
+        item("top", MediaKind::Movie, None, None),
+    ];
+    db.upsert_items(&server_id(), &items, 1).expect("写条目");
+    let library = ItemId::new("lib");
+
+    // 库内条目：只有直接子项，按类型过滤。
+    let ids = db
+        .child_ids(&server_id(), &library, &[MediaKind::Movie])
+        .expect("列子项");
+    let mut ids: Vec<&str> = ids.iter().map(ItemId::as_str).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["gone", "keep"]);
+
+    // 不可达条目：坏归属的电影 + 层级断掉的集；顶层电影与库归属条目不动。
+    let libraries = [library.clone()];
+    let unreachable = db
+        .unreachable_item_ids(&server_id(), &libraries)
+        .expect("列不可达");
+    let mut unreachable: Vec<&str> = unreachable.iter().map(ItemId::as_str).collect();
+    unreachable.sort_unstable();
+    assert_eq!(unreachable, ["dangling", "stray-episode"]);
+
+    // 删除剧集要连带它的季与集；其它条目一条不能少。
+    let removed = db
+        .delete_item_trees(&server_id(), &[ItemId::new("s1"), ItemId::new("gone")])
+        .expect("删除子树");
+    assert_eq!(removed, 4, "剧集 + 季 + 集 + 电影");
+    assert!(
+        db.item(&server_id(), &ItemId::new("s1-1-1"))
+            .expect("读")
+            .is_none()
+    );
+    assert!(
+        db.item(&server_id(), &ItemId::new("s1-1"))
+            .expect("读")
+            .is_none()
+    );
+    assert!(
+        db.item(&server_id(), &ItemId::new("keep"))
+            .expect("读")
+            .is_some()
+    );
+    assert!(
+        db.item(&server_id(), &ItemId::new("top"))
+            .expect("读")
+            .is_some()
+    );
+
+    // 删完之后临时表不残留：再删一批只影响这一批。
+    let again = db
+        .delete_item_trees(&server_id(), &[ItemId::new("dangling")])
+        .expect("再删一批");
+    assert_eq!(again, 1, "上一批种子不能残留");
+}
+
+/// 分批删除期间，另一个线程的读必须能在有界时间内返回。
+///
+/// `Database` 是 `Mutex<Connection>`：一次删几万行会让界面线程的 `children` /
+/// 本地搜索全部堵在锁上（实测：整批删除 3.3 万行期间读要等几分钟）。刷新后的清理
+/// 因此按 200 行一批、批间释放锁；这里断言单次读的等待上限。
+#[test]
+fn chunked_deletes_keep_reads_responsive() {
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("临时目录");
+    let db = Arc::new(Database::open(dir.path().join("nova.db")).expect("建库"));
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let junk: Vec<MediaItem> = (0..4000)
+        .map(|index| {
+            item(
+                &format!("junk-{index}"),
+                MediaKind::Episode,
+                None,
+                Some(index),
+            )
+        })
+        .collect();
+    db.upsert_items(&server_id(), &junk, 1).expect("写垃圾行");
+
+    let writer = {
+        let db = Arc::clone(&db);
+        let sid = server_id();
+        let ids: Vec<ItemId> = junk.iter().map(|item| item.id.clone()).collect();
+        std::thread::spawn(move || {
+            let tree = db.item_tree_ids(&sid, &ids).expect("展开后");
+            let mut removed = 0_u64;
+            for chunk in tree.chunks(200) {
+                removed = removed.saturating_add(db.delete_items(&sid, chunk).expect("删除"));
+            }
+            removed
+        })
+    };
+
+    let mut worst = Duration::ZERO;
+    let mut reads = 0_u32;
+    while !writer.is_finished() {
+        let started = Instant::now();
+        let _ = db.item_count(&server_id()).expect("读条目数");
+        worst = worst.max(started.elapsed());
+        reads += 1;
+    }
+    let removed = writer.join().expect("写线程");
+    println!("分批删除期间读 {reads} 次，单次最长 {worst:?}");
+    assert_eq!(removed, 4000, "垃圾行全部删掉");
+    assert!(reads > 0, "读线程至少跑过一次");
+    assert!(
+        worst < Duration::from_millis(500),
+        "清理期间单次读最长等了 {worst:?}（分批删除应当让读最多等一批）"
+    );
+    assert_eq!(db.item_count(&server_id()).expect("读条目数"), 0);
+}
+
+/// 「最近添加」：跨库按加入时间倒序，只含电影 / 剧集。
+#[test]
+fn browse_recent_spans_libraries_and_filters_kinds() {
+    let db = Database::open_in_memory().expect("内存库");
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let mut older = movie("older", Duration::ZERO, false);
+    older.parent_id = Some(ItemId::new("lib-a"));
+    let mut newer = movie("newer", Duration::ZERO, false);
+    newer.parent_id = Some(ItemId::new("lib-b"));
+    let mut season = item("season", MediaKind::Season, Some("series"), Some(1));
+    season.parent_id = Some(ItemId::new("series"));
+    db.upsert_items(&server_id(), &[older], 10).expect("写旧片");
+    db.upsert_items(&server_id(), &[newer], 20).expect("写新片");
+    db.upsert_items(&server_id(), &[season], 30).expect("写季");
+
+    let kinds = [MediaKind::Movie, MediaKind::Series];
+    let recent = db
+        .browse_recent(&server_id(), &kinds, 10)
+        .expect("最近添加");
+    let ids: Vec<&str> = recent.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["newer", "older"], "按 updated_at 倒序，且不含季");
+
+    let limited = db.browse_recent(&server_id(), &kinds, 1).expect("取一条");
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id.as_str(), "newer");
+}

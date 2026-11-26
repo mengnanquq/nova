@@ -195,6 +195,17 @@ WHERE server_id = ?1
 ORDER BY updated_at DESC, sort_title, id
 ";
 
+/// 跨库的顶层条目，按**加入时间倒序**（首页「最近添加」）。
+///
+/// 不能再用 `parent_id IS NULL` 挑顶层条目：列表刷新把电影 / 剧集的父项写成
+/// 所属媒体库（库归属的权威来源），顶层条目的父项基本都不是 NULL。类型过滤在
+/// Rust 侧做（`MediaKind` 是 `nova-core` 的枚举），语句本身只负责顺序。
+pub(crate) const SQL_SELECT_BROWSE_RECENT: &str = "
+SELECT id, kind, payload FROM items
+WHERE server_id = ?1
+ORDER BY updated_at DESC, sort_title, id
+";
+
 /// "继续观看"：过滤条件在 SQL 侧完成，等价于 `MediaItem::is_in_progress(min_seconds)`。
 ///
 /// `resume_ms * 100 < runtime_ms * 95` 是 `progress_fraction() < 0.95` 的整数形式
@@ -211,6 +222,80 @@ ORDER BY updated_at DESC, sort_title
 
 /// 某个服务器的条目总数。
 pub(crate) const SQL_COUNT_ITEMS: &str = "SELECT COUNT(*) FROM items WHERE server_id = ?1";
+
+/// 某个父项下的条目 id 与类型（只读 id 列，不碰 payload）。
+///
+/// 用于刷新后清理过期条目："这个库里现在还有哪些电影 / 剧集"只需要 id 与类型，
+/// 类型过滤放在调用方做（`MediaKind` 是 `nova-core` 的枚举，SQL 里没有它）。
+pub(crate) const SQL_SELECT_CHILD_ID_KINDS: &str = "
+SELECT id, kind FROM items WHERE server_id = ?1 AND parent_id = ?2
+";
+
+/// 父项已不可用的条目（归属坏掉、层级断掉，或父项已被删）。
+///
+/// 取"没有非空父项指向本地条目"的行，判定交给调用方（电影 / 剧集要再看父项
+/// 是否是媒体库；季 / 集只要父项不是本地条目就算断了）——
+/// 见 [`Database::unreachable_item_ids`](../items/struct.Database.html)。
+///
+/// 媒体库本身不在 `items` 表里（SQLite 里没有 libraries 表），所以这里的子查询
+/// 查不到库 id，调用方必须用当前库列表把它们排除，否则会把整个库的条目当成悬空。
+/// `parent_id = ''`（空串）也算不可用：它既不是库也不是条目，任何视图都查不到。
+pub(crate) const SQL_SELECT_UNREACHABLE_ID_KINDS: &str = "
+SELECT id, kind, parent_id FROM items
+WHERE server_id = ?1
+  AND (parent_id IS NULL
+       OR parent_id NOT IN (SELECT id FROM items WHERE server_id = ?1))
+";
+
+/// 清理批次用的**连接级**临时表（其它连接看不见）。
+///
+/// - `prune_seeds`：这一批要删的条目 id（由调用方给出）；
+/// - `prune_tree`：把它们在 `items` 里的后代一起展开后的 id 集合。
+///
+/// 为什么不用"一条递归 `DELETE`"：实测那样删除 3.3 万行要十分钟以上（`IN (子查询)`
+/// 被当成相关性求值，退化成二次复杂度），而"先展开进临时表、再按 id 逐条删"是
+/// 0.4 秒。
+pub(crate) const SQL_CREATE_PRUNE_TABLES: &str = "
+CREATE TEMP TABLE IF NOT EXISTS prune_seeds (id TEXT PRIMARY KEY);
+CREATE TEMP TABLE IF NOT EXISTS prune_tree (id TEXT PRIMARY KEY);
+";
+
+/// 清空上一批种子与展开结果。
+pub(crate) const SQL_CLEAR_PRUNE_SEEDS: &str = "DELETE FROM prune_seeds";
+
+/// 清空上一批展开结果。
+pub(crate) const SQL_CLEAR_PRUNE_TREE: &str = "DELETE FROM prune_tree";
+
+/// 放入一条种子 id（重复放入无副作用）。
+pub(crate) const SQL_INSERT_PRUNE_SEED: &str = "INSERT OR IGNORE INTO prune_seeds (id) VALUES (?1)";
+
+/// 把种子及其全部后代（剧集 → 季 → 集）展开进 `prune_tree`。
+///
+/// `items.parent_id` 没有自引用外键（理由见 [`MIGRATION_V1`] 的注释），级联只能
+/// 在这里显式递归。
+///
+/// **`CROSS JOIN` 是性能要求，不是写法偏好**：用普通的 `JOIN ... ON` 时 SQLite
+/// 会把 `items` 当外层循环、只用 `(server_id)` 前缀扫索引，每行递归都把整表扫一遍
+/// ——实测 3.3 万条要 9 分钟。`CROSS JOIN` 固定连接顺序（种子表在外层），内层走
+/// `(server_id, parent_id)` 精确探针，同样的数据 50 毫秒。
+pub(crate) const SQL_EXPAND_PRUNE_TREE: &str = "
+WITH RECURSIVE subtree(id) AS (
+    SELECT id FROM items WHERE server_id = ?1 AND id IN (SELECT id FROM prune_seeds)
+    UNION
+    SELECT child.id FROM subtree CROSS JOIN items child
+        ON child.parent_id = subtree.id
+    WHERE child.server_id = ?1
+)
+INSERT OR IGNORE INTO prune_tree (id) SELECT id FROM subtree
+";
+
+/// 展开后的待删 id（逐条按主键删除才是线性的）。
+pub(crate) const SQL_SELECT_PRUNE_TREE: &str = "SELECT id FROM prune_tree";
+
+/// 按主键删一条条目；`sources` 由外键级联。
+pub(crate) const SQL_DELETE_ITEM_BY_ID: &str = "
+DELETE FROM items WHERE server_id = ?1 AND id = ?2
+";
 
 // ---------------------------------------------------------------------------
 // sources
@@ -333,6 +418,15 @@ mod tests {
             SQL_SELECT_CHILDREN,
             SQL_SELECT_IN_PROGRESS,
             SQL_COUNT_ITEMS,
+            SQL_SELECT_CHILD_ID_KINDS,
+            SQL_SELECT_UNREACHABLE_ID_KINDS,
+            SQL_CREATE_PRUNE_TABLES,
+            SQL_CLEAR_PRUNE_SEEDS,
+            SQL_CLEAR_PRUNE_TREE,
+            SQL_INSERT_PRUNE_SEED,
+            SQL_EXPAND_PRUNE_TREE,
+            SQL_SELECT_PRUNE_TREE,
+            SQL_DELETE_ITEM_BY_ID,
             SQL_UPSERT_SOURCE,
             SQL_SELECT_SOURCES,
             SQL_COUNT_SOURCES,

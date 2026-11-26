@@ -113,9 +113,16 @@ fn title_key(item: &MediaItem) -> String {
 /// 每个库行最多展示的条目数（Netflix 首页每行约 20 张卡）。
 const LIBRARY_ROW_LIMIT: usize = 20;
 
+/// 「最近添加」一次最多取多少条（跨库；够几屏横向滚动）。
+///
+/// 以前这一行取的是"`parent_id` 为 NULL 的条目"，列表刷新把库归属写进
+/// 电影 / 剧集后它就永远是空的了（只有列表里漏掉父项的季 / 集会落进去，
+/// 标题还是"第 N 集"）。现在按**类型**挑顶层条目并跨库排序。
+const HOME_RECENT_LIMIT: usize = 200;
+
 /// 顺序：
 /// 1. “继续观看”来自 [`Database::continue_watching`]（SQL 侧过滤）；
-/// 2. “最近添加”来自顶层条目（按 `sort_title`，服务端列表不返回 `ParentId` 时也成立）；
+/// 2. “最近添加”来自所有库的电影 / 剧集（按 `updated_at` 倒序，见 [`HOME_RECENT_LIMIT`]）；
 /// 3. 各媒体库前 [`LIBRARY_ROW_LIMIT`] 条（标题 = 库名；缓存里没有该库的条目时整行略过）；
 /// 4. hero 取继续观看第一条，否则最近添加第一条；
 /// 5. 离线/过期状态不再占用 hero 位：hero 始终是真实内容，状态由顶部横幅表达
@@ -130,7 +137,13 @@ pub fn home_view(
 ) -> Result<HomeView, nova_storage::StorageError> {
     let mut view = HomeView::empty(tabs);
     let in_progress = db.continue_watching(server_id, preferences.resume_min_position.as_secs())?;
-    let recent = db.children(server_id, None)?;
+    // 「最近添加」= 所有库的电影 / 剧集，按加入时间倒序（不限 `parent_id`，
+    // 理由见 `HOME_RECENT_LIMIT`）。
+    let recent = db.browse_recent(
+        server_id,
+        &[MediaKind::Movie, MediaKind::Series],
+        HOME_RECENT_LIMIT,
+    )?;
 
     view.continue_watching = in_progress.iter().map(card_view).collect();
     view.recently_added = recent.iter().map(card_view).collect();
@@ -650,6 +663,45 @@ mod tests {
             rotated.rotate_left(2);
             assert_eq!(ids(&rotated), forward, "{sort:?} 不能依赖输入顺序");
         }
+    }
+
+    /// 列表刷新把库归属写进电影 / 剧集后，「最近添加」不能再靠
+    /// `parent_id IS NULL` 挑条目——那样首页这一行会永远是空的。
+    #[test]
+    fn recently_added_spans_libraries_by_kind_not_by_missing_parent() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let mut older = movie_with("a", "旧片", "旧片", Some(1999));
+        older.parent_id = Some(ItemId::new("lib-a"));
+        let mut newer = movie_with("b", "新片", "新片", Some(2024));
+        newer.parent_id = Some(ItemId::new("lib-b"));
+        // 季 / 集是播放层级，不进「最近添加」。
+        let mut season = item("s", "第 1 季", MediaKind::Season, Duration::ZERO, None);
+        season.parent_id = Some(ItemId::new("series"));
+        db.upsert_items(&server.info.id, &[older], 10)
+            .expect("写旧片");
+        db.upsert_items(&server.info.id, &[newer], 20)
+            .expect("写新片");
+        db.upsert_items(&server.info.id, &[season], 30)
+            .expect("写季");
+
+        let home = home_view(
+            &db,
+            &server.info.id,
+            &UserPreferences::default(),
+            &Status::NoServer,
+            vec![LibraryTab::new("lib-a", "A 库")],
+            None,
+        )
+        .expect("构建首页");
+
+        let ids: Vec<&str> = home
+            .recently_added
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(ids, ["b", "a"], "跨库按加入时间倒序，且不含季");
     }
 
     #[test]

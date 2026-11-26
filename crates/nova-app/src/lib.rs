@@ -21,8 +21,9 @@
 //! 1. `Local::open` 打开（必要时创建）数据目录、`nova.db`、`<data>/images`，
 //!    读一次偏好并尽力从凭证存储里恢复会话；
 //! 2. **先渲染本地缓存**：`views` 只读 SQLite，立刻得到首页/媒体库/详情；
-//! 3. 后台刷新（tokio）：`provider.libraries()` → 每库 `provider.items()` 前
-//!    [`refresh::ITEMS_PER_LIBRARY`] 条 → `db.upsert_items` → 重建视图 → 推给界面；
+//! 3. 后台刷新（tokio）：`provider.libraries()` → 每库按 [`refresh::ITEMS_PER_PAGE`]
+//!    分页拉全（翻到服务端 `total` 为止）→ `db.upsert_items` → 清理服务端已删除的
+//!    条目 → 重建视图 → 推给界面；
 //! 4. 图片另走 `ImageCache::get_or_fetch`（同时最多 4 张），解码完成后按
 //!    `ImageKey` 推入界面，失败的图不重试。
 //!

@@ -57,3 +57,5 @@ tracing-subscriber = { workspace = true }
 nova-core = { path = "../nova-core" }
 nova-storage = { path = "../nova-storage" }
 tempfile = { workspace = true }
+# 刷新分页 / 清理的回归测试：跑在 wiremock 上，断言客户端实际发出的分页请求。
+wiremock = { workspace = true }
