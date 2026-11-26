@@ -614,7 +614,16 @@ impl Shell {
                     "route": format!("{route:?}"),
                     "status": format!("{:?}", state.status),
                     // 当前页焦点索引（键盘导航后在真机上验证焦点落点）。
+                    // `focus` 是 Rust 侧的镜像；`focus_ui` 是 `.slint` 属性（悬停会直接
+                    // 改它——R2-3 的"方向键从悬停卡继续"靠 UI 侧为准）。
                     "focus": shell.app.focus_index(),
+                    "focus_ui": [
+                        ui.get_home_focus(),
+                        ui.get_library_focus(),
+                        ui.get_detail_focus(),
+                        ui.get_search_focus(),
+                    ],
+                    "nav_active": ui.get_nav_active(),
                     // 网格滚动 / 焦点卡几何（`ui/library.slint`、`ui/search.slint` 的
                     // `probe-*`）：验证"方向键移动焦点后网格自动滚动、焦点卡完全
                     // 可见、有放大指示"。
@@ -638,6 +647,16 @@ impl Shell {
                     "home_geometry": {
                         "scroll_y": ui.get_home_scroll_y(),
                         "row0_zoom_on": ui.get_row0_zoom_on(),
+                        // 键盘焦点行 / 焦点卡（体检 R2-2：首页纵向 + 行内横向跟随）。
+                        // 焦点卡必须完整落在 `[-scroll_y, -scroll_y + viewport_h]` 与
+                        // `[-row_scroll_x, -row_scroll_x + row_viewport_w]` 之内。
+                        "viewport_h": ui.get_home_viewport_h(),
+                        "focus_top": ui.get_home_focus_top(),
+                        "focus_bottom": ui.get_home_focus_bottom(),
+                        "row_scroll_x": ui.get_home_row_scroll_x(),
+                        "row_viewport_w": ui.get_home_row_viewport_w(),
+                        "focus_left": ui.get_home_focus_left(),
+                        "focus_right": ui.get_home_focus_right(),
                     },
                     "home": {
                         "hero": state.home.hero.as_ref().map(|card| card.title.clone()),
@@ -1053,13 +1072,22 @@ impl Shell {
         );
     }
 
-    /// 后台刷新一次，然后重建首页与第一个媒体库页。
+    /// 后台刷新一次，然后重建首页与（如果停在媒体库页）当前库的视图。
+    ///
+    /// 库视图按**发起刷新时**打开的库与排序在后台建好（用于图片预取）；真正
+    /// 替换页面时 `apply_refresh` 会按**落地时**的库与排序再建一次，因为两者之间
+    /// 用户可能切了库或换了排序。
     fn spawn_refresh(self: &Rc<Self>) {
         let local = Arc::clone(&self.local);
         let channel = Arc::clone(&self.channel);
         let images = Arc::clone(&self.images);
         let runtime = self.runtime.clone();
         let status = self.state.borrow().status.clone();
+        let target = {
+            let state = self.state.borrow();
+            refresh_library_target(&self.app.current_route(), state.library.as_ref())
+        };
+        let sort = *self.library_sort.borrow();
         self.runtime.spawn(async move {
             let report = refresh::refresh(Arc::clone(&local), status).await;
             tracing::info!(
@@ -1071,12 +1099,10 @@ impl Shell {
             let build = tokio::task::spawn_blocking(
                 move || -> Result<(HomeView, Option<LibraryView>), AppError> {
                     let home = build_local.home(None)?;
-                    let library = match build_local.tabs().first() {
-                        Some(tab) => Some(build_local.library(
-                            &tab.id,
-                            None,
-                            views::LibrarySort::default(),
-                        )?),
+                    // 不再用 `tabs().first()`：标签列表第一项是哨兵「首页」，
+                    // 按它建出来的是顶层全量列表（`library_view` 的退化分支）。
+                    let library = match target {
+                        Some(id) => Some(build_local.library(&id, None, sort)?),
                         None => None,
                     };
                     Ok((home, library))
@@ -1397,21 +1423,51 @@ impl Shell {
         self.app.set_home(&home);
         // 刷新后的连接状态同步到顶部横幅（过期 / 断开时出现，恢复后消失）。
         self.app.set_banner(status.banner_data());
-        if matches!(self.app.current_route(), Some(Route::Library { .. })) {
-            if let Some(library) = &library {
-                self.app.set_library(library);
-            }
-        }
-        let keys = image_keys(&home, library.as_ref(), None);
+        // 库页：按**落地时**打开的库与排序重建（后台刷新期间用户可能切库 / 换排序）。
+        // 以前这里直接 `set_library(payload.library)`，而 payload 是“第一个标签 + 默认排序”
+        // 建的，于是刷新一完成就把用户所在的库换成「首页」的顶层全量列表、排序条也回到
+        // 默认值（R2-8）。
+        let rebuilt = self.rebuild_library_after_refresh();
+        // 图片预取：首页卡片 + 库页卡片（优先用刚重建的那份）。
+        let keys = image_keys(&home, rebuilt.as_ref().or(library.as_ref()), None);
         {
             let mut state = self.state.borrow_mut();
             state.status = status;
             state.home = home;
-            if library.is_some() {
-                state.library = library;
+            // 只在真的重建过库视图时更新缓存：不在库页时刷新不应当动它。
+            if let Some(view) = rebuilt {
+                state.library = Some(view);
             }
         }
         self.request_images(keys);
+    }
+
+    /// 刷新落地时重建当前媒体库视图（按当前排序）并写进界面。
+    ///
+    /// 不在媒体库页面、或还没打开过任何库时不动，返回 `None`。
+    fn rebuild_library_after_refresh(&self) -> Option<LibraryView> {
+        let id = {
+            let state = self.state.borrow();
+            refresh_library_target(&self.app.current_route(), state.library.as_ref())?
+        };
+        let sort = *self.library_sort.borrow();
+        match self.local.library(&id, None, sort) {
+            Ok(view) => {
+                tracing::info!(
+                    library = view.id,
+                    sort = view.sort_label,
+                    cards = view.cards.len(),
+                    "刷新后重建媒体库视图"
+                );
+                // `set_library` 会按条目 id 保留焦点（见 `nova_ui::rebase_focus`）。
+                self.app.set_library(&view);
+                Some(view)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "刷新后重建媒体库视图失败");
+                None
+            }
+        }
     }
 
     fn apply_detail(&self, detail: DetailView) {
@@ -2049,6 +2105,21 @@ pub(crate) fn debounce_still_current(counter: &AtomicU64, generation: u64) -> bo
     counter.load(Ordering::Relaxed) == generation
 }
 
+/// 后台刷新落地时该重建哪个媒体库视图（`None` = 不动库视图）。
+///
+/// 只有**停在媒体库页**且有当前库时才重建，并且用的是**当前打开的库**：以前
+/// 无论在哪都用 `tabs().first()`（哨兵「首页」标签）+ 默认排序重建，刷新一完成
+/// 就把用户所在的库页整包换成顶层全量列表、排序条也回到默认值。
+pub(crate) fn refresh_library_target(
+    route: &Option<Route>,
+    current: Option<&LibraryView>,
+) -> Option<String> {
+    if !matches!(route, Some(Route::Library { .. })) {
+        return None;
+    }
+    current.map(|view| view.id.clone())
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -2057,8 +2128,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{accept_search_result, debounce_still_current};
+    use super::{accept_search_result, debounce_still_current, refresh_library_target};
     use std::sync::atomic::AtomicU64;
+
+    use nova_core::{
+        AuthState, ItemId, Language, MediaItem, MediaKind, ServerId, ServerInfo, ServerKind,
+        UserData,
+    };
+    use nova_provider::Library;
+
+    use super::{LibraryView, Route};
+    use crate::views;
 
     #[test]
     fn stale_generation_is_rejected() {
@@ -2096,5 +2176,145 @@ mod tests {
         let counter = AtomicU64::new(3);
         assert!(debounce_still_current(&counter, 3));
         assert!(!debounce_still_current(&counter, 2));
+    }
+
+    // ---- 后台刷新：不能把用户所在的库页换成别的库 / 默认排序（R2-8）----
+
+    #[test]
+    fn refresh_target_is_the_open_library_only_on_the_library_page() {
+        let view = LibraryView::new("lib-anime", "动画电影");
+        let library = Route::Library {
+            id: "lib-anime".to_owned(),
+            title: "动画电影".to_owned(),
+        };
+        assert_eq!(
+            refresh_library_target(&Some(library.clone()), Some(&view)),
+            Some("lib-anime".to_owned()),
+            "停在库页：重建当前打开的库（而不是标签列表第一项）"
+        );
+        // 不在库页：刷新不应当动库视图（否则会把首页/详情页的额外交互搞乱）。
+        let no_view = LibraryView::new("lib-anime", "动画电影");
+        assert_eq!(
+            refresh_library_target(&Some(Route::Home), Some(&no_view)),
+            None
+        );
+        assert_eq!(
+            refresh_library_target(
+                &Some(Route::Detail {
+                    item_id: "m1".to_owned()
+                }),
+                Some(&no_view)
+            ),
+            None
+        );
+        // 库页但还没有库视图（刚启动）：不动。
+        assert_eq!(refresh_library_target(&Some(library), None), None);
+    }
+
+    fn server_info() -> ServerInfo {
+        ServerInfo {
+            id: ServerId::new("srv-a"),
+            kind: ServerKind::Emby,
+            name: "测试".to_owned(),
+            base_url: "http://127.0.0.1:1".to_owned(),
+            version: None,
+            user_id: None,
+            auth: AuthState::Unauthorized,
+            metadata_language: Language::undetermined(),
+        }
+    }
+
+    fn library(id: &str, name: &str) -> Library {
+        Library {
+            id: ItemId::new(id),
+            name: name.to_owned(),
+            kind: MediaKind::Movie,
+            collection_type: Some("movies".to_owned()),
+            item_count: None,
+        }
+    }
+
+    fn item(id: &str, title: &str, parent: &str) -> MediaItem {
+        MediaItem {
+            id: ItemId::new(id),
+            kind: MediaKind::Movie,
+            title: title.to_owned(),
+            sort_title: title.to_owned(),
+            original_title: None,
+            year: None,
+            overview: None,
+            genres: Vec::new(),
+            runtime: None,
+            parent_id: Some(ItemId::new(parent)),
+            index_number: None,
+            index_number_end: None,
+            child_count: None,
+            images: nova_core::ImageSet::default(),
+            user_data: UserData::default(),
+        }
+    }
+
+    /// 终态回放：刷新落地后用「当前库 + 当前排序」重建，库与排序都不能变。
+    ///
+    /// 修复前 `spawn_refresh` 用的是 `tabs().first()`（哨兵「首页」）+ 默认排序，
+    /// 这个用例里的目标就会变成 `@home`、排序回到「最近添加」、卡片变成顶层全量。
+    #[test]
+    fn refresh_rebuilds_the_open_library_with_the_users_sort() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        // 先把服务器与条目写进库，再 `Local::open`：`Local` 在打开时只读一次服务器。
+        // （与 `refresh::tests` 里“先建库写数据、再开 Local”的做法一致。）
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&server_info(), 1).expect("写服务器");
+            db.upsert_items(
+                &ServerId::new("srv-a"),
+                &[
+                    item("a2", "B 片", "lib-anime"),
+                    item("a1", "A 片", "lib-anime"),
+                    item("m1", "电影一", "lib-movie"),
+                ],
+                1,
+            )
+            .expect("写条目");
+        }
+        let local = crate::local::Local::open(&env, None).expect("打开状态目录");
+        local.set_libraries(vec![
+            library("lib-anime", "动画电影"),
+            library("lib-movie", "电影"),
+        ]);
+
+        // 用户停在「动画电影」页，并且已经把排序切到「标题 A→Z」。
+        let sort = views::LibrarySort::TitleAsc;
+        let current = local.library("lib-anime", None, sort).expect("构建当前库");
+        assert_eq!(current.title, "动画电影");
+        assert_eq!(current.sort_label, sort.label());
+
+        let route = Some(Route::Library {
+            id: "lib-anime".to_owned(),
+            title: "动画电影".to_owned(),
+        });
+        let target = refresh_library_target(&route, Some(&current)).expect("应当重建当前库");
+        let rebuilt = local.library(&target, None, sort).expect("重建库视图");
+        assert_eq!(rebuilt.id, "lib-anime", "不能换成别的标签的视图");
+        assert_eq!(rebuilt.title, "动画电影");
+        assert_eq!(
+            rebuilt.sort_label, "排序：标题 A→Z",
+            "用户的排序选择必须保留"
+        );
+
+        // 反面证据：修复前的目标（标签列表第一项 = 哨兵「首页」+ 默认排序）
+        // 会拿到另一个库题的视图与默认排序。
+        let old_target = local.tabs()[0].id.clone();
+        assert_ne!(old_target, target, "修复前的目标就是标签列表第一项");
+        let old_way = local
+            .library(&old_target, None, views::LibrarySort::default())
+            .expect("修复前的重建");
+        assert_ne!(old_way.id, "lib-anime");
+        assert_ne!(old_way.title, "动画电影", "修复前页面标题会变成「首页」");
+        assert_eq!(old_way.sort_label, views::LibrarySort::default().label());
     }
 }

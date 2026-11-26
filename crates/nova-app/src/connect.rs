@@ -231,6 +231,44 @@ mod tests {
         );
     }
 
+    /// 空地址在**本地校验**就被拦下：不会构造 provider、不会发任何请求、不会落盘。
+    ///
+    /// 体检 R2-6 声称“空地址时点「连接」发起了真实请求并得到「用户名或密码不对」”。
+    /// 界面层（`add_server.slint` 的禁用态）与 `AddServerView::can_submit()` 已经拦了
+    /// 两道，这里是 `connect()` 自己的兜底：`validate_address` 是第一件事。
+    #[tokio::test]
+    async fn empty_address_is_rejected_before_any_request() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开状态目录"));
+
+        let error = connect(
+            Arc::clone(&local),
+            "   ",
+            "user",
+            SecretString::new("secret".to_owned()),
+        )
+        .await
+        .expect_err("空地址必须失败");
+
+        // 文案：“请输入服务器地址”在补充说明里，主文案是四类连接失败之一。
+        assert_eq!(error.kind, AddServerErrorKind::Connect);
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("请输入服务器地址"),
+            "空地址要给出“需要服务器地址”的说明，而不是网络错误"
+        );
+        // 没有留下任何部分状态：没有服务器记录，密码也不在任何地方出现。
+        assert!(
+            local.db.servers().expect("读服务器").is_empty(),
+            "失败的连接不能写服务器记录"
+        );
+        assert!(!error.detail.unwrap_or_default().contains("secret"));
+    }
+
     #[test]
     fn errors_never_carry_password() {
         // 错误串的来源是 ProviderError（内部已脱敏）与静态文案；这里验证

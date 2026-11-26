@@ -17,7 +17,7 @@ use slint::{ComponentHandle, Model};
 use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
 use crate::viewmodel::{
     AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
-    Navigator, PlayerView, Route, SearchView, TargetInfo, move_focus,
+    Navigator, PlayerView, Route, SearchView, TargetInfo, move_focus, rebase_focus,
 };
 use crate::{AppWindow, Target, TargetBus};
 
@@ -484,9 +484,16 @@ impl App {
         }
         let dialog_open = self.ui.get_add_server_open();
         let prefix = target_prefix(self.page());
+        // 条件子树里的目标只在条件为真时才存在于界面上，但登记总线只增不减
+        // （双缓冲为了避开"清单是空的"空窗期，会把上一代的结果继续合并进来）。
+        // 所以这里按视图模型的实际状态过滤一遍：否则"播放失败"过去的
+        // `player.retry` 会在错误卡消失后继续被列出来，变成"看得见、点了没反应"
+        // 的死按钮（体检 R2-7）。
+        let retry_available = self.ui.get_player().has_error;
         let mut out: Vec<TargetInfo> = merged
             .into_values()
             .filter(|target| target.is_clickable())
+            .filter(|target| target.id != "player.retry" || retry_available)
             .filter(|target| target.center_in_window(window_w, window_h))
             .filter(|target| {
                 if dialog_open {
@@ -836,19 +843,21 @@ impl App {
     }
 
     /// 设置媒体库视图并刷新界面。
+    ///
+    /// 替换视图时把焦点**按条目 id** 重新定位（[`rebase_focus`]）：后台刷新会补齐
+    /// 条目、重排顺序，沿用旧下标会让焦点落到另一条内容上。
     pub fn set_library(&self, view: &LibraryView) {
         {
             let images = self.images.borrow();
             library::apply(&self.ui, view, &images);
         }
         let mut state = self.state.borrow_mut();
+        let focus = rebase_focus(&state.library, state.focus.library, view);
         state.library = view.clone();
         // 顶栏高亮跟随媒体库当前选中的标签，供后续搜索页沿用。
         state.nav_current_tab = view.current_tab;
-        if state.focus.library >= view.cards.len() {
-            state.focus.library = 0;
-        }
-        let focus = state.focus.library;
+        // `rebase_focus` 已经保证下标落在新卡片范围内（新列表为空时是 0）。
+        state.focus.library = focus;
         drop(state);
         self.ui.set_library_focus(focus as i32);
     }
@@ -970,13 +979,13 @@ impl App {
 
     /// 直接切到某个页面（不改变导航栈；演示与测试用）。
     pub fn show_page(&self, page: Page) {
-        self.ui.set_page(page.index());
+        set_page(&self.ui, page);
     }
 
     /// 回到首页并把导航栈重置为根。
     pub fn show_home(&self) {
         self.state.borrow_mut().nav.reset(Route::Home);
-        self.ui.set_page(Page::Home.index());
+        set_page(&self.ui, Page::Home);
     }
 
     /// 打开媒体库：刷新数据、压栈、切页。已经停在媒体库时不重复压栈。
@@ -990,7 +999,7 @@ impl App {
             });
         }
         drop(state);
-        self.ui.set_page(Page::Library.index());
+        set_page(&self.ui, Page::Library);
         true
     }
 
@@ -1012,7 +1021,7 @@ impl App {
             }),
         }
         drop(state);
-        self.ui.set_page(Page::Search.index());
+        set_page(&self.ui, Page::Search);
         true
     }
 
@@ -1802,6 +1811,25 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
     }
 }
 
+/// 当前页的焦点索引，**以 UI 属性为准**。
+///
+/// 悬停会直接改 `.slint` 里的 `focus-index`（网格 `PosterGrid`、首页行
+/// `CardRow.focus-hover`），而 Rust 的 `state.focus` 只在键盘移动时写。如果方向键
+/// 从 `state.focus` 继续，悬停第 5 张卡之后按 Right 会从"上一次键盘位置 +1"开始
+/// （体检 R2-3）。读 UI 并顺手回写 `state.focus`，两边在下一次按键时重新对齐。
+fn current_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> usize {
+    let index = match page {
+        Page::Home => ui.get_home_focus(),
+        Page::Library => ui.get_library_focus(),
+        Page::Detail => ui.get_detail_focus(),
+        Page::Search => ui.get_search_focus(),
+        Page::Player => 0,
+    }
+    .max(0) as usize;
+    state.borrow_mut().focus.set(page, index);
+    index
+}
+
 fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32, dy: i32) -> bool {
     if page == Page::Player {
         return false;
@@ -1810,26 +1838,30 @@ fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32
     if rows.is_empty() {
         return false;
     }
-    let current = state.borrow().focus.get(page);
+    let current = current_focus(ui, state, page);
     let next = move_focus(&rows, current, dx, dy);
     if next != current {
         set_focus(ui, state, page, next);
     }
-    // 网格类页面（媒体库 / 搜索）：焦点可能被移出可视区，滚动让焦点卡完全可见。
+    // 焦点可能被移出可视区，滚动让焦点卡完全可见。
     // 焦点数学在 Rust，滚动几何在 `.slint`（`scroll-to-index`），两份不重算。
+    // 首页有两条视觉行（继续观看 / 最近添加），纵向滚动 + 行内横向滚动都在
+    // `HomePage.scroll-to-index` 里完成（R2-2：以前 Home 分支是空的）。
     match page {
+        Page::Home => ui.invoke_scroll_home_to_index(next as i32),
         Page::Library => ui.invoke_scroll_library_to_index(next as i32),
         Page::Search => ui.invoke_scroll_search_to_index(next as i32),
-        Page::Home | Page::Detail | Page::Player => {}
+        Page::Detail | Page::Player => {}
     }
     true
 }
 
 fn activate(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     let page = Page::from_index(ui.get_page());
+    // 与方向键同一口径：悬停过的卡就是 Enter 要打开的那张（R2-3）。
+    let index = current_focus(ui, state, page);
     let item_id = {
         let state = state.borrow();
-        let index = state.focus.get(page);
         match page {
             Page::Home => state.home.card_at(index).map(|card| card.item_id.clone()),
             Page::Library => state
@@ -1859,7 +1891,7 @@ fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> boo
         state.callbacks.open_detail.clone()
     };
     set_focus(ui, state, Page::Detail, 0);
-    ui.set_page(Page::Detail.index());
+    set_page(ui, Page::Detail);
     if let Some(handler) = handler {
         handler(item_id);
     }
@@ -1893,7 +1925,7 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
         }
         state.callbacks.play.clone()
     };
-    ui.set_page(Page::Player.index());
+    set_page(ui, Page::Player);
     if let Some(handler) = handler {
         handler(item_id);
     }
@@ -1909,11 +1941,31 @@ fn go_back(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
         };
         (page_of_route(Some(&route)), state.callbacks.back.clone())
     };
-    ui.set_page(page.index());
+    set_page(ui, page);
     if let Some(handler) = handler {
         handler();
     }
     true
+}
+
+/// 切页并把键盘焦点还给全局 `keyboard` FocusScope。
+///
+/// 为什么不放在 `.slint` 的 `changed page =>` 里：Slint 的 `changed` 处理器是
+/// **延迟**执行的（属性变脏后，等当前事件 / 属性批处理跑完才调用）。`open_search`
+/// 之后上层紧接着 `invoke_focus_search_input()` 把焦点交给搜索页大输入框，延迟的
+/// `changed page` 会把焦点又抢回 `keyboard`——实测顶栏搜索交接后后续字符全部丢失
+/// （`search_handoff.rs`）。所以在 Rust 的统一切页入口同步还焦：换页时先还给全局
+/// 键盘，需要输入框的路径（搜索交接 / Ctrl+F）随后聚焦输入框，后者是最后一步。
+///
+/// **只有页面真的变了才还焦**：`open_search` / `open_library` 在每次输入、每次
+/// 异步结果到达时都会被调用（页面没变）；无条件还焦会把正在打字的搜索框里的
+/// 焦点抢走（实测：调试通道 `search page:true` 之后输入字符全部丢失）。
+fn set_page(ui: &AppWindow, page: Page) {
+    let changed = Page::from_index(ui.get_page()) != page;
+    ui.set_page(page.index());
+    if changed {
+        ui.invoke_focus_global();
+    }
 }
 
 fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
@@ -2266,6 +2318,27 @@ fn player_retry(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     }
 }
 
+/// `Esc` / `Backspace`：菜单展开时先收菜单，否则提交进度并退出。
+///
+/// 两段语义都走同一个意图（`.slint` 只负责把键映射成编号），判断留在 Rust：
+/// 与详情页版本下拉的 `N4` 修复同一个口径——第一下只收下拉/菜单，再按一下才返回。
+fn player_exit_or_close_menus(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    let menus_were_open = {
+        let mut state = state.borrow_mut();
+        let open = state.player.menus_open();
+        if open {
+            state.player.close_menus();
+        }
+        open
+    };
+    if menus_were_open {
+        // 菜单收起算一次输入（控制层保持可见，别刚点完 Esc 就淡出）。
+        player_refresh(ui, state);
+        return true;
+    }
+    player_exit(ui, state)
+}
+
 /// `Esc`：先提交一次进度，再返回上一页（顺序是硬要求）。
 fn player_exit(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     let on_player = matches!(state.borrow().nav.current(), Some(Route::Player { .. }));
@@ -2276,6 +2349,17 @@ fn player_exit(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     let handler = state.borrow().callbacks.player_exit.clone();
     if let Some(handler) = handler {
         handler(position);
+    }
+    // 菜单是播放页的局部状态：退出时必须复位，否则下次进来（或调试通道读
+    // `view.player`）还会看到 `audio_menu=true`（体检 R2-4）。
+    let menus_were_open = {
+        let mut state = state.borrow_mut();
+        let open = state.player.menus_open();
+        state.player.close_menus();
+        open
+    };
+    if menus_were_open {
+        player_refresh(ui, state);
     }
     player::clear_scrub(ui);
     go_back(ui, state)
@@ -2294,7 +2378,7 @@ fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey)
         PlayerKey::AudioMenu => player_toggle_menu(ui, state, true),
         PlayerKey::SubtitleMenu => player_toggle_menu(ui, state, false),
         PlayerKey::Fullscreen => player_toggle_fullscreen(ui, state),
-        PlayerKey::Exit => return player_exit(ui, state),
+        PlayerKey::Exit => return player_exit_or_close_menus(ui, state),
     }
     true
 }

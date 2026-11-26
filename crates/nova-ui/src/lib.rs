@@ -29,5 +29,5 @@ pub use viewmodel::{
     LibraryView, Navigator, PlayerShellView, PlayerView, Route, SearchState, SearchView,
     SourceOption, TARGET_KINDS, TargetInfo, TimeMode, TrackItem, VOLUME_HINT_DURATION, VOLUME_STEP,
     badge, clock_text, detail_meta_line, episode_code, format_duration, meta_line, move_focus,
-    progress_percent, validate_address,
+    progress_percent, rebase_focus, validate_address,
 };

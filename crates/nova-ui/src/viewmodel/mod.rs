@@ -32,7 +32,7 @@ pub use format::{
 };
 pub use home::{HomeView, LibraryRowView};
 pub use image::{ImageKey, ImageKind};
-pub use library::{LibraryTab, LibraryView};
+pub use library::{LibraryTab, LibraryView, rebase_focus};
 pub use nav::{Navigator, Route};
 pub use player::{
     AUTO_HIDE_DELAY, PlayerView, TimeMode, TrackItem, VOLUME_HINT_DURATION, VOLUME_STEP, clock_text,

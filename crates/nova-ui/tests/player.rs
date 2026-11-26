@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{detail_view, init_backend, player_view};
+use common::{detail_view, init_backend, player_controls_hidden, player_view};
 use nova_ui::{App, AppWindow, Page, PlayerKey};
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Model};
@@ -226,6 +226,106 @@ fn space_toggles_playback_and_volume_keys_step_by_five_percent() {
     press_text(&app, "m");
     assert!(app.ui().get_player().muted, "M 静音");
     assert_eq!(app.ui().get_player().volume_text.as_str(), "静音");
+}
+
+/// 菜单展开时 `Esc` / `Backspace` **先收菜单**，再按一次才退出播放；
+/// 退出播放（含点「返回」直接退）时菜单状态必须复位。
+///
+/// 体检 R2-4：此前 `page == 3` 分支对 Esc 无条件发 `player-key(12)`，菜单展开时
+/// 一下就把用户踢出播放页；回到详情页后 `view.player.audio_menu` 还留着 true。
+#[test]
+fn escape_closes_open_menu_before_leaving_player() {
+    let app = player_app();
+
+    press_text(&app, "s");
+    assert!(app.ui().get_player().subtitle_menu_open, "S 展开字幕菜单");
+    press(&app, Key::Escape);
+    assert_eq!(
+        app.page(),
+        Page::Player,
+        "第一下 Esc 只收菜单，不离开播放页"
+    );
+    assert!(!app.ui().get_player().subtitle_menu_open, "字幕菜单已收起");
+
+    // Backspace 与 Esc 同一语义。
+    press_text(&app, "a");
+    assert!(app.ui().get_player().audio_menu_open);
+    press(&app, Key::Backspace);
+    assert_eq!(app.page(), Page::Player, "Backspace 同样只收菜单");
+    assert!(!app.ui().get_player().audio_menu_open);
+
+    // 菜单已收起，再按 Esc 才退出。
+    press(&app, Key::Escape);
+    assert_eq!(app.page(), Page::Detail, "菜单收起后 Esc 才退出播放");
+    assert!(
+        !app.player_view().menus_open(),
+        "退出后菜单状态必须复位（不能残留 audio_menu/subtitle_menu）"
+    );
+
+    // 菜单展开时点「返回」直接退出（不经过 Esc）：退出后同样要复位。
+    app.play("dune");
+    assert_eq!(app.page(), Page::Player);
+    press_text(&app, "a");
+    assert!(app.ui().get_player().audio_menu_open);
+    app.ui().invoke_player_back();
+    assert_eq!(app.page(), Page::Detail);
+    assert!(
+        !app.player_view().menus_open(),
+        "点「返回」退出后菜单状态也要复位"
+    );
+}
+
+/// 控制层隐藏时 `↑` / `↓` 只「唤醒」，不改音量；控制层可见时才调音量。
+///
+/// 体检 R2-5：`page == 3` 分支对所有键先 `player-input()`（唤醒），Down 又落到
+/// `player-key(7)`（音量 −5%），于是每次唤醒都无声地降音量（实测 0.95 → 0.35）。
+/// 依据：`docs/debugging.md` 一直把 `key Down` 当作「唤醒」键用，唤醒不该附带
+/// 音量副作用；`←` / `→` 的快进快退、`Space` 的暂停在隐藏时仍直接生效。
+#[test]
+fn volume_keys_do_not_fire_on_the_wake_up_press() {
+    let app = player_app();
+    let volumes = Rc::new(RefCell::new(Vec::new()));
+    {
+        let volumes = volumes.clone();
+        app.on_player_volume(move |volume| volumes.borrow_mut().push(volume));
+    }
+
+    // 隐藏态 ↓：只唤醒，音量不变。
+    app.set_player(&player_controls_hidden());
+    assert!((app.player_view().volume - 0.6).abs() < 1e-6);
+    press(&app, Key::DownArrow);
+    assert!(
+        app.ui().get_player().controls_visible,
+        "↓ 在隐藏态应唤醒控制层"
+    );
+    assert!(
+        (app.player_view().volume - 0.6).abs() < 1e-6,
+        "唤醒那一下不该改音量，实际 {}",
+        app.player_view().volume
+    );
+    assert!(volumes.borrow().is_empty(), "不应对引擎发音量变更");
+
+    // 隐藏态 ↑：同样只唤醒。
+    app.set_player(&player_controls_hidden());
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_player().controls_visible);
+    assert!((app.player_view().volume - 0.6).abs() < 1e-6);
+    assert!(volumes.borrow().is_empty());
+
+    // 控制层可见后 ↓ / ↑ 才调音量。
+    press(&app, Key::DownArrow);
+    press(&app, Key::UpArrow);
+    let sent = volumes.borrow().clone();
+    assert_eq!(sent.len(), 2, "可见态 ↑/↓ 各发一次音量：{sent:?}");
+    assert!((sent[0] - 0.55).abs() < 1e-6, "可见态 ↓ = -5%");
+    assert!((sent[1] - 0.60).abs() < 1e-6, "可见态 ↑ = +5%");
+
+    // 隐藏态的快进仍然直接生效（不要顺手把 ←/→ 也变成「只唤醒」）。
+    let seeks = record_seeks(&app);
+    app.set_player(&player_controls_hidden());
+    press(&app, Key::RightArrow);
+    assert_eq!(seeks.borrow().len(), 1, "隐藏态 → 仍然直接快进 15s");
+    assert!(app.ui().get_player().controls_visible);
 }
 
 #[test]

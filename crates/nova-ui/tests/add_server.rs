@@ -225,6 +225,89 @@ fn empty_address_cannot_submit_and_connecting_disables_resubmit() {
     app.close_add_server();
 }
 
+/// Enter 是绕过「连接」按钮的第二条提交路径（`.slint` 里 `accepted => root.submit()`）。
+///
+/// 体检 R2-6 怀疑“空地址点「连接」会发起真实请求”：实际两道门都在——空地址时按钮
+/// 是禁用态（不进目标清单），Enter 也会被 `can_submit()` 拦住（本用例锁住第二条）。
+#[test]
+fn enter_does_not_submit_an_empty_or_invalid_address() {
+    let app = setup();
+    let submits = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let submits = submits.clone();
+        app.on_add_server_submit(move |address, _user, _password| {
+            submits.borrow_mut().push(address.to_string());
+        });
+    }
+
+    // 空地址 + Enter：焦点在地址输入框里，Enter 走 `accepted` → 门控拦下。
+    app.open_add_server("", "");
+    press(&app, Key::Return);
+    assert!(submits.borrow().is_empty(), "空地址按 Enter 不能提交");
+
+    // 地址不合规（缺协议）+ Enter：同样不能提交。
+    app.open_add_server("192.168.1.5:8096", "me");
+    press(&app, Key::Return);
+    assert!(submits.borrow().is_empty(), "非法地址按 Enter 不能提交");
+
+    // 合法地址 + Enter：正常提交。
+    app.open_add_server("http://127.0.0.1:8096", "me");
+    press(&app, Key::Return);
+    assert_eq!(
+        submits.borrow().as_slice(),
+        ["http://127.0.0.1:8096"],
+        "合法地址应当能用 Enter 提交"
+    );
+    app.close_add_server();
+}
+
+#[test]
+fn every_error_kind_lands_in_the_error_area() {
+    let app = setup();
+    app.open_add_server("https://media.example.com", "me");
+
+    // 四类错误→主文案 / 补充说明，两行都进错误区（`error-text` / `error-detail`）。
+    for (kind, expected) in [
+        (AddServerErrorKind::Auth, "用户名或密码不对"),
+        (
+            AddServerErrorKind::Connect,
+            "连不上服务器：检查地址、端口和网络",
+        ),
+        (
+            AddServerErrorKind::Tls,
+            "证书校验失败：自签名证书需要导入系统信任，不能跳过校验",
+        ),
+        (
+            AddServerErrorKind::UnknownServer,
+            "这个地址看起来不像 Emby 或 Jellyfin",
+        ),
+    ] {
+        app.set_add_server_error(AddServerError::with_detail(kind, "补充说明"));
+        assert_eq!(
+            app.ui().get_add_server_error(),
+            expected,
+            "{kind:?} 的主文案"
+        );
+        assert_eq!(
+            app.ui().get_add_server_error_detail(),
+            "补充说明",
+            "{kind:?} 的补充说明也应可见"
+        );
+    }
+
+    // 地址不合法不是“连接失败”：走地址框下的内联红字，且同时让「连接」不可提交。
+    app.open_add_server("192.168.1.5:8096", "me");
+    assert_eq!(
+        app.ui().get_add_server_hint(),
+        "需要 http:// 或 https:// 开头"
+    );
+    settle(&app);
+    assert!(
+        app.target("dialog.connect").is_none(),
+        "非法地址时「连接」必须是禁用态"
+    );
+}
+
 #[test]
 fn error_lands_in_the_error_area() {
     let app = setup();

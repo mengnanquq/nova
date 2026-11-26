@@ -1040,6 +1040,51 @@ fn player_targets_cover_transport_and_menus() {
 }
 
 #[test]
+fn retry_target_disappears_once_the_error_clears() {
+    // 体检 R2-7：错误卡（`has-error`）是条件子树，元素消失后登记总线只增不减，
+    // 旧的 `player.retry` 会留在清单里——用户看到一个“看得见、点了没反应”的死按钮。
+    //
+    // `App::targets()` 是双缓冲合并（上一代的 `targets` + 新一代的 `staging`），
+    // 所以元素消失后**第一轮刷新**里它仍然会被报出来。这里故意只刷新一轮就断言，
+    // 因为调试通道的 `targets` / 按 id 的 `click` 都可能在两轮之间读清单。
+    let app = window();
+    app.set_player(&player_error());
+    app.show_page(Page::Player);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    let targets = settle(&app, 80);
+    assert!(
+        targets.iter().any(|target| target.id == "player.retry"),
+        "失败态必须有「重试」目标"
+    );
+
+    // 重试成功 / 画面恢复，且控制层已自动隐藏（3 秒静默后）：这时页面上
+    // 只剩常驻的 `player.mute` 会重新登记，旧清单整张换掉。
+    app.set_player(&player_view().with_controls_visible(false));
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    app.refresh_targets();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+    let targets = app.targets();
+    assert!(
+        !targets.iter().any(|target| target.id == "player.retry"),
+        "播放正常（控制层已隐藏）时清单里不该还有「重试」：{:?}",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+
+    // 控制层可见时也要消失（旧元素重新登记会整张换掉，这里避免回归）。
+    app.set_player(&player_view());
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    let targets = settle(&app, 80);
+    assert!(
+        !targets.iter().any(|target| target.id == "player.retry"),
+        "播放正常时清单里不该还有「重试」：{:?}",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+    assert_invariants("player-after-error", &targets);
+    assert_coverage("player", &targets);
+}
+
+#[test]
 fn dialog_and_banner_targets_are_registered() {
     let app = window();
     app.set_home(&home_filled());

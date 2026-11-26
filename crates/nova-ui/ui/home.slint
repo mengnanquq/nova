@@ -42,6 +42,12 @@ component CardRow inherits Rectangle {
     callback open-item(string);
     // 「查看全部 ›」：切到该行对应的媒体库页。
     callback tab-activated(string);
+    // 悬停到某张卡：把键盘焦点也移过来（之后方向键从这里继续，R2-3）。
+    //
+    // 焦点数学在 Rust（`move_focus_by`），但悬停只发生在这里；本组件改不了
+    // 页面级的 `focus-index`，所以上报给 `HomePage` 去写（与 `PosterGrid` 悬停
+    // 直接写 `focus-index` 是同一套语义）。
+    callback focus-hover(int);
 
     // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
     // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
@@ -184,6 +190,27 @@ component CardRow inherits Rectangle {
         }
     }
 
+    /// 键盘焦点卡移出可视区时，行内横向滚到焦点卡**完全可见**。
+    ///
+    /// 与左右箭头的翻页是同一个 Flickable（`flick.scroll-to` 用平滑滚动）；
+    /// 键盘跟随要求确定性，所以直接写 `content-x`（与媒体库 / 搜索页的
+    /// `scroll-to-index` 同一口径）。可见性按放大余量之后的矩形算。
+    public function scroll-to-card(index: int) {
+        if (index < 0 || index >= root.cards.length) {
+            return;
+        }
+        let pad = Theme.zoom-allowance-x / 2;
+        let left = Theme.content-gutter + index * (root.poster-width + root.gap);
+        let right = left + root.poster-width;
+        let view-left = -flick.content-x;
+        let max-x = max(0px, flick.content-width - flick.width);
+        if (left - pad < view-left) {
+            flick.content-x = -clamp(left - pad, 0px, max-x);
+        } else if (right + pad > view-left + flick.width) {
+            flick.content-x = -clamp(right + pad - flick.width, 0px, max-x);
+        }
+    }
+
     // 横向滚动的基础卡片（尺寸恒定）：两端各留 gutter，
     // 滚动时卡片只在窗口边缘被裁掉（外层纵向视口即遮罩）。
     flick := Flickable {
@@ -216,6 +243,8 @@ component CardRow inherits Rectangle {
                 hover-changed(has) => {
                     if (has) {
                         root.hot = i;
+                        // 悬停也是"当前焦点"：方向键必须从这张卡继续。
+                        root.focus-hover(i);
                     } else if (root.hot == i) {
                         root.hot = -1;
                     }
@@ -258,6 +287,19 @@ component CardRow inherits Rectangle {
     out property <length> zoom-rect-w: zoom-ov.width;
     out property <length> zoom-rect-h: zoom-ov.height;
     out property <length> arrow-y: arrow-left.y;
+    // 卡区上沿 / 卡片总高（行内容坐标，不含行标题）：首页纵向滚动按
+    // "它 + 卡片总高"算焦点行。
+    out property <length> cards-top: root.title-off;
+    out property <length> cards-height: root.card-height;
+    // 探针：焦点卡在行内容坐标里的左右沿 + 行自己的横向滚动偏移 / 视口宽。
+    // 测试据此断言"焦点卡横向完全可见"（网格的对应探针在 `PosterGrid`）。
+    out property <length> probe-focus-left: root.focused-index >= 0
+        && root.focused-index < root.cards.length
+        ? Theme.content-gutter + root.focused-index * (root.poster-width + root.gap) : -1px;
+    out property <length> probe-focus-right: root.probe-focus-left < 0px ? -1px
+        : root.probe-focus-left + root.poster-width;
+    out property <length> probe-content-x: flick.content-x;
+    out property <length> probe-viewport-w: flick.width;
     // 测试探针：卡下标题的下沿（放大卡上沿必须不低于它 = 不遮挡行标题）。
     out property <length> row-title-bottom: root.rise + Theme.section-title-height;
     // 把本轮 `targets` 与左右箭头登记到总线（箭头只在悬停/有焦点时可见，
@@ -423,6 +465,42 @@ export component HomePage inherits Rectangle {
         flick.content-y = y;
     }
 
+    /// 键盘焦点移出可视区时，把焦点行 / 焦点卡滚进视口（体检 R2-2）。
+    ///
+    /// 纵向：外层 `flick` 滚到整行卡区完全可见（与媒体库 / 搜索页的
+    /// `scroll-to-index` 同一套上下沿算法）；横向：行自己的 `scroll-to-card`。
+    /// 焦点行的判定与 `HomeView::focus_rows` 一致：先「继续观看」一行，
+    /// 再「最近添加」按 6 列切块——所以"最近添加第 N 块"仍然是同一个视觉行。
+    public function scroll-to-index(index: int) {
+        if (index < 0) {
+            return;
+        }
+        if (index < root.continue-count) {
+            root.scroll-to-row(row0.y + row0.cards-top, row0.cards-height);
+            row0.scroll-to-card(index);
+            return;
+        }
+        let local = index - root.continue-count;
+        if (local >= root.recent-count) {
+            return;
+        }
+        root.scroll-to-row(row1.y + row1.cards-top, row1.cards-height);
+        row1.scroll-to-card(local);
+    }
+
+    // 纵向让一段卡区（上沿 + 卡片总高）完全可见；视口是外层 `flick`。
+    // （Slint 的 `function` 默认就是组件私有，只有 `public function` 才对父组件可见。）
+    function scroll-to-row(top: length, card-height: length) {
+        let pad = Theme.zoom-allowance-y / 2;
+        let view-top = -flick.content-y;
+        let max-y = max(0px, flick.content-height - flick.height);
+        if (top - pad < view-top) {
+            flick.content-y = -clamp(top - pad, 0px, max-y);
+        } else if (top + card-height + pad > view-top + flick.height) {
+            flick.content-y = -clamp(top + card-height + pad - flick.height, 0px, max-y);
+        }
+    }
+
     background: Theme.bg;
 
     // billboard 高度的 **vh 封顶比例**（默认 0.88）。
@@ -482,6 +560,23 @@ export component HomePage inherits Rectangle {
     property <int> recent-focus: root.focus-index >= root.continue-count
         && root.focus-index - root.continue-count < root.recent-count
         ? root.focus-index - root.continue-count : -1;
+
+    // ---- 探针：键盘焦点行 / 焦点卡（首页滚动跟随的回归断言用）----
+    out property <bool> probe-focus-in-continue: root.focus-index < root.continue-count;
+    out property <length> probe-viewport-h: flick.height;
+    out property <length> probe-focus-top: root.probe-focus-in-continue
+        ? row0.y + row0.cards-top : row1.y + row1.cards-top;
+    out property <length> probe-focus-bottom: root.probe-focus-in-continue
+        ? row0.y + row0.cards-top + row0.cards-height
+        : row1.y + row1.cards-top + row1.cards-height;
+    out property <length> probe-row-content-x: root.probe-focus-in-continue
+        ? row0.probe-content-x : row1.probe-content-x;
+    out property <length> probe-row-viewport-w: root.probe-focus-in-continue
+        ? row0.probe-viewport-w : row1.probe-viewport-w;
+    out property <length> probe-focus-left: root.probe-focus-in-continue
+        ? row0.probe-focus-left : row1.probe-focus-left;
+    out property <length> probe-focus-right: root.probe-focus-in-continue
+        ? row0.probe-focus-right : row1.probe-focus-right;
 
     // 测试用：继续观看行的几何（「放大不跳布局」断言的基准）。
     out property <length> row0-y: row0.y - flick.content-y;
@@ -818,6 +913,9 @@ export component HomePage inherits Rectangle {
                 open-item(id) => {
                     root.open-item(id);
                 }
+                focus-hover(index) => {
+                    root.focus-index = index;
+                }
             }
 
             // ---- 最近添加（2:3 竖版海报）----
@@ -833,6 +931,11 @@ export component HomePage inherits Rectangle {
                 nav-active: root.nav-active;
                 open-item(id) => {
                     root.open-item(id);
+                }
+                focus-hover(index) => {
+                    // 最近添加是一整行（视觉上不切块），局部索引 + 继续观看张数
+                    // 才是扁平焦点索引（与 `HomeView::focus_rows` 的映射一致）。
+                    root.focus-index = root.continue-count + index;
                 }
             }
 

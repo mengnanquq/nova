@@ -227,8 +227,15 @@ export component SearchPage inherits Rectangle {
             }
             key-pressed(event) => {
                 // Esc：清空并回首页（不需要先进文本框再退聚焦）。
+                //
+                // 清空之后必须**主动交还焦点**：与同文件的 `accepted` 分支同一
+                // 处理。否则输入框仍然握着键盘，方向键 / Enter 全部无响应
+                // （体检 R2-1 的页内 Esc 路径；顶栏输入框有 `search-escape`，
+                // 这里以前漏了）。
                 if (event.text == Key.Escape) {
                     root.search-clear();
+                    query.clear-focus();
+                    root.search-blur();
                     return accept;
                 }
                 // 8 = Ctrl+N（打开“添加服务器”），7 = Ctrl+F（重新聚焦搜索）。

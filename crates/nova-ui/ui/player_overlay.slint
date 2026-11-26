@@ -1114,6 +1114,11 @@ export component PlayerOverlay inherits Rectangle {
     // ---- 错误卡 ----
     if root.data.has-error : Rectangle {
         // 调试通道：重试按钮只在错误卡里存在，自己登记。
+        //
+        // “只在失败态出现”靠两层保证：① 这条 `if` 就是 visible 条件（错误消失时整棵
+        // 子树销毁）；② 登记总线只增不减（双缓冲会继续合并上一代的结果），所以
+        // `App::targets()` 再按 `has_error` 过滤一遍——否则旧的 `player.retry`
+        // 会变成一个“看得见、点了没反应”的死按钮（体检 R2-7）。
         property <int> target-gen: TargetBus.gen;
         changed target-gen => {
             if (root.visible) {

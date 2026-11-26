@@ -120,6 +120,14 @@ export component AppWindow inherits Window {
     in-out property <bool> nav-active: false;
     changed page => {
         root.nav-active = false;
+        // 换页还要把键盘焦点还给全局 `keyboard` FocusScope（R2-1：`keyboard` 是页面
+        // 树的兄弟节点，`TextInput` 拿到焦点后按键不会再冒泡到它；输入框随换页隐藏
+        // 时 Slint 直接把焦点丢掉，此后方向键 / Enter / Esc 都没有接收者）。
+        //
+        // 这一步**不能**写在 `changed` 里：Slint 的 `changed` 处理器延迟到当前事件
+        // 处理完才跑，会把上层随后的输入框聚焦（顶栏 → 搜索页的焦点交接）抢回来
+        // （实测后续字符全部丢失，见 `tests/search_handoff.rs`）。统一在 Rust 的切页
+        // 入口 `set_page()` 里同步调用 `focus-global()`（见 `pages/app.rs`）。
     }
     // 搜索框文本：与导航栏的 TextInput 双向同步，Rust 侧读写这里。
     in-out property <string> search-text: "";
@@ -133,6 +141,13 @@ export component AppWindow inherits Window {
     // “添加服务器”对话框：覆盖层，不参与下层布局。
     // 0 = 空闲，1 = 连接中（禁用重复提交）。
     in-out property <bool> add-server-open: false;
+    // 关框（Esc / 取消 / 点上遮罩 / 上层直接关）之后，键盘焦点必须回到全局
+    // `keyboard`：地址输入框抢过焦点，不还回去同样会变成"按键没人收"（R2-1）。
+    changed add-server-open => {
+        if (!root.add-server-open) {
+            root.focus-global();
+        }
+    }
     in property <int> add-server-state: 0;
     in-out property <string> add-server-address: "";
     in-out property <string> add-server-user: "";
@@ -231,6 +246,17 @@ export component AppWindow inherits Window {
             root.nav-active = true;
             // 播放页有自己的快捷键表，且 Esc 必须先提交进度再退出。
             if (root.page == 3) {
+                // 控制层隐藏时的 ↑ / ↓：这一下**只**算“唤醒”，不改音量。
+                //
+                // 两个键同时是唤醒键和音量键，之前对所有键都先 `player-input()`，
+                // 结果每次想把控制层叫出来音量就被无声降 5%（体检 R2-5：0.95 → 0.35）。
+                // `docs/debugging.md` 一直拿 `key Down` 当唤醒键用，唤醒不该附带音量副作用。
+                // ←/→ 的快进快退、Space 的暂停在隐藏时仍**直接生效**（常见播放器行为，不改）。
+                if ((event.text == Key.UpArrow || event.text == Key.DownArrow)
+                    && !root.player.controls-visible) {
+                    root.player-input();
+                    return accept;
+                }
                 // 任何键都算一次输入：立刻显示控制层并重置 3 秒计时。
                 root.player-input();
                 if (event.text == Key.Space || event.text == "k" || event.text == "K") {
@@ -276,6 +302,9 @@ export component AppWindow inherits Window {
                     return accept;
                 }
             }
+            // 按键能到达这里 = 没有任何输入框持有焦点：撤销搜索框的"聚焦态"，
+            // 否则顶栏会留着一个已失焦的展开输入框（例如 Ctrl+F 之后又关掉了对话框）。
+            root.search-focused = false;
             // 对话框打开时：Esc 关闭，其余按键不透给被遮罩的首页。
             if (root.add-server-open) {
                 if (event.text == Key.Escape) {
@@ -345,6 +374,7 @@ export component AppWindow inherits Window {
         text: root.banner-text;
         action-label: root.banner-action-label;
         action => {
+            root.focus-global();
             root.banner-action();
         }
     }
@@ -367,15 +397,19 @@ export component AppWindow inherits Window {
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
+                    root.focus-global();
                     root.open-item(id);
                 }
                 hero-play => {
+                    root.focus-global();
                     root.hero-play();
                 }
                 connect-server => {
+                    root.focus-global();
                     root.connect-server();
                 }
                 tab-activated(id) => {
+                    root.focus-global();
                     root.tab-activated(id);
                 }
                 search => {
@@ -385,15 +419,16 @@ export component AppWindow inherits Window {
                     root.search-changed(text);
                 }
                 search-submit => {
+                    root.focus-global();
                     root.search-submit();
                 }
                 search-clear => {
+                    root.focus-global();
                     root.search-clear();
                 }
                 search-escape => {
                     // 焦点还给全局键盘处理；Rust / 测试从 search-focused 读状态。
-                    keyboard.focus();
-                    root.search-focused = false;
+                    root.focus-global();
                 }
                 global-shortcut(code) => {
                     root.key-intent(code);
@@ -410,12 +445,15 @@ export component AppWindow inherits Window {
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
+                    root.focus-global();
                     root.open-item(id);
                 }
                 tab-activated(id) => {
+                    root.focus-global();
                     root.tab-activated(id);
                 }
                 sort => {
+                    root.focus-global();
                     root.sort();
                 }
                 search => {
@@ -425,14 +463,15 @@ export component AppWindow inherits Window {
                     root.search-changed(text);
                 }
                 search-submit => {
+                    root.focus-global();
                     root.search-submit();
                 }
                 search-clear => {
+                    root.focus-global();
                     root.search-clear();
                 }
                 search-escape => {
-                    keyboard.focus();
-                    root.search-focused = false;
+                    root.focus-global();
                 }
                 global-shortcut(code) => {
                     root.key-intent(code);
@@ -448,15 +487,19 @@ export component AppWindow inherits Window {
                 in-my-list: root.detail.in-my-list;
                 focus-index <=> root.detail-focus;
                 my-list-toggle => {
+                    root.focus-global();
                     root.detail-my-list-toggle();
                 }
                 back => {
+                    root.focus-global();
                     root.back();
                 }
                 play => {
+                    root.focus-global();
                     root.play-item(root.detail.item-id);
                 }
                 source-selected(id) => {
+                    root.focus-global();
                     root.source-selected(id);
                 }
             }
@@ -471,9 +514,11 @@ export component AppWindow inherits Window {
                 search-text <=> root.search-text;
                 search-focused: root.search-focused;
                 open-item(id) => {
+                    root.focus-global();
                     root.open-item(id);
                 }
                 tab-activated(id) => {
+                    root.focus-global();
                     root.tab-activated(id);
                 }
                 search => {
@@ -483,23 +528,26 @@ export component AppWindow inherits Window {
                     root.search-input(text);
                 }
                 search-submit => {
+                    root.focus-global();
                     root.search-submit();
                 }
                 search-clear => {
+                    root.focus-global();
                     root.search-clear();
                 }
                 search-clear-input => {
+                    // 「×」的语义就是"留在本页继续输入"：焦点必须回输入框，
+                    // 还交全局键盘反而是错的（由 Rust 侧重新聚焦，见 N3）。
                     root.search-clear-input();
                 }
                 search-escape => {
-                    keyboard.focus();
-                    root.search-focused = false;
+                    root.focus-global();
                 }
                 search-blur => {
-                    keyboard.focus();
-                    root.search-focused = false;
+                    root.focus-global();
                 }
                 search-retry => {
+                    root.focus-global();
                     root.search-retry();
                 }
                 global-shortcut(code) => {
@@ -598,13 +646,35 @@ export component AppWindow inherits Window {
         }
     }
 
+    /// 把键盘焦点还给全局 `keyboard` FocusScope。
+    ///
+    /// 全局按键只由 `keyboard`（`init` 里 `focus()`）处理，而它是页面树的兄弟
+    /// 节点；`TextInput` 抢到焦点之后，同页点击别的控件 / 换页 / 关框都没有归还
+    /// 路径，焦点随隐藏的输入框被丢掉后方向键 / Enter / Esc 就永久无响应
+    /// （体检 R2-1）。所有"用户明确离开了输入"的入口都走这里，而不是逐条补
+    /// `clear-focus()`：换页（`changed page`）、关框（`changed add-server-open`）、
+    /// 页面上的非输入动作（各回调）、输入框自己的 Esc / Enter。
+    public function focus-global() {
+        // 输入框不再是按键目标：顶栏 / 搜索页的"聚焦态"跟着撤销，
+        // 否则会留着一个已失焦的展开输入框。
+        root.search-focused = false;
+        keyboard.focus();
+    }
+
     /// 把焦点交给对话框的地址输入框（打开对话框时由 Rust 侧调到这里）。
     public function focus-add-server-address() {
         add-server.focus-input();
     }
 
-    /// 把焦点交给当前页的搜索输入框（Ctrl+F 由 Rust 侧调到这里）。
+    /// 把焦点交给当前页的搜索输入框（Ctrl+F / 搜索页交接由 Rust 侧调到这里）。
+    ///
+    /// 这是 `focus-global()` 的反方向：属性 `search-focused` 必须始终等于
+    /// "搜索输入框当前是按键目标"。`set_search` 靠它决定要不要回填旧查询词
+    /// （打字过程中回填会重置光标，见 `search_page.rs` 的回归用例）。
     public function focus-search-input() {
+        if (root.page == 0 || root.page == 1 || root.page == 4) {
+            root.search-focused = true;
+        }
         if (root.page == 0) {
             home-page.focus-input();
         }
@@ -621,6 +691,11 @@ export component AppWindow inherits Window {
         home-page.scroll-to-offset(y);
     }
 
+    /// 把首页滚到键盘焦点行 / 焦点卡（方向键移动后由 Rust 调用，R2-2）。
+    public function scroll-home-to-index(index: int) {
+        home-page.scroll-to-index(index);
+    }
+
     /// 把媒体库 / 搜索页的结果网格滚到键盘焦点卡（方向键移动后由 Rust 调用）。
     public function scroll-library-to-index(index: int) {
         lib-page.scroll-to-index(index);
@@ -632,6 +707,15 @@ export component AppWindow inherits Window {
     }
 
     out property <length> home-scroll-y: home-page.scroll-y;
+    // 测试 / 调试用：首页焦点行的纵向可见性 + 焦点卡的横向可见性
+    // （方向键把焦点移出可视区时必须跟随滚动，断言见 `tests/home_focus_scroll.rs`）。
+    out property <length> home-viewport-h: home-page.probe-viewport-h;
+    out property <length> home-focus-top: home-page.probe-focus-top;
+    out property <length> home-focus-bottom: home-page.probe-focus-bottom;
+    out property <length> home-row-scroll-x: home-page.probe-row-content-x;
+    out property <length> home-row-viewport-w: home-page.probe-row-viewport-w;
+    out property <length> home-focus-left: home-page.probe-focus-left;
+    out property <length> home-focus-right: home-page.probe-focus-right;
     // 测试 / 调试用：媒体库与搜索页结果网格的滚动偏移与键盘焦点卡位置
     // （键盘导航把焦点移出可视区时必须自动滚动，断言见 `tests/grid_focus_scroll.rs`）。
     out property <length> library-scroll-y: lib-page.probe-scroll-y;
@@ -668,7 +752,7 @@ export component AppWindow inherits Window {
         note-text: root.add-server-note;
         close => {
             // 焦点还给全局键盘处理（与搜索框退出聚焦同一路径）。
-            keyboard.focus();
+            root.focus-global();
             root.add-server-close();
         }
         submit => {
