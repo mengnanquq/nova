@@ -104,6 +104,8 @@ pub(crate) enum Command {
     /// 逐字符输入文本。
     Type {
         text: String,
+        /// 可选：先点一下这个目标（输入框）再打字；缺省直接送给当前焦点。
+        target: Option<String>,
     },
     /// 在 UI 线程上不阻塞地等一段时间（动画 / 异步加载结算）。
     Wait {
@@ -129,7 +131,8 @@ impl Command {
             Self::Targets | Self::Sweep | Self::Dead => true,
             Self::Click { target, .. }
             | Self::Hover { target, .. }
-            | Self::Scroll { target, .. } => target.is_some(),
+            | Self::Scroll { target, .. }
+            | Self::Type { target, .. } => target.is_some(),
             _ => false,
         }
     }
@@ -244,6 +247,9 @@ impl Command {
             }),
             "type" => Ok(Self::Type {
                 text: text("text").ok_or_else(|| "type 需要 text".to_owned())?,
+                // 可选：显式给 `target` 时才预点击它（输入框不在当前焦点上时用）。
+                // 缺省不做任何预点击——无输入目标的页面点哪里都是落空（体检 R5 工具缺口）。
+                target: text("target"),
             }),
             "wait" => {
                 let ms = number("ms").ok_or_else(|| "wait 需要 ms".to_owned())?;
@@ -440,7 +446,16 @@ mod tests {
         assert_eq!(
             Command::parse(r#"{"cmd":"type","text":"沙丘"}"#),
             Ok(Command::Type {
-                text: "沙丘".to_owned()
+                text: "沙丘".to_owned(),
+                target: None,
+            })
+        );
+        // 显式 `target`：先点这个输入框再打字。
+        assert_eq!(
+            Command::parse(r#"{"cmd":"type","text":"沙丘","target":"search.input"}"#),
+            Ok(Command::Type {
+                text: "沙丘".to_owned(),
+                target: Some("search.input".to_owned()),
             })
         );
         assert_eq!(
@@ -457,6 +472,22 @@ mod tests {
         assert!(Command::Sweep.needs_settle());
         assert!(Command::Dead.needs_settle());
         // 按 id 操作也要等一拍：清单位置可能已经过期。
+        assert!(
+            Command::Type {
+                text: "沙丘".to_owned(),
+                target: Some("search.input".to_owned())
+            }
+            .needs_settle(),
+            "type 带了 target 也要先等目标坐标刷新"
+        );
+        assert!(
+            !Command::Type {
+                text: "沙丘".to_owned(),
+                target: None
+            }
+            .needs_settle(),
+            "type 不带 target 是直接送给当前焦点，不需要坐标"
+        );
         assert!(
             Command::Hover {
                 target: Some("library.card.0".to_owned()),

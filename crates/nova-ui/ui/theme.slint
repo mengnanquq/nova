@@ -228,6 +228,10 @@ export global Theme {
     in property <length> nav-link-gap: root.viewport-width * 0.015;
     // 顶栏 72px（Netflix header 实测 `height: 72px`），透明浮在 hero 上。
     in property <length> navbar-height: 72px;
+    // 顶栏标签的**键盘焦点环**高度：只包住标签文字（与搜索胶囊同高 36px），
+    // 不顶满 72px 顶栏——环贴满整条顶栏会看起来像一个选中面板，与"当前标签"的
+    // 白色文字（选中态）混在一起。
+    in property <length> nav-focus-height: 36px;
     // 未滚动态的压暗渐变：Netflix header 实测
     // `linear-gradient(to top, rgba(0,0,0,0) 0%, rgb(0,0,0) 100%)`。
     // CSS 的 `to top` = 底部透明 → 顶部黑；Slint 的 180deg 从顶部开始写 stops，

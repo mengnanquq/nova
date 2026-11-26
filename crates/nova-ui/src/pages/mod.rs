@@ -14,5 +14,5 @@ pub mod library;
 pub mod player;
 pub mod search;
 
-pub use app::{App, KeyCommand, Page, PlayerKey, SweepEntry, SweepReport};
+pub use app::{App, FocusLayer, KeyCommand, Page, PlayerKey, SweepEntry, SweepReport};
 pub use assets::ImageStore;

@@ -54,6 +54,58 @@ impl Page {
     }
 }
 
+/// 键盘焦点层（体检 R2-2b）。
+///
+/// 内容层的扁平焦点（`FocusState`）不变，上面叠两层“chrome”：
+///
+/// ```text
+///   顶栏（Navbar）  ← / → 在 标签 0..N → 搜索按钮 之间移动，Enter 激活，↓ 回下一层
+///      ↑↓
+///   hero（Hero）    首页 billboard 的「▶ 播放」/「更多信息」，← / → 切换，Enter 激活
+///      ↑↓
+///   内容（Content） 卡片 / 网格（原来的扁平焦点）
+/// ```
+///
+/// 两层之间的上下穿行只在**当前层的边界**发生：内容层只有第一行按 `↑` 才进上一
+/// 层，其余情况仍然是原来的行间移动。`Esc` 在任何 chrome 层只回内容层，不返回
+/// 上一页（返回要再按一次）。鼠标点击**不会**进入这两层，所以焦点环不会因为
+/// 点一下就留在顶栏上。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FocusLayer {
+    /// 内容层（卡片 / 网格）。
+    #[default]
+    Content = 0,
+    /// 首页 hero 的按钮行（播放 / 更多信息）。
+    Hero = 1,
+    /// 顶栏（库标签 + 搜索按钮）。
+    Navbar = 2,
+}
+
+impl FocusLayer {
+    /// Slint 里的焦点层编号。
+    pub const fn index(self) -> i32 {
+        self as i32
+    }
+
+    /// 从 Slint 的编号还原；未知值按内容层处理。
+    pub const fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::Hero,
+            2 => Self::Navbar,
+            _ => Self::Content,
+        }
+    }
+
+    /// 调试通道（`view` 的 `focus_layer`）用的名字。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Hero => "hero",
+            Self::Navbar => "navbar",
+        }
+    }
+}
+
 /// Slint 的按键意图编号。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyCommand {
@@ -228,6 +280,14 @@ impl FocusState {
 struct State {
     nav: Navigator,
     focus: FocusState,
+    // 键盘焦点层与 chrome 层内的焦点下标（体检 R2-2b）。
+    //
+    // `layer` 是**权限来源**：只有它为 `Hero` / `Navbar` 时，那两层的焦点环才画得出来
+    // （`.slint` 侧还会再 AND 一次 `nav-active`）。`nav_focus` 与 `hero_focus` 在
+    // 离开层时保留，下次回来还能落在上次的位置（顶栏则固定从当前标签开始）。
+    layer: FocusLayer,
+    nav_focus: usize,
+    hero_focus: usize,
     home: HomeView,
     library: LibraryView,
     detail: DetailView,
@@ -252,6 +312,9 @@ impl Default for State {
         Self {
             nav: Navigator::new(Route::Home),
             focus: FocusState::default(),
+            layer: FocusLayer::Content,
+            nav_focus: 0,
+            hero_focus: 0,
             home: HomeView::new(),
             library: LibraryView::default(),
             detail: DetailView::default(),
@@ -779,6 +842,18 @@ impl App {
         self.state.borrow().focus.get(self.page())
     }
 
+    /// 当前键盘焦点层（内容 / hero / 顶栏）；调试通道与测试读它。
+    pub fn focus_layer(&self) -> FocusLayer {
+        self.state.borrow().layer
+    }
+
+    /// 顶栏焦点下标（`0..标签数-1` = 库标签，`标签数` = 搜索按钮）。
+    ///
+    /// 只在 [`FocusLayer::Navbar`] 时有意义：其他层里顶栏没有键盘焦点。
+    pub fn nav_focus(&self) -> usize {
+        self.state.borrow().nav_focus
+    }
+
     /// 导航栈快照。
     pub fn navigator(&self) -> Navigator {
         self.state.borrow().nav.clone()
@@ -960,14 +1035,14 @@ impl App {
 
     /// 直接切到某个页面（不改变导航栈；演示与测试用）。
     pub fn show_page(&self, page: Page) {
-        set_page(&self.ui, page);
+        set_page(&self.ui, &self.state, page);
     }
 
     /// 回到首页并把导航栈重置为根。
     pub fn show_home(&self) {
         leave_player_before_navigating(&self.ui, &self.state);
         self.state.borrow_mut().nav.reset(Route::Home);
-        set_page(&self.ui, Page::Home);
+        set_page(&self.ui, &self.state, Page::Home);
     }
 
     /// 打开媒体库：刷新数据、压栈、切页。已经停在媒体库时不重复压栈。
@@ -982,7 +1057,7 @@ impl App {
             });
         }
         drop(state);
-        set_page(&self.ui, Page::Library);
+        set_page(&self.ui, &self.state, Page::Library);
         true
     }
 
@@ -1005,7 +1080,7 @@ impl App {
             }),
         }
         drop(state);
-        set_page(&self.ui, Page::Search);
+        set_page(&self.ui, &self.state, Page::Search);
         true
     }
 
@@ -1755,6 +1830,12 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
         return true;
     }
     let page = Page::from_index(ui.get_page());
+    // chrome 层（hero / 顶栏）的按键单独走：方向键在层内移动、Enter 激活层内控件、
+    // Esc 退回内容层。内容层完全保持原来的行为（体检 R2-2b）。
+    let layer = state.borrow().layer;
+    if layer != FocusLayer::Content && page != Page::Player {
+        return handle_chrome_key(ui, state, page, layer, command);
+    }
     match command {
         // 播放页没有焦点环：Enter / Space 交给"播放/暂停"，不重新起播。
         KeyCommand::Accept if page == Page::Player => {
@@ -1763,7 +1844,7 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
         }
         KeyCommand::Left => move_focus_by(ui, state, page, -1, 0),
         KeyCommand::Right => move_focus_by(ui, state, page, 1, 0),
-        KeyCommand::Up => move_focus_by(ui, state, page, 0, -1),
+        KeyCommand::Up => move_up(ui, state, page),
         KeyCommand::Down => move_focus_by(ui, state, page, 0, 1),
         KeyCommand::Accept => activate(ui, state),
         // 搜索页的 Esc 与页内输入框里的 Esc 同义：清空查询并回首页。
@@ -1785,14 +1866,17 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
             true
         }
         // Ctrl+N：与空态按钮、横幅动作同一回调（打开对话框的决策在上层）。
-        KeyCommand::ConnectServer => {
-            let handler = state.borrow().callbacks.connect_server.clone();
-            if let Some(handler) = handler {
-                handler();
-            }
-            true
-        }
+        KeyCommand::ConnectServer => open_connect_dialog(state),
     }
+}
+
+/// Ctrl+N / 空态按钮 / 横幅动作共用的“连接服务器”回调。
+fn open_connect_dialog(state: &Rc<RefCell<State>>) -> bool {
+    let handler = state.borrow().callbacks.connect_server.clone();
+    if let Some(handler) = handler {
+        handler();
+    }
+    true
 }
 
 /// 当前页的焦点索引，**以 UI 属性为准**。
@@ -1840,6 +1924,249 @@ fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32
     true
 }
 
+// ---- 键盘焦点层：hero / 顶栏（体检 R2-2b）----
+
+/// 当前页顶栏的标签。
+///
+/// 数据源必须与页面真正画的保持一致：首页 / 搜索页用首页的标签（`search::apply`
+/// 就借的这份），媒体库页用自己的。
+fn nav_tabs(state: &State, page: Page) -> &[crate::viewmodel::LibraryTab] {
+    match page {
+        Page::Library => &state.library.library_tabs,
+        _ => &state.home.library_tabs,
+    }
+}
+
+/// 顶栏可聚焦槽位数：标签 `0..N-1` + 搜索按钮（下标 `N`）。
+///
+/// 搜索页的顶栏把胶囊搜索框藏起来了（`show-search: false`，页内已经有更大的输入框），
+/// 那个页面只有标签可聚焦——否则会多出一个“按 Enter 没反应”的空槽。
+fn nav_slots(state: &State, page: Page) -> usize {
+    let tabs = nav_tabs(state, page).len();
+    if page == Page::Search { tabs } else { tabs + 1 }
+}
+
+/// 首页 hero 的按钮行是否真的可聚焦。
+///
+/// `home.slint` 只在 `hero.overview != ""` 时实例化那两个按钮（条件子树的布局收紧是
+/// 有意的），没有简介时进 hero 层就是一个看得见焦点、却点不到东西的死层。
+fn hero_available(state: &State) -> bool {
+    state.home.hero.as_ref().is_some_and(|hero| {
+        hero.overview
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+    })
+}
+
+fn set_focus_layer(ui: &AppWindow, state: &Rc<RefCell<State>>, layer: FocusLayer) {
+    state.borrow_mut().layer = layer;
+    ui.set_focus_layer(layer.index());
+}
+
+fn set_nav_focus_index(ui: &AppWindow, state: &Rc<RefCell<State>>, index: usize) {
+    state.borrow_mut().nav_focus = index;
+    ui.set_nav_focus(index as i32);
+}
+
+fn set_hero_focus_index(ui: &AppWindow, state: &Rc<RefCell<State>>, index: usize) {
+    state.borrow_mut().hero_focus = index;
+    ui.set_hero_focus(index as i32);
+}
+
+/// 回到内容层：焦点环娥灭，内容网格重新接管键盘放大指示。
+fn leave_chrome_layer(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    if state.borrow().layer == FocusLayer::Content {
+        return false;
+    }
+    set_focus_layer(ui, state, FocusLayer::Content);
+    true
+}
+
+fn enter_hero(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    set_hero_focus_index(ui, state, 0);
+    set_focus_layer(ui, state, FocusLayer::Hero);
+    true
+}
+
+/// 顶栏**当前高亮**的标签下标（必须与页面真正画出来的一致）。
+///
+/// 首页写死 0（`convert::home_data` 的 `current-tab` 就是 0），不能读
+/// `State::nav_current_tab`：它是"上一次进的库"，从媒体库返回首页后还留着旧值，
+/// 拿它当焦点起点会落在「首页」高亮旁边的标签上（真机实测：首页顶栏焦点从
+/// 第 2 个标签开始）。
+fn nav_current_tab(state: &State, page: Page) -> usize {
+    match page {
+        Page::Home => 0,
+        Page::Library => state.library.current_tab,
+        Page::Search => state.nav_current_tab,
+        Page::Detail | Page::Player => 0,
+    }
+}
+
+/// 进入顶栏：焦点落在**当前标签**上，让标签横向滚入可见区由 `Navbar` 负责
+/// （它的 `focus-index` 一变就会 `ensure-visible`）。
+fn enter_navbar(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
+    let slots = nav_slots(&state.borrow(), page);
+    if slots == 0 {
+        return false;
+    }
+    let index = nav_current_tab(&state.borrow(), page).min(slots - 1);
+    set_nav_focus_index(ui, state, index);
+    set_focus_layer(ui, state, FocusLayer::Navbar);
+    true
+}
+
+/// 内容层按 `↑`：只在**第一行**再往上时进 chrome 层（首页先 hero，其余直接顶栏）。
+fn move_up(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
+    if matches!(page, Page::Player | Page::Detail) {
+        // 详情页没有顶栏（页内是 hero + 按钮，焦点已能到播放 / 版本行），播放页
+        // 有自己的快捷键表：这两页没有 chrome 层，保持原来的行间移动。
+        return move_focus_by(ui, state, page, 0, -1);
+    }
+    let rows = focus_rows(ui, state, page);
+    let index = current_focus(ui, state, page);
+    let first_row = rows.first().copied().unwrap_or(0);
+    let at_first_row = rows.is_empty() || index < first_row;
+    if !at_first_row {
+        return move_focus_by(ui, state, page, 0, -1);
+    }
+    if page == Page::Home && hero_available(&state.borrow()) {
+        return enter_hero(ui, state);
+    }
+    enter_navbar(ui, state, page)
+}
+
+/// chrome 层（hero / 顶栏）里的方向键：层内移动，不碰内容层的扁平焦点。
+fn move_chrome_focus(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    page: Page,
+    layer: FocusLayer,
+    dx: i32,
+) -> bool {
+    match layer {
+        FocusLayer::Hero => {
+            // hero 只有两个按钮（播放 / 更多信息）：在一端夹住。
+            let current = state.borrow().hero_focus.min(1);
+            let next = if dx > 0 {
+                (current + 1).min(1)
+            } else {
+                current.saturating_sub(1)
+            };
+            if next != current {
+                set_hero_focus_index(ui, state, next);
+            }
+            true
+        }
+        FocusLayer::Navbar => {
+            let slots = nav_slots(&state.borrow(), page);
+            if slots == 0 {
+                return false;
+            }
+            let current = state.borrow().nav_focus.min(slots - 1);
+            let next = if dx > 0 {
+                (current + 1).min(slots - 1)
+            } else {
+                current.saturating_sub(1)
+            };
+            if next != current {
+                set_nav_focus_index(ui, state, next);
+            }
+            true
+        }
+        FocusLayer::Content => false,
+    }
+}
+
+/// hero 层 Enter：0 = 播放（与点击「▶ 播放」同一条回调链），1 = 打开详情。
+fn activate_hero(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    if state.borrow().hero_focus == 0 {
+        // `.slint` 里点「▶ 播放」走的就是这个回调（`wire` 接的是 `play`）。
+        ui.invoke_hero_play();
+        return true;
+    }
+    let item_id = state
+        .borrow()
+        .home
+        .hero
+        .as_ref()
+        .map(|hero| hero.item_id.clone());
+    match item_id {
+        Some(item_id) => open_detail(ui, state, &item_id),
+        None => false,
+    }
+}
+
+/// 顶栏 Enter：标签 → 切库（与点击标签同一条回调），搜索槽 → 展开并聚焦输入框。
+fn activate_navbar(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
+    let slots = nav_slots(&state.borrow(), page);
+    if slots == 0 {
+        return false;
+    }
+    let index = state.borrow().nav_focus.min(slots - 1);
+    let tab = {
+        let state = state.borrow();
+        nav_tabs(&state, page).get(index).cloned()
+    };
+    // 选完就回内容层：顶栏是一层“选完就走”的 chrome（鼠标点标签时焦点环从来不亮）。
+    leave_chrome_layer(ui, state);
+    match tab {
+        Some(tab) => {
+            ui.invoke_tab_activated(tab.id.as_str().into());
+            true
+        }
+        None => {
+            focus_search(ui, state);
+            true
+        }
+    }
+}
+
+/// chrome 层的按键：方向键层内移动、Enter 激活层内控件、Esc 退回内容层。
+///
+/// Esc / Backspace 在 chrome 层**只退层**，不返回上一页（返回要再按一次）：
+/// 遥控器上“退一层”与“退一页”是两个不同意图，混在一起会让用户莫名其妙地
+/// 从媒体库页直接被丢回首页。
+fn handle_chrome_key(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    page: Page,
+    layer: FocusLayer,
+    command: KeyCommand,
+) -> bool {
+    match command {
+        KeyCommand::Left => move_chrome_focus(ui, state, page, layer, -1),
+        KeyCommand::Right => move_chrome_focus(ui, state, page, layer, 1),
+        KeyCommand::Up => match layer {
+            // 顶栏是最上一层；hero 再往上就是顶栏。
+            FocusLayer::Navbar => false,
+            FocusLayer::Hero => enter_navbar(ui, state, page),
+            FocusLayer::Content => false,
+        },
+        KeyCommand::Down => {
+            // 首页从顶栏往下先回 hero（若 hero 真的可聚焦），其余直接回内容层。
+            if layer == FocusLayer::Navbar && page == Page::Home && hero_available(&state.borrow())
+            {
+                enter_hero(ui, state)
+            } else {
+                leave_chrome_layer(ui, state)
+            }
+        }
+        KeyCommand::Accept => match layer {
+            FocusLayer::Hero => activate_hero(ui, state),
+            FocusLayer::Navbar => activate_navbar(ui, state, page),
+            FocusLayer::Content => false,
+        },
+        KeyCommand::Back => leave_chrome_layer(ui, state),
+        KeyCommand::Search => {
+            leave_chrome_layer(ui, state);
+            focus_search(ui, state);
+            true
+        }
+        KeyCommand::ConnectServer => open_connect_dialog(state),
+    }
+}
+
 fn activate(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     let page = Page::from_index(ui.get_page());
     // 与方向键同一口径：悬停过的卡就是 Enter 要打开的那张（R2-3）。
@@ -1875,7 +2202,7 @@ fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> boo
         state.callbacks.open_detail.clone()
     };
     set_focus(ui, state, Page::Detail, 0);
-    set_page(ui, Page::Detail);
+    set_page(ui, state, Page::Detail);
     if let Some(handler) = handler {
         handler(item_id);
     }
@@ -1909,7 +2236,7 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
         }
         state.callbacks.play.clone()
     };
-    set_page(ui, Page::Player);
+    set_page(ui, state, Page::Player);
     if let Some(handler) = handler {
         handler(item_id);
     }
@@ -1925,7 +2252,7 @@ fn go_back(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
         };
         (page_of_route(Some(&route)), state.callbacks.back.clone())
     };
-    set_page(ui, page);
+    set_page(ui, state, page);
     if let Some(handler) = handler {
         handler();
     }
@@ -1944,21 +2271,71 @@ fn go_back(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
 /// **只有页面真的变了才还焦**：`open_search` / `open_library` 在每次输入、每次
 /// 异步结果到达时都会被调用（页面没变）；无条件还焦会把正在打字的搜索框里的
 /// 焦点抢走（实测：调试通道 `search page:true` 之后输入字符全部丢失）。
-fn set_page(ui: &AppWindow, page: Page) {
+///
+/// 换页同时**退出 chrome 层**（体检 R2-2b）：键盘焦点层属于上一页，不重置的话
+/// 新页面的顶栏会凭空亮着焦点环（且按 Enter 会激活未选中的标签）。重置写在
+/// 这里而不是 `.slint` 的 `changed page`，理由同上：`changed` 是延迟的，而
+/// `handle_key` 在下一次按键时就读 `state.layer`。
+fn set_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
     let changed = Page::from_index(ui.get_page()) != page;
     ui.set_page(page.index());
     if changed {
         ui.invoke_focus_global();
+        set_focus_layer(ui, state, FocusLayer::Content);
+        set_nav_focus_index(ui, state, 0);
+        set_hero_focus_index(ui, state, 0);
     }
 }
 
 fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // 顶栏搜索框只存在于首页 / 媒体库页；搜索页有自己的大输入框。详情页与播放页
+    // 没有任何输入框可聚焦——只把 `search-focused` 置真会让焦点落空，随后字符被
+    // 全局按键处理器复位（体检 R5-4）。这两页直接打开搜索页并聚焦页内大输入框。
+    match Page::from_index(ui.get_page()) {
+        Page::Detail => open_empty_search(ui, state),
+        // 播放页先走正常出口：提交进度、收尾会话，再进搜索（体检 R5-3）。
+        Page::Player => {
+            leave_player_before_navigating(ui, state);
+            open_empty_search(ui, state);
+        }
+        Page::Home | Page::Library | Page::Search => {}
+    }
     ui.set_search_focused(true);
     ui.invoke_focus_search_input();
     let handler = state.borrow().callbacks.search.clone();
     if let Some(handler) = handler {
         handler();
     }
+}
+
+/// 打开一个空查询的搜索页（详情页 / 播放页的 Ctrl+F）。
+///
+/// 详情页没有顶栏搜索框、播放页也没有输入框，所以不能像首页 / 媒体库那样
+/// "只聚焦等输入"：直接切页 + 聚焦页内大输入框，用户敲的第一个字符就走
+/// `search-input` 回调（体检 R5-4）。视图用 Idle（与搜索页「×」清空后一致），
+/// 顶栏标签数据沿用当前页。
+fn open_empty_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let (tabs, current_tab, images) = {
+        let state = state.borrow();
+        (
+            state.home.library_tabs.clone(),
+            state.nav_current_tab,
+            state.images.clone(),
+        )
+    };
+    let view = SearchView::default();
+    search::apply(ui, &view, &tabs, current_tab, &images.borrow());
+    {
+        let mut state = state.borrow_mut();
+        state.search = view;
+        state.focus.search = 0;
+        state.nav.push(Route::Search {
+            term: String::new(),
+        });
+    }
+    ui.set_search_focus(0);
+    ui.set_search_text("".into());
+    set_page(ui, state, Page::Search);
 }
 
 /// 搜索页「×」：清空关键词但**留在搜索页**，焦点交回输入框。

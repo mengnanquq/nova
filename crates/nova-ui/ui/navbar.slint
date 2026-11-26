@@ -9,10 +9,17 @@
 
 import { Theme } from "theme.slint";
 import { TabData, Target, TargetBus } from "models.slint";
+import { FocusRing } from "focus_ring.slint";
 
 export component Navbar inherits Rectangle {
     in property <[TabData]> tabs;
     in property <int> current-index: 0;
+    // 键盘焦点下标（体检 R2-2b）：`0..标签数-1` = 库标签，`标签数` = 搜索按钮，
+    // `-1` = 顶栏不持有键盘焦点（鼠标操作 / 焦点在内容层）。
+    //
+    // 这是**焦点**，与 `current-index`（当前已选中的标签，白色 semibold）区分：
+    // 焦点环用 accent 2px 描边（`FocusRing`），选中态只有字色 / 字重变化。
+    in property <int> focus-index: -1;
     in property <bool> search-focused: false;
     // 页面滚动是否已超过 40px：驱动透明 → surface 实底的过渡。
     in property <bool> scrolled: false;
@@ -101,6 +108,23 @@ export component Navbar inherits Rectangle {
     // 见 `focus-input`：`set-selection-offsets` 用的是 UTF-8 字节偏移（超出会被
     // clamp 到文本长度），不能拿 `string.length`（字素簇个数）当偏移。
     property <int> text-end: 2147483647;
+
+    // ---- 键盘焦点几何（测试 / 调试用）----
+    //
+    // 标签行是横向 `Flickable`：窄窗口下后面的标签被裁在视口外。键盘焦点移到
+    // 被裁掉的标签时要把它滚进可见区（见标签元素的 `ensure-visible`）。
+    //
+    // 焦点标签的位置由**焦点那个标签自己**写进来（`for` 元素无法从父组件按下标访问），
+    // 下面五个 `probe-*` 把它换算成**标签区视口坐标**报出去：
+    // `0 <= probe-focus-tab-left && probe-focus-tab-right <= probe-tabs-viewport-w`
+    // 就是"焦点标签完整可见"。（`content-x` 向下 / 向右滚时为负，所以要加回来。）
+    in-out property <length> focus-tab-left: 0px;
+    in-out property <length> focus-tab-width: 0px;
+    out property <length> probe-focus-tab-left: root.focus-tab-left - tabs-view.absolute-position.x
+        + tabs-view.content-x;
+    out property <length> probe-focus-tab-right: root.probe-focus-tab-left + root.focus-tab-width;
+    out property <length> probe-tabs-viewport-w: tabs-view.width;
+    out property <length> probe-tabs-scroll-x: tabs-view.content-x;
 
     /// 让搜索输入框拿到键盘焦点（Ctrl+F / 点放大镜由 Rust 侧调到这里）。
     public function focus-input() {
@@ -237,6 +261,30 @@ export component Navbar inherits Rectangle {
                         clicked => {
                             root.tab-activated(tab.id);
                         }
+                    }
+
+                    // 键盘焦点是否在这个标签上（体检 R2-2b）。
+                    property <bool> keyboard-focused: i == root.focus-index;
+                    changed keyboard-focused => {
+                        if (self.keyboard-focused) {
+                            // 窄窗口下标签行比标签区宽：把焦点标签横向滚入可见区
+                            // （`ensure-visible` 滚的是包着它的 `tabs-view`）。
+                            self.ensure-visible(ScrollBehavior.smooth);
+                            // 把几何报给顶栏的探针（见 `probe-focus-tab-*`）。
+                            root.focus-tab-left = self.absolute-position.x;
+                            root.focus-tab-width = self.width;
+                        }
+                    }
+
+                    // 焦点环（accent 2px 描边）：与"当前标签"的白色文字（选中态）区分。
+                    // 只在键盘进入顶栏层时才有非 -1 的 `focus-index`，鼠标点击不出环。
+                    FocusRing {
+                        x: -Theme.focus-offset;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width + Theme.focus-offset * 2;
+                        height: Theme.nav-focus-height;
+                        ring-radius: Theme.radius-button + Theme.focus-offset;
+                        active: parent.keyboard-focused;
                     }
 
                     // 库标签是重复元素：只能自己登记目标（数组无法在父组件里拼接）。
@@ -423,6 +471,18 @@ export component Navbar inherits Rectangle {
                 clicked => {
                     root.search();
                 }
+            }
+
+            // 键盘焦点落在"搜索按钮"槽位（下标 = 标签数）时的焦点环。
+            // 搜索页的顶栏没有搜索入口（`show-search: false`），那个页面的槽位只有标签，
+            // 所以这里不会凭空亮一个环。
+            FocusRing {
+                x: -Theme.focus-offset;
+                y: -Theme.focus-offset;
+                width: parent.width + Theme.focus-offset * 2;
+                height: parent.height + Theme.focus-offset * 2;
+                ring-radius: Theme.radius-poster + Theme.focus-offset;
+                active: root.focus-index == root.tabs.length;
             }
         }
 

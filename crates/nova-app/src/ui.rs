@@ -107,6 +107,16 @@ enum UiMessage {
     AddServer(Box<Result<ConnectedServer, AddServerError>>),
 }
 
+/// 挂起的一次窗口自截。
+///
+/// 有显示器时合成器每帧都回调，`wait` 还没到期就先用 `glReadPixels` 回读窗口真实
+/// back buffer；没有显示器 / 锁屏时合成器不给帧回调（`request_redraw()` 出不了帧），
+/// 宽限期一过改走 `take_snapshot()` 离屏渲染——两者都只截 Nova 自己的窗口。
+struct PendingShot {
+    path: std::path::PathBuf,
+    wait: player::gl::ShotWait,
+}
+
 /// 刷新结果。
 struct Refreshed {
     status: Status,
@@ -134,8 +144,8 @@ pub(crate) struct Shell {
     state: RefCell<UiState>,
     /// 与渲染 notifier 共享的 mpv 引擎状态（所有 GL 调用都在主线程）。
     host: Rc<RefCell<player::Host>>,
-    /// 调试通道请求的自截：等到回读结果就写到这个路径。
-    pending_shot: RefCell<Option<std::path::PathBuf>>,
+    /// 挂起的一次自截（`--screenshot` 与调试通道共用）：拿到帧就写到这个路径。
+    pending_shot: RefCell<Option<PendingShot>>,
     /// 图片下载器（登录成功后切换 provider 用；与 `images` 里的 fetcher 同一个）。
     fetcher: Arc<ProviderFetcher>,
     /// 播放页控制器；只在播放页打开时存在。
@@ -364,15 +374,10 @@ pub fn run_window(
                 }
             }
             *pending.borrow_mut() = later;
-            // 自截：等回读结果到了再写盘。
-            let shot_path = shell.pending_shot.borrow().clone();
-            if let Some(path) = shot_path
-                && let Some((frame, error)) = shell.host.borrow_mut().take_shot()
-            {
-                *shell.pending_shot.borrow_mut() = None;
-                match error {
-                    Some(error) => tracing::warn!(%error, "调试自截失败"),
-                    None => match player::gl::write_png(&path, &frame) {
+            // 自截：回读到了 / 等帧超时改走离屏渲染，然后写盘。
+            if let Some((path, result)) = shell.take_pending_shot() {
+                match result {
+                    Ok(frame) => match player::gl::write_png(&path, &frame) {
                         Ok(()) => tracing::info!(
                             path = %path.display(),
                             width = frame.width,
@@ -381,6 +386,7 @@ pub fn run_window(
                         ),
                         Err(error) => tracing::warn!(%error, "调试自截写盘失败"),
                     },
+                    Err(error) => tracing::warn!(%error, "调试自截失败"),
                 }
             }
         });
@@ -389,14 +395,16 @@ pub fn run_window(
         None
     };
 
-    // 窗口自截（`--screenshot`）：等界面稳定后回读自己的 back buffer 写 PNG 再退出。
-    // 走 `glReadPixels`（与播放捕获同一条路径），只含 Nova 自己的窗口，
-    // 不需要截屏协议、不碰用户屏幕、也不抢焦点。
+    // 窗口自截（`--screenshot`）：等界面稳定后拍一张自己的画面写 PNG 再退出。
+    // 有显示器时先走 `glReadPixels`（与播放捕获同一条路径，读窗口真实 back buffer）；
+    // 没有显示器 / 锁屏时合成器不给帧回调，宽限期一过改走 `take_snapshot()` 离屏渲染。
+    // 两条路都只含 Nova 自己的窗口：不需要截屏协议、不碰用户屏幕、也不抢焦点。
     let screenshot_timer = if let Some((path, delay_ms)) = screenshot {
         let timer = slint::Timer::default();
         let weak = Rc::downgrade(&shell);
         let delay = std::time::Duration::from_millis(delay_ms);
         let mut waited = std::time::Duration::ZERO;
+        let mut requested = false;
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(100),
@@ -405,25 +413,26 @@ pub fn run_window(
                 let Some(shell) = weak.upgrade() else {
                     return;
                 };
-                if waited >= delay {
-                    shell.host.borrow_mut().request_capture();
-                    shell.app.ui().window().request_redraw();
+                if !requested && waited >= delay {
+                    requested = true;
+                    shell.request_shot(path.clone());
                 }
-                if let Some((frame, error)) = shell.host.borrow_mut().take_shot() {
-                    match error {
-                        Some(error) => eprintln!("截图失败：{error}"),
-                        None => match player::gl::write_png(&path, &frame) {
-                            Ok(()) => println!(
-                                "screenshot: {}x{} -> {}",
-                                frame.width,
-                                frame.height,
-                                path.display()
-                            ),
-                            Err(error) => eprintln!("写 PNG 失败：{error}"),
-                        },
-                    }
-                    let _ = slint::quit_event_loop();
+                let Some((path, result)) = shell.take_pending_shot() else {
+                    return;
+                };
+                match result {
+                    Ok(frame) => match player::gl::write_png(&path, &frame) {
+                        Ok(()) => println!(
+                            "screenshot: {}x{} -> {}",
+                            frame.width,
+                            frame.height,
+                            path.display()
+                        ),
+                        Err(error) => eprintln!("写 PNG 失败：{error}"),
+                    },
+                    Err(error) => eprintln!("截图失败：{error}"),
                 }
+                let _ = slint::quit_event_loop();
             },
         );
         Some(timer)
@@ -454,6 +463,68 @@ pub fn run_window(
 }
 
 impl Shell {
+    /// 离屏渲染一张当前窗口（`take_snapshot()` 会完整跑一遍 `RenderingSetup` /
+    /// `BeforeRendering` / `AfterRendering`，视频纹理也照常合成）。
+    ///
+    /// 不 present、不碰用户屏幕，也不需要合成器给帧回调。
+    fn snapshot_frame(&self) -> Result<player::gl::Frame, String> {
+        let buffer = self
+            .app
+            .ui()
+            .window()
+            .take_snapshot()
+            .map_err(|error| format!("离屏渲染失败：{error}"))?;
+        player::gl::Frame::from_pixel_buffer(&buffer)
+    }
+
+    /// 发起一次窗口自截：先清掉上一轮残留的回读结果，再请求回读 + 重绘。
+    ///
+    /// 同一时刻只挂一张（后到的覆盖先到的）；宽限期内没等到 `AfterRendering` 时，
+    /// [`Self::take_pending_shot`] 会改走离屏渲染。
+    fn request_shot(&self, path: std::path::PathBuf) {
+        // 上一轮离屏渲染也可能顺手把回读装满过，别让这一轮直接拿到旧帧。
+        let _ = self.host.borrow_mut().take_shot();
+        *self.pending_shot.borrow_mut() = Some(PendingShot {
+            path,
+            wait: player::gl::ShotWait::start(),
+        });
+        self.host.borrow_mut().request_capture();
+        self.app.ui().window().request_redraw();
+    }
+
+    /// 取挂起的自截结果：回读到了就返回，等帧超时则离屏渲染一张。
+    ///
+    /// `None` 表示还要继续等（宽限期未到、回读也还没回来）。
+    ///
+    /// 注意：`take_snapshot()` 会**重入渲染回调**（`BeforeRendering` 里 mpv 要画视频帧，
+    /// 回调自己会 `try_borrow_mut` 那个 `host`），所以调它前必须先把 `host` 的借用放掉。
+    fn take_pending_shot(&self) -> Option<(std::path::PathBuf, Result<player::gl::Frame, String>)> {
+        let mut slot = self.pending_shot.borrow_mut();
+        let pending = slot.as_mut()?;
+        let readback = self.host.borrow_mut().take_shot();
+        let result = match readback {
+            Some((frame, None)) => Ok(frame),
+            // 回读失败（后端不是 GL 等）：离屏渲染还能救一次。
+            Some((_frame, Some(error))) => self
+                .snapshot_frame()
+                .map_err(|snapshot_error| format!("{error}；{snapshot_error}")),
+            // 宽限期内没等到 `AfterRendering`：合成器没给帧回调（无显示器 / 锁屏），
+            // 自己离屏渲染一帧。
+            None if pending.wait.snapshot_due(std::time::Instant::now()) => {
+                tracing::debug!(
+                    "{}ms 内没有 AfterRendering，改走 take_snapshot 离屏渲染",
+                    player::gl::SHOT_FRAME_TIMEOUT.as_millis()
+                );
+                self.snapshot_frame()
+            }
+            None => return None,
+        };
+        let path = slot.take().map(|pending| pending.path)?;
+        // 离屏渲染那一帧如果顺手把回读也装满了，丢掉：下次请求不该拿到旧帧。
+        let _ = self.host.borrow_mut().take_shot();
+        Some((path, result))
+    }
+
     /// 进入播放页并起播（`--play` 直达，不走首页点击）。
     ///
     /// 捕获参数先存进 `pending_capture`：`App::play` 会回调 `on_play` → [`Shell::play`]，
@@ -624,6 +695,16 @@ impl Shell {
                         ui.get_search_focus(),
                     ],
                     "nav_active": ui.get_nav_active(),
+                    // 键盘焦点层（体检 R2-2b）：`content` / `hero` / `navbar`。
+                    // 纯键盘 / 遥控器能不能到顶栏与 hero 按钮，就靠它 + `nav_focus`
+                    // 在真机上验证；`nav_focus`：0..标签数-1 = 库标签，
+                    // 标签数 = 搜索按钮，-1 = 不在顶栏。
+                    "focus_layer": shell.app.focus_layer().name(),
+                    "nav_focus": ui.get_nav_focus(),
+                    // hero 按钮行的焦点（0 = 播放、1 = 更多信息）；只在
+                    // `focus_layer == "hero"` 时有意义。
+                    "hero_focus": ui.get_hero_focus(),
+                    "nav_tabs": ui.get_debug_nav_tabs(),
                     // 顶栏搜索框是否真的拿到了焦点（Ctrl+F / 点击搜索后的交接态）。
                     // 以前只能靠输入字符是否落到框里间接判断（体检第二、三轮）。
                     "search_focused": ui.get_search_focused(),
@@ -645,6 +726,15 @@ impl Shell {
                         "focus_top": ui.get_search_focus_top(),
                         "focus_bottom": ui.get_search_focus_bottom(),
                         "zoom_on": ui.get_search_zoom_on(),
+                    },
+                    // 顶栏键盘焦点的几何（`navbar.slint` 的 `probe-*`）：窄窗口下焦点
+                    // 移到被截断的标签上时，`focus_tab_left/right` 必须落在
+                    // `0..tabs_viewport_w` 里，`tabs_scroll_x` 变成非 0。
+                    "nav_geometry": {
+                        "focus_tab_left": ui.get_nav_focus_tab_left(),
+                        "focus_tab_right": ui.get_nav_focus_tab_right(),
+                        "tabs_viewport_w": ui.get_nav_tabs_viewport_w(),
+                        "tabs_scroll_x": ui.get_nav_tabs_scroll_x(),
                     },
                     "detail_drop_open": ui.get_detail_drop_open(),
                     // 首页整页滚动 / 继续观看行放大（`ui/home.slint` 的 `scroll-y` /
@@ -668,6 +758,11 @@ impl Shell {
                     },
                     "home": {
                         "hero": state.home.hero.as_ref().map(|card| card.title.clone()),
+                        "hero_item": state.home.hero.as_ref().map(|card| card.item_id.clone()),
+                        "hero_overview_len": state.home.hero.as_ref()
+                            .and_then(|card| card.overview.as_ref())
+                            .map(|text| text.chars().count())
+                            .unwrap_or(0),
                         "recent": state.home.recently_added.len(),
                         "continue": state.home.continue_watching.len(),
                         "tabs": state.home.library_tabs.iter().map(|tab| tab.title.clone()).collect::<Vec<_>>(),
@@ -806,9 +901,7 @@ impl Shell {
                 })
             }
             Cmd::Screenshot { path } => {
-                *shell.pending_shot.borrow_mut() = Some(path.clone());
-                shell.host.borrow_mut().request_capture();
-                shell.app.ui().window().request_redraw();
+                shell.request_shot(path.clone());
                 serde_json::json!({ "ok": true, "queued": true, "path": path.display().to_string() })
             }
             Cmd::Targets => {
@@ -884,7 +977,23 @@ impl Shell {
                     ],
                 }),
             },
-            Cmd::Type { text } => {
+            Cmd::Type { text, target } => {
+                // 缺省**不做预点击**：字符直接作为按键事件送给当前焦点（CJK 单字符
+                // 与 `key` 命令同一条路）。以前在无输入目标的页面预点击会落空，
+                // 看起来像"type 无效"（体检 R5 工具缺口）。只有显式给了 `target`
+                // 才先点它一下（输入框不在当前焦点上时用）。
+                let clicked = match target.as_deref() {
+                    Some(target) => match shell.resolve_point(Some(target), None, None) {
+                        Ok((x, y, resolved)) => match shell.pointer_at(x, y, true) {
+                            Ok(()) => resolved.map(|target| target.id),
+                            Err(error) => {
+                                return serde_json::json!({ "ok": false, "error": error });
+                            }
+                        },
+                        Err(reply) => return reply,
+                    },
+                    None => None,
+                };
                 let mut typed = 0u32;
                 for character in text.chars() {
                     let key = slint::SharedString::from(character.to_string());
@@ -893,7 +1002,12 @@ impl Shell {
                     }
                     typed += 1;
                 }
-                serde_json::json!({ "ok": true, "typed": typed, "text": text })
+                serde_json::json!({
+                    "ok": true,
+                    "typed": typed,
+                    "text": text,
+                    "target": clicked,
+                })
             }
             // `wait` 由调试定时器节拍负责"真的等"，这里只回结果。
             Cmd::Wait { ms } => {
@@ -1807,8 +1921,18 @@ fn install_callbacks(shell: &Rc<Shell>) {
                 shell.clear_search_input();
             }
         });
-        shell.app.on_search(|| {
-            tracing::debug!("搜索框已聚焦");
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search(move || {
+            if let Some(shell) = weak.upgrade() {
+                // Ctrl+F 在详情页 / 播放页会先切到搜索页（nova-ui 直接打开空查询页）。
+                // 上层的搜索镜像也得跟着清掉：否则晚到的图片（`apply_image` 按
+                // "仍在搜索页"重贴 `state.search`）会把上一次的旧结果贴回空搜索页。
+                if matches!(shell.app.current_route(), Some(Route::Search { .. })) {
+                    let view = shell.app.search_view();
+                    shell.state.borrow_mut().search = (!view.term.is_empty()).then_some(view);
+                }
+                tracing::debug!("搜索框已聚焦");
+            }
         });
     }
     {
@@ -2422,5 +2546,20 @@ mod tests {
             !text.contains("\"password\""),
             "只允许 password_len：{text}"
         );
+    }
+
+    #[test]
+    fn debug_key_text_accepts_cjk_single_characters() {
+        // 调试通道 `{"cmd":"key","key":"沙"}`：CJK 单字符必须原样变成按键文本，
+        // 才能作为字符事件送进当前聚焦的输入框（与 `type` 同一条注入路径）。
+        assert_eq!(super::key_event_text("沙").as_deref(), Some("沙"));
+        assert_eq!(super::key_event_text("A").as_deref(), Some("A"));
+        assert_eq!(
+            super::key_event_text("Enter"),
+            Some(slint::platform::Key::Return.into())
+        );
+        // 多字符不是单键；未知命名键也不行（`key_event_text` 返回 None）。
+        assert_eq!(super::key_event_text("沙丘"), None);
+        assert_eq!(super::key_event_text("F13"), None);
     }
 }

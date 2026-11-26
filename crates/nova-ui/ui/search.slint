@@ -29,6 +29,10 @@ export component SearchPage inherits Rectangle {
     in-out property <int> focus-index: 0;
     // 用户是否已开始导航；未激活时网格不放大任何卡（见 `poster_grid.slint`）。
     in property <bool> nav-active: false;
+    // 键盘焦点层（体检 R2-2b）：`nav-focus` 是顶栏焦点下标（-1 = 不在顶栏）；
+    // `content-focused` = 结果网格是否持有键盘焦点（焦点跑到顶栏时不再放大卡片）。
+    in property <int> nav-focus: -1;
+    in property <bool> content-focused: true;
     // 搜索框文本：与 AppWindow 双向同步（回填当前查询词）。
     in-out property <string> search-text;
     // 搜索输入框的真实焦点状态（顶栏用；由 `app.slint` 绑定到 `root.search-focused`）。
@@ -377,7 +381,7 @@ export component SearchPage inherits Rectangle {
                 width: parent.width;
                 target-prefix: "search.";
                 targets-visible: root.data.state == 2;
-                nav-active: root.nav-active;
+                nav-active: root.nav-active && root.content-focused;
                 columns: root.columns;
                 grid-top: root.grid-top;
                 // 放大覆盖层不许盖住结果头：上边界就是第一行卡片的顶边
@@ -400,6 +404,11 @@ export component SearchPage inherits Rectangle {
     out property <length> probe-focus-top: grid.probe-focus-top + results.content-y;
     out property <length> probe-focus-bottom: grid.probe-focus-bottom + results.content-y;
     out property <bool> probe-zoom-on: grid.probe-zoom-on;
+    // 顶栏键盘焦点的几何探针（`navbar.slint` 的 `probe-*` 转发）。
+    out property <length> probe-focus-tab-left: nav.probe-focus-tab-left;
+    out property <length> probe-focus-tab-right: nav.probe-focus-tab-right;
+    out property <length> probe-tabs-viewport-w: nav.probe-tabs-viewport-w;
+    out property <length> probe-tabs-scroll-x: nav.probe-tabs-scroll-x;
 
     // ---- Empty：没有命中 ----
     if (root.data.state == 3) :
@@ -445,6 +454,7 @@ export component SearchPage inherits Rectangle {
         show-search: false;
         target-prefix: "search.";
         targets-visible: root.visible;
+        focus-index: root.nav-focus;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {

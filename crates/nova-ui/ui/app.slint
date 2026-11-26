@@ -118,6 +118,26 @@ export component AppWindow inherits Window {
     // 它只在指针悬停或真的按了方向键之后才放大。所以这里加一道"导航已激活"的门。
     // 换页时复位，回到"没有放大"的干净状态。
     in-out property <bool> nav-active: false;
+    // ---- 键盘焦点层（体检 R2-2b）----
+    //
+    // 纯键盘 / 遥控器要能到达顶栏（库标签 / 搜索）与首页 hero 的两个按钮。
+    // 内容层的扁平焦点不变，上面叠两层"chrome"：
+    //
+    // ```
+    //   顶栏（2）  ← / → 在 标签 0..N → 搜索按钮 之间移动，Enter 激活，↓ 回下一层
+    //     ↑↓
+    //   hero（1）  首页 billboard 的「▶ 播放」/「更多信息」，← / → 切换，Enter 激活
+    //     ↑↓
+    //   内容（0）  卡片 / 网格（原来的扁平焦点）
+    // ```
+    //
+    // 只有键盘导航能进入这两层（鼠标点击不会让 `focus-layer` 非 0），所以焦点环
+    // 不会因为鼠标点击而留下来；Esc 在任何 chrome 层只回内容层，不返回上一页。
+    in-out property <int> focus-layer: 0;
+    // 顶栏焦点下标：`0..标签数-1` = 库标签，`标签数` = 搜索按钮，`-1` = 不在顶栏。
+    in-out property <int> nav-focus: -1;
+    // 首页 hero 按钮行的焦点（0 = 播放、1 = 更多信息，-1 = 不在 hero 层）。
+    in-out property <int> hero-focus: -1;
     changed page => {
         root.nav-active = false;
         // 换页还要把键盘焦点还给全局 `keyboard` FocusScope（R2-1：`keyboard` 是页面
@@ -259,7 +279,10 @@ export component AppWindow inherits Window {
                 }
                 // 任何键都算一次输入：立刻显示控制层并重置 3 秒计时。
                 root.player-input();
-                if (event.text == Key.Space || event.text == "k" || event.text == "K") {
+                // 字母键一律要求**没有按住 Ctrl**：Ctrl+F / Ctrl+N 是全局快捷键，
+                // 不能被播放页的 f / k / m / a / s 吞掉（体检 R5-3）。
+                if (!event.modifiers.control
+                    && (event.text == Key.Space || event.text == "k" || event.text == "K")) {
                     root.player-key(1);
                     return accept;
                 }
@@ -279,19 +302,19 @@ export component AppWindow inherits Window {
                     root.player-key(7);
                     return accept;
                 }
-                if (event.text == "m" || event.text == "M") {
+                if (!event.modifiers.control && (event.text == "m" || event.text == "M")) {
                     root.player-key(8);
                     return accept;
                 }
-                if (event.text == "a" || event.text == "A") {
+                if (!event.modifiers.control && (event.text == "a" || event.text == "A")) {
                     root.player-key(9);
                     return accept;
                 }
-                if (event.text == "s" || event.text == "S") {
+                if (!event.modifiers.control && (event.text == "s" || event.text == "S")) {
                     root.player-key(10);
                     return accept;
                 }
-                if (event.text == "f" || event.text == "F") {
+                if (!event.modifiers.control && (event.text == "f" || event.text == "F")) {
                     root.player-key(11);
                     return accept;
                 }
@@ -394,6 +417,9 @@ export component AppWindow inherits Window {
                 billboard-ratio: root.billboard-ratio;
                 focus-index <=> root.home-focus;
                 nav-active: root.nav-active;
+                content-focused: root.focus-layer == 0;
+                hero-focus: root.nav-active && root.focus-layer == 1 ? root.hero-focus : -1;
+                nav-focus: root.nav-active && root.focus-layer == 2 ? root.nav-focus : -1;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
@@ -442,6 +468,8 @@ export component AppWindow inherits Window {
                 data: root.library;
                 focus-index <=> root.library-focus;
                 nav-active: root.nav-active;
+                content-focused: root.focus-layer == 0;
+                nav-focus: root.nav-active && root.focus-layer == 2 ? root.nav-focus : -1;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 open-item(id) => {
@@ -511,6 +539,8 @@ export component AppWindow inherits Window {
                 data: root.search-data;
                 focus-index <=> root.search-focus;
                 nav-active: root.nav-active;
+                content-focused: root.focus-layer == 0;
+                nav-focus: root.nav-active && root.focus-layer == 2 ? root.nav-focus : -1;
                 search-text <=> root.search-text;
                 search-focused: root.search-focused;
                 open-item(id) => {
@@ -737,6 +767,16 @@ export component AppWindow inherits Window {
     out property <int> add-server-focus: add-server.focus-field;
     out property <int> debug-nav-tabs: home-page.debug-nav-tabs;
     out property <length> home-content-h: home-page.content-h;
+    // 顶栏键盘焦点的几何探针（当前页的 `navbar.slint` 转发到这里）：
+    // 窄窗口下焦点移到被截断的标签上时，用它断言那个标签真的滚进了标签区。
+    out property <length> nav-focus-tab-left: root.page == 1 ? lib-page.probe-focus-tab-left
+        : root.page == 4 ? search-page.probe-focus-tab-left : home-page.probe-focus-tab-left;
+    out property <length> nav-focus-tab-right: root.page == 1 ? lib-page.probe-focus-tab-right
+        : root.page == 4 ? search-page.probe-focus-tab-right : home-page.probe-focus-tab-right;
+    out property <length> nav-tabs-viewport-w: root.page == 1 ? lib-page.probe-tabs-viewport-w
+        : root.page == 4 ? search-page.probe-tabs-viewport-w : home-page.probe-tabs-viewport-w;
+    out property <length> nav-tabs-scroll-x: root.page == 1 ? lib-page.probe-tabs-scroll-x
+        : root.page == 4 ? search-page.probe-tabs-scroll-x : home-page.probe-tabs-scroll-x;
 
     // “添加服务器”对话框：绝对定位覆盖层（不进布局器，关闭后零残留）。
     add-server := AddServerDialog {

@@ -28,15 +28,16 @@ printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 | `{"cmd":"tab","library":"<id>"}` | 切媒体库标签（空串=首页） |
 | `{"cmd":"search","term":"..."}` | 用本地缓存过滤首页（旧行为，兼容保留） |
 | `{"cmd":"search","term":"...","page":true}` | 进搜索页并把查询词填好（本地缓存立即出结果，同时打一次服务端搜索） |
-| `{"cmd":"screenshot","path":"/tmp/x.png"}` | 窗口自截（见下），**异步**：等 `view` 里看不到 pending 或直接等文件出现 |
+| `{"cmd":"screenshot","path":"/tmp/x.png"}` | 窗口自截（见下），**异步**：等文件出现；无显示器 / 锁屏时约 200ms 后自动改走离屏渲染，不必等帧回调 |
 | `{"cmd":"targets"}` | 当前页面的**可交互目标清单**（按钮 / 开关 / 输入框 / 卡片 / 标签 / 滑杆 / 滚动箭头） |
 | `{"cmd":"click","target":"library.sort"}` | 按名字点一个目标（发 `PointerMoved` → `PointerPressed` → `PointerReleased`） |
 | `{"cmd":"click","x":123,"y":45}` | 按窗口坐标点（验证"名字清单是否覆盖真实可点区域"） |
 | `{"cmd":"hover","target":"home.row.continue.card.0"}` | 只发 `PointerMoved`（验证悬停才出现的东西：音量滑杆、卡片放大、行箭头） |
 | `{"cmd":"scroll","x":400,"y":300,"dy":360}` | 在该坐标滚一下（先 `PointerMoved` 再 `PointerScrolled`），见下 |
 | `{"cmd":"scroll","target":"library.grid","dy":360,"dx":0}` | 同上，但坐标取目标中心（`target` 与 `x`/`y` 二选一） |
-| `{"cmd":"key","key":"Enter"}` | 发一次按键：`Enter` / `Escape` / `Left` / `Right` / `Up` / `Down` / `Space` / `Tab` / `Backspace` 或单个字符 |
-| `{"cmd":"type","text":"沙丘"}` | 逐字符输入（先 `click` 到输入框上，焦点在它那里才收得到） |
+| `{"cmd":"key","key":"Enter"}` | 发一次按键：`Enter` / `Escape` / `Left` / `Right` / `Up` / `Down` / `Space` / `Tab` / `Backspace` 或单个字符（含中文等非 ASCII 字符），直接送给**当前焦点**（不预点击） |
+| `{"cmd":"type","text":"沙丘"}` | 逐字符输入：每个字符作为按键事件直接送给**当前焦点**，不预点击（无输入目标的页面也不会落空） |
+| `{"cmd":"type","text":"沙丘","target":"search.input"}` | 同上，但先点一下 `target`（输入框不在当前焦点上时用；坐标按 `targets` 的最新登记） |
 | `{"cmd":"wait","ms":400}` | 在 UI 线程上**不阻塞**地等一段时间（动画 / 异步加载结算）|
 | `{"cmd":"sweep"}` | 对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化 |
 | `{"cmd":"dead"}` | `sweep` 的过滤版：只返回"点击后状态没有任何变化"的目标 |
@@ -136,6 +137,11 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 | 字段 | 含义 |
 |---|---|
 | `search_focused` | 顶栏搜索框是否真的持有焦点（Ctrl+F / 点击搜索后的交接态） |
+| `focus_layer` | 键盘焦点层：`content` / `hero` / `navbar`（体检 R2-2b）。纯键盘 / 遥控器能不能到顶栏与 hero 按钮看它 |
+| `nav_focus` | 顶栏焦点下标：`0..nav_tabs-1` = 库标签，`nav_tabs` = 搜索按钮，`-1` = 不在顶栏 |
+| `hero_focus` | hero 按钮行的焦点：`0` = 「▶ 播放」，`1` = 「更多信息」（只在 `focus_layer == "hero"` 时有意义） |
+| `nav_tabs` / `home.hero_item` / `home.hero_overview_len` | 顶栏标签个数；hero 的条目 id 与简介字符数（简介为 0 时 hero 没有两个按钮，`↑` 会跳过 hero 层直接去顶栏——不是 bug） |
+| `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签在标签区视口里的左右沿与标签区滚动量：窄窗口下 `0 ≤ left && right ≤ viewport_w` 就是“焦点标签已经滚入可见区” |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |
 | `dialog.open` / `address` / `user` / `password_len` / `error` | 「添加服务器」对话框的字段与错误文案；**密码只报字符长度**，不回显明文 |
 | `player.audio_track` / `player.subtitle_track` | 当前选中的音轨 / 字幕轨：`{"index": <mpv aid/sid>, "label": "…"}`；`null` = 字幕「关闭」或引擎还没枚举到轨道 |
@@ -164,11 +170,23 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 nova-desktop --screenshot /tmp/out.png --screenshot-delay 8000
 ```
 
-走 `glReadPixels` 回读自己的 back buffer（与播放捕获同一条路径），所以：
+两条路径，都只拍 Nova 自己的窗口（不截屏、不碰用户桌面）：
+
+1. **有帧回调时**走 `glReadPixels` 回读自己的 back buffer（与播放捕获同一条路径），
+   读到的是窗口那一刻真实显示的内容。
+2. **等不到帧回调时**（无显示器 / 锁屏 / 窗口被完全遮挡：Wayland 合成器不下发
+   `wl_surface.frame`，`request_redraw()` 是空操作）宽限 200ms（两个帧周期）后改走
+   `slint::Window::take_snapshot()`：离屏渲染同一帧再读回像素。这条路**不需要任何**
+   帧回调，也不需要截屏协议；视频画面（`BorrowedOpenGLTexture`）照样合成在图中。
+
+所以：
 
 - **不依赖 screencopy 协议**（这台机器的 KDE 没有，`grim` 直接失败）
 - **不会抓到别人的窗口**（`spectacle -a` 抓的是"活动窗口"，会截到用户正在播的视频）
-- **不抢焦点、不碰用户屏幕**
+- **不抢焦点、不碰用户屏幕**（离屏路径连 present 都不做）
+- **没有显示器也能截**（当前机器的 HDMI 拔掉、只剩无输出的会话时就是这条路径）
+
+调试通道的 `screenshot` 命令与它完全同一条实现（同样有 200ms 宽限 + 离屏兜底）。
 
 `--screenshot-delay` 是必需的：库标签要等后台刷新完成才出现，1.5s 时只能看到「首页 + 全部」，
 看完整标签给 8000。

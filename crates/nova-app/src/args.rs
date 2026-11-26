@@ -30,7 +30,7 @@ nova-desktop — Nova 桌面应用（SQLite 缓存 + provider + 图片缓存 + S
   --item <id>                           指定详情/播放页的条目 id
   --source <id>                         --play 时指定播放版本（默认第一个）
   --capture <path.png>                  --play 的捕获模式（退出码 0 通过 / 3 不通过）
-  --screenshot <path.png>               窗口自截：回读自己的 back buffer 写 PNG 后退出
+  --screenshot <path.png>               窗口自截：截自己的窗口写 PNG 后退出（无显示器 / 锁屏也能截）
   --screenshot-delay <ms>               自截前等多久（默认 1500；要看刷新后的标签就给 8000）
   --window-size <WxH>                   窗口逻辑尺寸（如 1920x1080；默认 1280x800）
   --debug-socket <path>                 本地调试通道（Unix socket，行分隔 JSON；见 docs/debugging.md）
@@ -133,7 +133,8 @@ pub struct Cli {
     pub seconds: f64,
     /// `--max-first-frame`（首帧预算，秒）。
     pub max_first_frame: f64,
-    /// `--screenshot <path>`：窗口自截（glReadPixels 回读自己的 back buffer）。
+    /// `--screenshot <path>`：窗口自截（有帧回调时 `glReadPixels` 回读 back buffer，
+    /// 没有时报 200ms 后改走 `take_snapshot()` 离屏渲染）。
     pub screenshot: Option<PathBuf>,
     /// `--screenshot-delay <ms>`：等待多久再截（等首帧/数据加载）。
     pub screenshot_delay_ms: u64,

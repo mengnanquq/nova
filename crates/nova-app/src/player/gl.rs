@@ -9,10 +9,60 @@
 //! 块里把 `*const c_void` 转成逐字对应 GL 规范签名的函数指针。
 //!
 //! 回读时机与 `spikes/slint-mpv-gl` 一致：`RenderingState::AfterRendering`（Slint 已经把整帧
-//! 画进 back buffer、还没 present），此时读到的是**窗口上真实显示的内容**，而不是
-//! `take_snapshot()` 的离屏结果。
+//! 画进 back buffer、还没 present），此时读到的是**窗口上真实显示的内容**。
+//!
+//! 这条路径依赖合成器给帧回调。没有显示器 / 锁屏时 Wayland 合成器根本不下发
+//! `wl_surface.frame`，`request_redraw()` 变成空操作（实测整个进程只有首帧一次
+//! `AfterRendering`），回读永远等不到。所以截图先给 [`SHOT_FRAME_TIMEOUT`] 的宽限期，
+//! 超时就改走 `slint::Window::take_snapshot()`（离屏渲染同一条渲染管线，见
+//! [`Frame::from_pixel_buffer`]），不需要任何帧回调或截屏协议。
 
 use std::ffi::{CStr, c_int, c_void};
+use std::time::{Duration, Instant};
+
+use i_slint_core::graphics::{Rgba8Pixel, SharedPixelBuffer};
+
+/// 等 `AfterRendering` 回读的宽限期：两个 60Hz 帧周期。
+///
+/// 有显示器时合成器每帧都回调，几十毫秒内就拿得到；超出这个时长还没帧，
+/// 说明合成器不再给帧回调（无显示器 / 锁屏 / 窗口被遮挡），改成自己离屏渲染。
+pub(crate) const SHOT_FRAME_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// 发起截图后过了 `elapsed` 仍未等到 `AfterRendering`（纯函数，便于单测）。
+pub(crate) fn shot_deadline_passed(elapsed: Duration) -> bool {
+    elapsed >= SHOT_FRAME_TIMEOUT
+}
+
+/// 一次截图请求的等待状态。
+///
+/// 先等帧回调（`glReadPixels` 读的是窗口真实 back buffer），等不到再改道生效一次
+/// `take_snapshot()`（离屏渲染，不需要合成器配合）。
+pub(crate) struct ShotWait {
+    started: Instant,
+    snapshot_tried: bool,
+}
+
+impl ShotWait {
+    /// 从此刻开始计时。
+    pub(crate) fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            snapshot_tried: false,
+        }
+    }
+
+    /// 是否该改走 `take_snapshot()`：宽限期已过且还没改过道（同一个请求只返回一次 `true`）。
+    pub(crate) fn snapshot_due(&mut self, now: Instant) -> bool {
+        if self.snapshot_tried {
+            return false;
+        }
+        if !shot_deadline_passed(now.saturating_duration_since(self.started)) {
+            return false;
+        }
+        self.snapshot_tried = true;
+        true
+    }
+}
 
 /// `glPixelStorei(GL_PACK_ALIGNMENT, 1)`。
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
@@ -95,6 +145,47 @@ impl PixelStats {
     /// 是否像一段真实画面（全黑 / 纯色画面不算）。
     pub(crate) fn looks_like_video(&self) -> bool {
         self.mean_luma > 8.0 && self.variance > 100.0
+    }
+}
+
+impl Frame {
+    /// 从 `Window::take_snapshot()` 的像素缓冲构造一帧。
+    ///
+    /// 缓冲的行序已经是自顶向下（PNG 顺序），不需要像 `glReadPixels` 那样翻行；
+    /// 像素是 GL 上下文里同一份场景的离屏渲染结果（视频纹理也照常合成）。
+    pub(crate) fn from_pixel_buffer(
+        buffer: &SharedPixelBuffer<Rgba8Pixel>,
+    ) -> Result<Self, String> {
+        let width = buffer.width();
+        let height = buffer.height();
+        if width == 0 || height == 0 {
+            return Err(format!("离屏渲染尺寸非法：{width}x{height}"));
+        }
+        let pixels = buffer.as_slice();
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| format!("离屏渲染尺寸 {width}x{height} 溢出 usize"))?;
+        if pixels.len() != expected {
+            return Err(format!(
+                "离屏渲染像素数 {} 与 {width}x{height}={expected} 不符",
+                pixels.len()
+            ));
+        }
+        let mut rgba = Vec::with_capacity(
+            expected
+                .checked_mul(4)
+                .ok_or_else(|| format!("离屏渲染字节数 {expected}x4 溢出 usize"))?,
+        );
+        for pixel in pixels {
+            rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        let stats = PixelStats::from_rgba(&rgba);
+        Ok(Self {
+            width,
+            height,
+            rgba,
+            stats,
+        })
     }
 }
 
@@ -231,6 +322,80 @@ mod tests {
         let stats = PixelStats::from_rgba(&[0u8; 16]);
         assert_eq!(stats.mean_luma, 0.0);
         assert!(!stats.looks_like_video());
+    }
+
+    #[test]
+    fn shot_deadline_boundaries() {
+        assert!(!shot_deadline_passed(Duration::ZERO));
+        assert!(!shot_deadline_passed(
+            SHOT_FRAME_TIMEOUT - Duration::from_millis(1)
+        ));
+        assert!(shot_deadline_passed(SHOT_FRAME_TIMEOUT));
+        assert!(shot_deadline_passed(
+            SHOT_FRAME_TIMEOUT + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn shot_wait_falls_back_once() {
+        let mut wait = ShotWait::start();
+        let start = wait.started;
+        // 宽限期内不改道（有显示器时这条路能直接回读）。
+        assert!(!wait.snapshot_due(start + Duration::from_millis(50)));
+        // 宽限期到了就改道，且只改一次。
+        assert!(wait.snapshot_due(start + SHOT_FRAME_TIMEOUT));
+        assert!(!wait.snapshot_due(start + SHOT_FRAME_TIMEOUT));
+        assert!(!wait.snapshot_due(start + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn snapshot_buffer_converts_to_frame() {
+        let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(2, 2);
+        let colors = [
+            Rgba8Pixel {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            Rgba8Pixel {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+            Rgba8Pixel {
+                r: 200,
+                g: 100,
+                b: 50,
+                a: 255,
+            },
+            Rgba8Pixel {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+        ];
+        buffer.make_mut_slice().copy_from_slice(&colors);
+
+        let frame = Frame::from_pixel_buffer(&buffer).expect("2x2 缓冲应当转换成功");
+        assert_eq!((frame.width, frame.height), (2, 2));
+        // 行序保持自顶向下（不像 glReadPixels 那样需要翻行）。
+        assert_eq!(
+            frame.rgba,
+            vec![
+                0, 0, 0, 255, 10, 20, 30, 255, 200, 100, 50, 255, 255, 255, 255, 255
+            ]
+        );
+        assert!(frame.stats.mean_luma > 8.0);
+        assert!((frame.stats.non_black_ratio - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_snapshot_buffer_is_rejected() {
+        let buffer = SharedPixelBuffer::<Rgba8Pixel>::new(0, 0);
+        assert!(Frame::from_pixel_buffer(&buffer).is_err());
     }
 
     #[test]

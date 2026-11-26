@@ -18,6 +18,10 @@ export component LibraryPage inherits Rectangle {
     // 用户是否已开始导航；未激活时网格不放大任何卡（见 `poster_grid.slint`）。
     in property <bool> nav-active: false;
     in property <bool> search-focused: false;
+    // 键盘焦点层（体检 R2-2b）：`nav-focus` 是顶栏焦点下标（-1 = 不在顶栏）；
+    // `content-focused` = 内容网格是否持有键盘焦点（焦点跑到顶栏时不再放大卡片）。
+    in property <int> nav-focus: -1;
+    in property <bool> content-focused: true;
     // 搜索框文本（与 AppWindow 双向同步）。
     in-out property <string> search-text;
 
@@ -180,7 +184,7 @@ export component LibraryPage inherits Rectangle {
                     width: parent.width;
                     target-prefix: "library.";
                     targets-visible: !root.data.empty;
-                    nav-active: root.nav-active;
+                    nav-active: root.nav-active && root.content-focused;
                     columns: root.columns;
                     grid-top: root.grid-y;
                     cards: root.data.cards;
@@ -202,6 +206,11 @@ export component LibraryPage inherits Rectangle {
     out property <length> probe-focus-top: grid.probe-focus-top + grid-flick.content-y;
     out property <length> probe-focus-bottom: grid.probe-focus-bottom + grid-flick.content-y;
     out property <bool> probe-zoom-on: grid.probe-zoom-on;
+    // 顶栏键盘焦点的几何探针（`navbar.slint` 的 `probe-*` 转发）。
+    out property <length> probe-focus-tab-left: nav.probe-focus-tab-left;
+    out property <length> probe-focus-tab-right: nav.probe-focus-tab-right;
+    out property <length> probe-tabs-viewport-w: nav.probe-tabs-viewport-w;
+    out property <length> probe-tabs-scroll-x: nav.probe-tabs-scroll-x;
 
     if (root.data.empty) :
         EmptyState {
@@ -228,6 +237,7 @@ export component LibraryPage inherits Rectangle {
         scrolled: !root.data.empty && grid-flick.content-y < -40px;
         target-prefix: "library.";
         targets-visible: root.visible;
+        focus-index: root.nav-focus;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {

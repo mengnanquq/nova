@@ -22,7 +22,9 @@ pub mod viewmodel;
 
 slint::include_modules!();
 
-pub use pages::{App, ImageStore, KeyCommand, Page, PlayerKey, SweepEntry, SweepReport};
+pub use pages::{
+    App, FocusLayer, ImageStore, KeyCommand, Page, PlayerKey, SweepEntry, SweepReport,
+};
 pub use viewmodel::{
     AUTO_HIDE_DELAY, AddServerError, AddServerErrorKind, AddServerState, AddServerView, BannerData,
     BannerLevel, CardView, DetailView, HomeView, ImageKey, ImageKind, LibraryRowView, LibraryTab,

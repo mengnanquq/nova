@@ -14,6 +14,7 @@ import { Navbar } from "navbar.slint";
 import { PosterCard } from "poster_card.slint";
 import { CardZoom } from "card_zoom.slint";
 import { EmptyState } from "empty_state.slint";
+import { FocusRing } from "focus_ring.slint";
 
 // 一行卡片：标题 + 横向滚动 + 放大覆盖层 + 行左右箭头。
 //
@@ -443,6 +444,16 @@ export component HomePage inherits Rectangle {
     // 搜索框文本（与 AppWindow 双向同步）。
     in-out property <string> search-text;
 
+    // ---- 键盘焦点层（体检 R2-2b）----
+    // `hero-focus` 是 hero 按钮行的焦点（0 = 播放、1 = 更多信息，-1 = 不在 hero 层）；
+    // `nav-focus` 是顶栏的焦点下标（-1 = 不在顶栏）。两者都由 `AppWindow` 按当前
+    // 焦点层门控后传进来，鼠标操作不会进入这两层。
+    in property <int> hero-focus: -1;
+    in property <int> nav-focus: -1;
+    // 内容层是否持有键盘焦点：顶栏 / hero 层持有焦点时不再放大内容卡片，
+    // 否则画面会同时出现两处焦点指示（放大卡 + 焦点环），分不清键盘焦点在哪。
+    in property <bool> content-focused: true;
+
     callback open-item(string);
     callback hero-play();
     callback tab-activated(string);
@@ -462,6 +473,11 @@ export component HomePage inherits Rectangle {
     // 这里的声明式数组只留"页面直接摆放且常驻"的控件——首页目前没有。
     out property <[Target]> targets: [];
     out property <int> debug-nav-tabs: nav.tabs.length;
+    // 顶栏键盘焦点的几何探针（`navbar.slint` 的 `probe-*` 转发）。
+    out property <length> probe-focus-tab-left: nav.probe-focus-tab-left;
+    out property <length> probe-focus-tab-right: nav.probe-focus-tab-right;
+    out property <length> probe-tabs-viewport-w: nav.probe-tabs-viewport-w;
+    out property <length> probe-tabs-scroll-x: nav.probe-tabs-scroll-x;
 
     /// 把焦点交给搜索输入框（Ctrl+F / 点击搜索图标时由上层调到这里）。
     public function focus-input() {
@@ -808,6 +824,17 @@ export component HomePage inherits Rectangle {
                                         root.hero-play();
                                     }
                                 }
+
+                                // 键盘焦点环（体检 R2-2b）：只有方向键进入 hero 层时
+                                // `hero-focus` 才为 0（鼠标悬停/点击不会点亮它）。
+                                FocusRing {
+                                    x: -Theme.focus-offset;
+                                    y: -Theme.focus-offset;
+                                    width: parent.width + Theme.focus-offset * 2;
+                                    height: parent.height + Theme.focus-offset * 2;
+                                    ring-radius: Theme.radius-button + Theme.focus-offset;
+                                    active: root.nav-active && root.hero-focus == 0;
+                                }
                             }
 
                             // ⓘ 更多信息：半透明白底。
@@ -886,6 +913,16 @@ export component HomePage inherits Rectangle {
                                         root.open-item(root.data.hero.id);
                                     }
                                 }
+
+                                // 同上：`hero-focus == 1` = 键盘焦点在「更多信息」上。
+                                FocusRing {
+                                    x: -Theme.focus-offset;
+                                    y: -Theme.focus-offset;
+                                    width: parent.width + Theme.focus-offset * 2;
+                                    height: parent.height + Theme.focus-offset * 2;
+                                    ring-radius: Theme.radius-button + Theme.focus-offset;
+                                    active: root.nav-active && root.hero-focus == 1;
+                                }
                             }
                             }
                         }
@@ -927,7 +964,7 @@ export component HomePage inherits Rectangle {
                 title: "继续观看";
                 cards: root.data.continue-watching;
                 focused-index: root.continue-focus;
-                nav-active: root.nav-active;
+                nav-active: root.nav-active && root.content-focused;
                 open-item(id) => {
                     root.open-item(id);
                 }
@@ -946,7 +983,7 @@ export component HomePage inherits Rectangle {
                 portrait: true;
                 cards: root.data.recently-added;
                 focused-index: root.recent-focus;
-                nav-active: root.nav-active;
+                nav-active: root.nav-active && root.content-focused;
                 open-item(id) => {
                     root.open-item(id);
                 }
@@ -1006,6 +1043,7 @@ export component HomePage inherits Rectangle {
         scrolled: !root.data.empty && flick.content-y < -40px;
         target-prefix: "home.";
         targets-visible: root.visible;
+        focus-index: root.nav-focus;
         search-focused: root.search-focused;
         search-text <=> root.search-text;
         tab-activated(id) => {
