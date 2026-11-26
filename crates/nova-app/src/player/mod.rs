@@ -1293,10 +1293,31 @@ impl Player {
         let runtime = self.runtime.clone();
         self.host.borrow_mut().pause(&runtime);
         self.session.reset();
+        // 会话级的错误也属于这次播放：退出播放页必须一并收尾。只 `session.reset()`
+        // 不够——起播早退（没有服务器 / 条目不在缓存）走的是 `fail()` 设置的
+        // `self.error`，不清理就会一直被调试通道读成「当前错误」，进另一个条目的
+        // 详情页也还在（体检 R4-2）。
+        self.error = None;
+        self.auto_retry = 0;
+        self.retry_at = None;
+        // 轨道与选择同样是会话状态：不清的话 `fill_view` 会从 `self.tracks`
+        // 重新填出上一部片子的音轨 / 字幕列表。
+        self.selector.clear();
+        self.tracks = TrackSet::default();
+        self.selected_audio = None;
+        self.selected_subtitle = SubtitleSelection::Off;
         self.capture = None;
         self.request = None;
         self.target = None;
         self.pending = None;
+        // 界面视图也复位：标题 / 进度 / 时长 / 轨道 / 错误都随会话结束。
+        // 音量与静音是用户偏好，`reset_session` 会保留。
+        let mut view = self
+            .pending_view
+            .take()
+            .unwrap_or_else(|| self.app.player_view());
+        view.reset_session();
+        self.pending_view = Some(view);
         self.dirty = true;
     }
 
@@ -1632,6 +1653,81 @@ mod tests {
         assert!(!view.playing);
         assert_eq!(view.rate, 1.0, "倍速随会话复位");
         assert_eq!(view.subtitle_delay, 0.0, "字幕延迟随会话复位");
+    }
+
+    /// 体检 R4-2：退出播放页必须把会话级错误一起收尾。
+    ///
+    /// 以前 `exit()` 只 `session.reset()`，`self.error`（起播早退 / 引擎错误）与轨道
+    /// 选择都留在播放器里；调试通道在另一个条目的详情页仍能读到上一会话的
+    /// `view.player.error`，回放菜单也会带着上一部的轨道。
+    #[test]
+    fn exit_clears_the_previous_sessions_error_and_session_state() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        // 不建服务器：这条用例只验证 `exit()` 的会话收尾，不需要 provider
+        // （有 provider 时 `Progress::flush()` 会走阻塞补发，那是生产路径，不是这里要测的）。
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let mut player = Player::new(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+
+        // 上一会话：界面停在 8:37 / 1:31:23，引擎早退错误 + 看门狗错误都在，
+        // 音轨 / 字幕选择也留着。
+        app.set_player(
+            &PlayerView::new("上一部")
+                .with_duration(Duration::from_secs(5483))
+                .with_position(Duration::from_secs(517))
+                .with_playing(true)
+                .with_error("连续 15 秒没有收到画面…", "重试")
+                .with_audio_tracks(vec![nova_ui::TrackItem::new(1, "国语").with_selected(true)]),
+        );
+        player.error = Some("连续 15 秒没有收到画面…".to_owned());
+        player
+            .session
+            .begin(Duration::from_secs(517), Some(Duration::from_secs(5483)));
+        player.session.fail(PlaybackError::Stalled);
+        player.tracks = TrackSet::new(vec![nova_core::MediaStream::audio(
+            1,
+            "eac3",
+            nova_core::AudioDetails {
+                channels: Some(2),
+                sample_rate: Some(48_000),
+                bitrate: None,
+                profile: None,
+            },
+            nova_core::Language::new("chi"),
+        )]);
+        player.selected_audio = Some(1);
+
+        player.exit(Duration::from_secs(517));
+
+        let view = player.live_view();
+        assert!(
+            view.error.is_none(),
+            "退出播放页后不能再报上一会话的错误：{:?}",
+            view.error
+        );
+        assert_eq!(view.title, "", "标题属于上一会话");
+        assert_eq!(view.position, Duration::ZERO);
+        assert_eq!(view.duration, None);
+        assert!(!view.playing);
+        assert!(view.audio_tracks.is_empty(), "轨道列表属于上一会话");
+        assert!(view.subtitle_tracks.is_empty());
     }
 
     /// 健康会话切换到新片子：在首帧到来之前，视图也不能闪现上一部片子的标题 /

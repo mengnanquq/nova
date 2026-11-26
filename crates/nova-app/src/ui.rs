@@ -32,7 +32,7 @@ use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
 use nova_ui::{
     AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
-    LibraryView, PlayerShellView, Route, SearchView, TargetInfo,
+    LibraryView, PlayerShellView, Route, SearchView, TargetInfo, TrackItem,
 };
 use slint::ComponentHandle;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -624,6 +624,9 @@ impl Shell {
                         ui.get_search_focus(),
                     ],
                     "nav_active": ui.get_nav_active(),
+                    // 顶栏搜索框是否真的拿到了焦点（Ctrl+F / 点击搜索后的交接态）。
+                    // 以前只能靠输入字符是否落到框里间接判断（体检第二、三轮）。
+                    "search_focused": ui.get_search_focused(),
                     // 网格滚动 / 焦点卡几何（`ui/library.slint`、`ui/search.slint` 的
                     // `probe-*`）：验证"方向键移动焦点后网格自动滚动、焦点卡完全
                     // 可见、有放大指示"。`focus_top/bottom` 是**视口相对**坐标
@@ -679,6 +682,8 @@ impl Shell {
                     "detail": state.detail.as_ref().map(|view| serde_json::json!({
                         "item": view.item_id,
                         "title": view.title,
+                        // 是否已在「我的列表」（以界面属性为准：切换是即时生效的）。
+                        "in_my_list": ui.get_detail_in_my_list(),
                         // 版本下拉：谁被选中（验证"选了版本再去播"是否真的生效）。
                         "sources": view.sources.iter().map(|source| serde_json::json!({
                             "id": source.source_id,
@@ -708,7 +713,19 @@ impl Shell {
                         "subtitle_menu": view.subtitle_menu_open,
                         "position_ms": view.position.as_millis() as u64,
                         "error": view.error,
+                        // 当前选中的音轨 / 字幕轨（引擎编号 + 菜单里的标签）。
+                        // `null` = 没有选中（字幕关闭）或引擎还没枚举到轨道。
+                        "audio_track": selected_track_probe(&view.audio_tracks),
+                        "subtitle_track": selected_track_probe(&view.subtitle_tracks),
                     })),
+                    // 「添加服务器」对话框：密码只给长度，不回显明文。
+                    "dialog": dialog_probe(
+                        ui.get_add_server_open(),
+                        ui.get_add_server_address().as_str(),
+                        ui.get_add_server_user().as_str(),
+                        ui.get_add_server_password().as_str(),
+                        ui.get_add_server_error().as_str(),
+                    ),
                 })
             }
             Cmd::Route { value, item } => match value.as_str() {
@@ -1225,7 +1242,7 @@ impl Shell {
                     let view_term = term.clone();
                     // 写缓存后再建视图：海报下载要按 `ImageKey` 回查条目。
                     let built = tokio::task::spawn_blocking(move || {
-                        if let Err(error) = build_local.cache_items(&items) {
+                        if let Err(error) = build_local.cache_search_items(&items) {
                             tracing::warn!(%error, "搜索结果写缓存失败");
                         }
                         views::search_view_from_items(&view_term, &items).with_total(total)
@@ -1992,6 +2009,40 @@ fn target_json(target: &TargetInfo) -> serde_json::Value {
     })
 }
 
+/// `view.player` 的当前轨道探针：选中项的引擎编号（mpv 的 `aid` / `sid`）与标签。
+///
+/// `null` 表示没有选中（字幕“关闭”）或引擎还没枚举到轨道。以前选择状态只能
+/// 从菜单行 label 猜，“字幕轨再进同一部片是否保留”没法直接验证（体检第四轮）。
+fn selected_track_probe(tracks: &[TrackItem]) -> serde_json::Value {
+    match tracks.iter().find(|track| track.selected) {
+        Some(track) => serde_json::json!({
+            "index": track.index,
+            "label": track.label,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// `view.dialog`：添加服务器对话框的探针。
+///
+/// 密码**只给长度**（按字符数，不是字节数）：回包会进脚本与日志，回显明文
+/// 等于把凭据写出去。
+fn dialog_probe(
+    open: bool,
+    address: &str,
+    user: &str,
+    password: &str,
+    error: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "open": open,
+        "address": address,
+        "user": user,
+        "password_len": password.chars().count(),
+        "error": error,
+    })
+}
+
 /// 调试命令里的键名 → Slint 的按键文本。
 ///
 /// 命名键之外只接受**单个字符**（`"k"` / `"m"` / `"沙"` 这类）。
@@ -2321,5 +2372,55 @@ mod tests {
         assert_ne!(old_way.id, "lib-anime");
         assert_ne!(old_way.title, "动画电影", "修复前页面标题会变成「首页」");
         assert_eq!(old_way.sort_label, views::LibrarySort::default().label());
+    }
+
+    // ---- 调试通道 `view` 的序列化（体检第四轮的工具缺口）----
+
+    #[test]
+    fn view_player_reports_the_selected_tracks() {
+        use nova_ui::TrackItem;
+
+        let audio = vec![
+            TrackItem::new(1, "国语 (EAC3)"),
+            TrackItem::new(2, "英语 (AAC)").with_selected(true),
+        ];
+        assert_eq!(
+            super::selected_track_probe(&audio),
+            serde_json::json!({ "index": 2, "label": "英语 (AAC)" }),
+            "音轨探针要给出选中项的引擎编号与标签"
+        );
+
+        // 字幕选“关闭”时没有任何选中项，而且空列表也不能编出一个假轨道。
+        let subtitles = vec![TrackItem::new(3, "简体中文 (SRT)")];
+        assert_eq!(
+            super::selected_track_probe(&subtitles),
+            serde_json::Value::Null
+        );
+        assert_eq!(super::selected_track_probe(&[]), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn view_dialog_reports_only_the_password_length() {
+        let probe = super::dialog_probe(
+            true,
+            "http://127.0.0.1:8096",
+            "alice",
+            "pässwörd",
+            "地址不可达",
+        );
+        assert_eq!(probe["open"], true);
+        assert_eq!(probe["address"], "http://127.0.0.1:8096");
+        assert_eq!(probe["user"], "alice");
+        assert_eq!(
+            probe["password_len"], 8,
+            "密码长度按字符数算（不是 UTF-8 字节数）"
+        );
+        assert_eq!(probe["error"], "地址不可达");
+        let text = probe.to_string();
+        assert!(!text.contains("pässwörd"), "回包里不能有明文密码：{text}");
+        assert!(
+            !text.contains("\"password\""),
+            "只允许 password_len：{text}"
+        );
     }
 }

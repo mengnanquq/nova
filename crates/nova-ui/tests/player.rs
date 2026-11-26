@@ -107,6 +107,32 @@ fn s_opens_subtitle_menu_and_a_switches_to_audio_menu() {
 }
 
 #[test]
+fn navigating_away_from_the_player_route_still_exits_the_session() {
+    // 体检 R4-2：调试通道的 `route` / `open` 不走 Esc，但换页就是离开播放页，
+    // 会话必须先提交进度并收尾（否则 mpv 在后台continue，错误也会跟着留在
+    // `view.player` 里）。
+    let app = player_app();
+    let exits = Rc::new(RefCell::new(Vec::<Duration>::new()));
+    {
+        let exits = exits.clone();
+        app.on_player_exit(move |position| exits.borrow_mut().push(position));
+    }
+
+    assert!(app.open_detail("other"), "导航 API 应能直接打开另一条目");
+
+    assert_eq!(
+        exits.borrow().as_slice(),
+        &[Duration::from_secs(754)],
+        "直接换页也必须先退出播放会话，并带上最终进度"
+    );
+    assert_eq!(app.page(), Page::Detail);
+    assert!(!matches!(
+        app.current_route(),
+        Some(nova_ui::Route::Player { .. })
+    ));
+}
+
+#[test]
 fn escape_commits_progress_before_leaving_player() {
     let app = player_app();
 

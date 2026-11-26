@@ -620,6 +620,38 @@ mod tests {
         assert_eq!(ids, ["new-b", "new", "old", "none"]);
     }
 
+    /// 体检 R4-3 的前半：同一排序下，结果只能取决于**条目集合**，不能取决于
+    /// 输入顺序（SQL 返回顺序、刷新前后）。平局（同标题 / 缺年份）由 id 决出。
+    #[test]
+    fn sort_is_a_pure_function_of_the_item_set() {
+        let base = vec![
+            movie_with("b", "", "", None),
+            movie_with("a", "", "", None),
+            movie_with("c", "Same", "same", Some(2020)),
+            movie_with("d", "Same", "same", Some(2020)),
+            movie_with("e", "alpha", "", None),
+            movie_with("f", "Beta", "beta", Some(1999)),
+        ];
+        for sort in [
+            LibrarySort::TitleAsc,
+            LibrarySort::TitleDesc,
+            LibrarySort::YearDesc,
+        ] {
+            let ids = |items: &[MediaItem]| -> Vec<String> {
+                let mut items = items.to_vec();
+                sort.apply(&mut items);
+                items.into_iter().map(|item| item.id.to_string()).collect()
+            };
+            let forward = ids(&base);
+            let mut reversed = base.clone();
+            reversed.reverse();
+            assert_eq!(ids(&reversed), forward, "{sort:?} 不能依赖输入顺序");
+            let mut rotated = base.clone();
+            rotated.rotate_left(2);
+            assert_eq!(ids(&rotated), forward, "{sort:?} 不能依赖输入顺序");
+        }
+    }
+
     #[test]
     fn recently_added_keeps_the_database_order() {
         let mut items = vec![

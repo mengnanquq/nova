@@ -949,6 +949,7 @@ impl App {
 
     /// 打开详情：压栈、切页、通知上层填数据。
     pub fn open_detail(&self, item_id: &str) -> bool {
+        leave_player_before_navigating(&self.ui, &self.state);
         open_detail(&self.ui, &self.state, item_id)
     }
 
@@ -964,12 +965,14 @@ impl App {
 
     /// 回到首页并把导航栈重置为根。
     pub fn show_home(&self) {
+        leave_player_before_navigating(&self.ui, &self.state);
         self.state.borrow_mut().nav.reset(Route::Home);
         set_page(&self.ui, Page::Home);
     }
 
     /// 打开媒体库：刷新数据、压栈、切页。已经停在媒体库时不重复压栈。
     pub fn open_library(&self, view: &LibraryView) -> bool {
+        leave_player_before_navigating(&self.ui, &self.state);
         self.set_library(view);
         let mut state = self.state.borrow_mut();
         if !matches!(state.nav.current(), Some(Route::Library { .. })) {
@@ -985,6 +988,7 @@ impl App {
 
     /// 打开搜索页：刷新数据、压栈（已在搜索页时只更新栈顶查询词）、切页。
     pub fn open_search(&self, view: &SearchView) -> bool {
+        leave_player_before_navigating(&self.ui, &self.state);
         self.set_search(view);
         let mut state = self.state.borrow_mut();
         match state.nav.current() {
@@ -2324,6 +2328,18 @@ fn player_exit_or_close_menus(ui: &AppWindow, state: &Rc<RefCell<State>>) -> boo
         return true;
     }
     player_exit(ui, state)
+}
+
+/// 路由要离开播放页时，先把播放会话收尾。
+///
+/// 播放页的正常出口是 Esc / 左上返回（[`player_exit`]）；但导航 API 也能直接换页——
+/// 调试通道的 `route` / `open` / `tab` / `search` 就走 `open_detail` / `open_library` /
+/// `open_search` / `show_home`。会话不属于导航栈：不先收尾的话 mpv 会在后台继续播，
+/// 上一会话的错误也会留在 `view.player` 里（体检 R4-2）。
+fn leave_player_before_navigating(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    if matches!(state.borrow().nav.current(), Some(Route::Player { .. })) {
+        player_exit(ui, state);
+    }
 }
 
 /// `Esc`：先提交一次进度，再返回上一页（顺序是硬要求）。

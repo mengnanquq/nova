@@ -18,7 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nova_core::{AuthState, MediaItem, MediaSource, ServerId, ServerKind, UserPreferences};
+use nova_core::{
+    AuthState, MediaItem, MediaKind, MediaSource, ServerId, ServerKind, UserPreferences,
+};
 use nova_images::ImageCache;
 use nova_provider::{DeviceInfo, Flavor, Library, MediaProvider, Provider, ProviderConfig};
 use nova_secrets::CredentialStore;
@@ -320,7 +322,28 @@ impl Local {
         Ok(())
     }
 
+    /// 写搜索结果条目（幂等批量）。
+    ///
+    /// 与 [`Local::cache_items`]（列表刷新，媒体库归属的权威来源）的区别：搜索结果里
+    /// 的 `ParentId` 是服务端的**物理父项**（Emby 可能是子文件夹 / 合集，搜索响应
+    /// 甚至不带 `ParentId`），拿它覆盖缓存会让条目从当前媒体库消失（体检 R4-3）。
+    pub fn cache_search_items(&self, items: &[MediaItem]) -> Result<(), AppError> {
+        let Some(server) = self.server() else {
+            return Ok(());
+        };
+        let items: Vec<MediaItem> = items
+            .iter()
+            .map(|item| keep_library_membership(&self.db, &server.info.id, item))
+            .collect();
+        self.db
+            .upsert_items(&server.info.id, &items, nova_storage::unix_now())?;
+        Ok(())
+    }
+
     /// 写单条条目与它的可播放版本（详情页按需刷新用）。
+    ///
+    /// 详情接口给的 `ParentId` 是物理父项，不是媒体库归属；直接覆盖缓存会让条目
+    /// 从当前媒体库消失，返回时同一下标换成另一部片（体检 R4-3）。
     pub fn cache_item_and_sources(
         &self,
         item: &MediaItem,
@@ -329,9 +352,10 @@ impl Local {
         let Some(server) = self.server() else {
             return Ok(());
         };
+        let item = keep_library_membership(&self.db, &server.info.id, item);
         self.db.upsert_items(
             &server.info.id,
-            std::slice::from_ref(item),
+            std::slice::from_ref(&item),
             nova_storage::unix_now(),
         )?;
         self.db.upsert_sources(&server.info.id, sources)?;
@@ -454,6 +478,36 @@ impl Local {
     pub fn images_dir(&self) -> &Path {
         self.image_cache.dir()
     }
+}
+
+/// 详情 / 搜索结果写缓存时，保住列表刷新（`refresh`）建立的**媒体库归属**。
+///
+/// `MediaItem.parent_id` 在本应用里同时承担两件事：播放层级（集→季→剧集）与
+/// 媒体库归属（电影 / 剧集→库）。列表刷新按 `ParentId=<库>` 查询，写下的归属就是
+/// 事实；详情 / 搜索接口给的却是服务端的物理父项（Emby 里可能是子文件夹或合集，
+/// 搜索响应甚至不带 `ParentId`）。直接覆盖会让条目从当前媒体库消失：返回库时
+/// `scroll_y` 没变、同一下标却换成了另一部片（体检 R4-3）。
+///
+/// 季 / 集是真正的层级，仍跟随服务端（不能被这条规则挡住）。
+fn keep_library_membership(db: &Database, server: &ServerId, item: &MediaItem) -> MediaItem {
+    let mut item = item.clone();
+    if !matches!(item.kind, MediaKind::Movie | MediaKind::Series) {
+        return item;
+    }
+    if let Ok(Some(cached)) = db.item(server, &item.id)
+        && cached.parent_id.is_some()
+    {
+        if cached.parent_id != item.parent_id {
+            tracing::debug!(
+                item = item.id.as_str(),
+                cached = ?cached.parent_id,
+                fresh = ?item.parent_id,
+                "详情 / 搜索的父项与库归属不同，保留库归属"
+            );
+        }
+        item.parent_id = cached.parent_id;
+    }
+    item
 }
 
 /// 选出要操作的服务器；规则与 CLI 一致。
@@ -619,5 +673,130 @@ mod tests {
             .expect("构建媒体库");
         assert_eq!(library.cards.len(), 1);
         assert_eq!(library.title, "全部");
+    }
+
+    /// 把一部电影写进库 `lib-anime`（列表刷新建立的库归属），并返回打开的 `Local`。
+    fn local_with_library_movie(dir: &tempfile::TempDir) -> Local {
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&info("srv-a"), 1).expect("写服务器");
+            let mut item = movie("m1", "五等分的新娘＊");
+            item.parent_id = Some(nova_core::ItemId::new("lib-anime"));
+            db.upsert_items(&ServerId::new("srv-a"), &[item], 1)
+                .expect("写条目");
+        }
+        Local::open(&env, None).expect("打开状态目录")
+    }
+
+    /// 体检 R4-3：详情刷新回来的 `ParentId` 是物理父项（Emby 里可能是合集 / 子
+    /// 文件夹，本地根本没有这条），不能把列表刷新建立的库归属覆盖掉——否则条目
+    /// 从库里消失，返回时同一下标换成另一部片。
+    #[test]
+    fn detail_refresh_keeps_the_library_membership() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let local = local_with_library_movie(&dir);
+        let before = local
+            .library("lib-anime", None, views::LibrarySort::TitleAsc)
+            .expect("构建媒体库");
+        assert_eq!(before.cards.len(), 1);
+
+        let mut fresh = movie("m1", "五等分的新娘＊");
+        fresh.parent_id = Some(nova_core::ItemId::new("boxset-12675"));
+        local
+            .cache_item_and_sources(&fresh, &[])
+            .expect("写详情缓存");
+
+        let after = local
+            .library("lib-anime", None, views::LibrarySort::TitleAsc)
+            .expect("重建媒体库");
+        assert_eq!(
+            after.cards.len(),
+            1,
+            "详情刷新不能把条目踢出媒体库（R4-3 的同一下标换片）"
+        );
+        assert_eq!(after.cards[0].item_id, "m1");
+        assert_eq!(after.cards[0].title, "五等分的新娘＊");
+        let stored = local
+            .db
+            .item(&ServerId::new("srv-a"), &nova_core::ItemId::new("m1"))
+            .expect("读条目")
+            .expect("条目还在");
+        assert_eq!(
+            stored.parent_id.map(|id| id.as_str().to_owned()),
+            Some("lib-anime".to_owned()),
+            "服务端的物理父项不能覆盖库归属"
+        );
+    }
+
+    /// 同一族：搜索结果不带 `ParentId`（或带物理父项）时，也不能把库归属写成空 / 别的 id。
+    #[test]
+    fn search_results_keep_the_library_membership() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let local = local_with_library_movie(&dir);
+
+        // Emby 的搜索响应不带 `ParentId`：映射后 `parent_id` 是 `None`。
+        let hit = movie("m1", "五等分的新娘＊");
+        local.cache_search_items(&[hit]).expect("写搜索缓存");
+
+        // 直接看缓存：写成 NULL 时库查询会因为“库为空”退化为顶层列表，
+        // 卡片数仍然可能是 1——那会掩盖真正的归属丢失。
+        let stored = local
+            .db
+            .item(&ServerId::new("srv-a"), &nova_core::ItemId::new("m1"))
+            .expect("读条目")
+            .expect("条目还在");
+        assert_eq!(
+            stored.parent_id.map(|id| id.as_str().to_owned()),
+            Some("lib-anime".to_owned()),
+            "搜索不能清空列表刷新建立的库归属"
+        );
+
+        let after = local
+            .library("lib-anime", None, views::LibrarySort::TitleAsc)
+            .expect("重建媒体库");
+        assert_eq!(after.cards.len(), 1, "搜索不能把条目踢出媒体库");
+        assert_eq!(after.cards[0].item_id, "m1");
+    }
+
+    /// 层级（季 / 集）仍以服务端为准：这条规则只保电影 / 剧集的库归属。
+    #[test]
+    fn episode_parent_still_follows_the_server() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&info("srv-a"), 1).expect("写服务器");
+            let mut episode = movie("e1", "第 1 集");
+            episode.kind = MediaKind::Episode;
+            episode.parent_id = Some(nova_core::ItemId::new("season-1"));
+            db.upsert_items(&ServerId::new("srv-a"), &[episode], 1)
+                .expect("写条目");
+        }
+        let local = Local::open(&env, None).expect("打开状态目录");
+
+        let mut fresh = movie("e1", "第 1 集");
+        fresh.kind = MediaKind::Episode;
+        fresh.parent_id = Some(nova_core::ItemId::new("season-2"));
+        local
+            .cache_item_and_sources(&fresh, &[])
+            .expect("写详情缓存");
+
+        let stored = local
+            .db
+            .item(&ServerId::new("srv-a"), &nova_core::ItemId::new("e1"))
+            .expect("读条目")
+            .expect("条目还在");
+        assert_eq!(
+            stored.parent_id.map(|id| id.as_str().to_owned()),
+            Some("season-2".to_owned()),
+            "集的父项必须跟随服务端"
+        );
     }
 }
