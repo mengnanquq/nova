@@ -47,7 +47,7 @@ rsvg-convert -w 256 -h 256 -o packaging/appimage/nova.png packaging/appimage/nov
 ```bash
 $ ./dist/Nova-x86_64.AppImage --print-view --no-refresh
 status: 未连接服务器
-hint: 先在终端运行 nova login；本地缓存仍可浏览
+hint: 在应用内连接服务器（Ctrl+N，或首页「连接服务器」）；本地缓存仍可浏览
 hero: -
 tabs:
 continue: 0

@@ -613,6 +613,26 @@ impl Shell {
                     "ok": true,
                     "route": format!("{route:?}"),
                     "status": format!("{:?}", state.status),
+                    // 当前页焦点索引（键盘导航后在真机上验证焦点落点）。
+                    "focus": shell.app.focus_index(),
+                    // 网格滚动 / 焦点卡几何（`ui/library.slint`、`ui/search.slint` 的
+                    // `probe-*`）：验证"方向键移动焦点后网格自动滚动、焦点卡完全
+                    // 可见、有放大指示"。
+                    "library_geometry": {
+                        "scroll_y": ui.get_library_scroll_y(),
+                        "viewport_h": ui.get_library_viewport_h(),
+                        "focus_top": ui.get_library_focus_top(),
+                        "focus_bottom": ui.get_library_focus_bottom(),
+                        "zoom_on": ui.get_library_zoom_on(),
+                    },
+                    "search_geometry": {
+                        "scroll_y": ui.get_search_scroll_y(),
+                        "viewport_h": ui.get_search_viewport_h(),
+                        "focus_top": ui.get_search_focus_top(),
+                        "focus_bottom": ui.get_search_focus_bottom(),
+                        "zoom_on": ui.get_search_zoom_on(),
+                    },
+                    "detail_drop_open": ui.get_detail_drop_open(),
                     "home": {
                         "hero": state.home.hero.as_ref().map(|card| card.title.clone()),
                         "recent": state.home.recently_added.len(),
@@ -1205,6 +1225,17 @@ impl Shell {
         self.app.show_home();
     }
 
+    /// 搜索页「×」：清空关键词但留在搜索页（Esc 的“清空 + 回首页”见 [`Shell::clear_search`]）。
+    ///
+    /// 输入框与空视图已经由 `nova-ui` 侧换好（`App` 的 `search_clear_input` 回调）：
+    /// 这里只同步本层的搜索状态。留着旧视图会让晚到的海报重贴回旧结果。
+    /// 代次同样加一，清空前发出的请求回来时不能再把结果写回页面。
+    fn clear_search_input(&self) {
+        self.abort_search_debounce();
+        self.search_generation.fetch_add(1, Ordering::Relaxed);
+        self.state.borrow_mut().search = None;
+    }
+
     /// 取消上一次防抖任务。
     ///
     /// 句柄在任务正常结束后**保留**到下一次 `begin_search` / 清空 / 关窗：
@@ -1647,6 +1678,14 @@ fn install_callbacks(shell: &Rc<Shell>) {
         shell.app.on_search_clear(move || {
             if let Some(shell) = weak.upgrade() {
                 shell.clear_search();
+            }
+        });
+        // 搜索页的「×」（与 Esc 分开）：界面侧（`nova-ui`）已经清空输入框并贴上
+        // 空视图，这里只同步本层状态，别让晚到的海报把旧结果重贴回去。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_clear_input(move || {
+            if let Some(shell) = weak.upgrade() {
+                shell.clear_search_input();
             }
         });
         shell.app.on_search(|| {

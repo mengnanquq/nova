@@ -64,6 +64,18 @@ export component PosterGrid inherits Rectangle {
     // 内容区需要的总高度（含底部留白），页面据此设置 Flickable 的 content-height。
     out property <length> content-height: root.grid-top + root.row-count * root.row-height
         + Theme.space-8;
+    // ---- 探针（测试用：键盘焦点卡在内容坐标里的上下沿）----
+    // 页面把 Flickable 的滚动偏移也报出来，两者一起断言"焦点卡完全可见"。
+    out property <length> probe-focus-top: root.focus-index >= 0
+        && root.focus-index < root.cards.length
+        ? root.grid-top + floor(root.focus-index / root.columns) * root.row-height : -1px;
+    out property <length> probe-focus-bottom: root.focus-index >= 0
+        && root.focus-index < root.cards.length
+        ? root.grid-top + floor(root.focus-index / root.columns) * root.row-height
+            + root.card-height : -1px;
+    // 焦点卡上的放大覆盖层是否真的在画（键盘焦点的可见指示就是它）。
+    out property <bool> probe-zoom-on: root.zoom-index >= 0
+        && root.zoom-index < root.cards.length;
 
     // 宽度由页面给（本组件是普通 Rectangle，不是布局元素）。
     height: root.content-height;

@@ -65,6 +65,30 @@ export component LibraryPage inherits Rectangle {
         nav.focus-input();
     }
 
+    /// 键盘焦点移出可视区时，把网格滚到焦点卡**完全可见**。
+    ///
+    /// 由 Rust 在每次方向键移动之后调用（见 `pages/app.rs` 的 `move_focus_by`）：
+    /// 焦点数学在 Rust，滚动几何在 `.slint`，不把布局公式抄第二遍。
+    /// 可见性按"放大余量之后"的矩形算：键盘焦点的可见指示是 `CardZoom` 覆盖层，
+    /// 它比基础卡每边多 `Theme.zoom-allowance-y / 2`（见 `theme.slint`）。
+    public function scroll-to-index(index: int) {
+        if (index < 0 || index >= root.data.cards.length) {
+            return;
+        }
+        let pad = Theme.zoom-allowance-y / 2;
+        let top = grid.grid-top + floor(index / root.columns) * grid.row-height;
+        let bottom = top + grid.card-height;
+        // `content-y` 在向下滚动时为负（与 `grid-flick.content-y < -40px` 一致），
+        // 所以可视窗口是 `-content-y .. -content-y + height`。
+        let view-top = -grid-flick.content-y;
+        let max-y = max(0px, grid.content-height - grid-flick.height);
+        if (top - pad < view-top) {
+            grid-flick.content-y = -clamp(top - pad, 0px, max-y);
+        } else if (bottom + pad > view-top + grid-flick.height) {
+            grid-flick.content-y = -clamp(bottom + pad - grid-flick.height, 0px, max-y);
+        }
+    }
+
     background: Theme.bg;
 
     // 网格几何：用 `content-gutter`（≥1920 为 200px），列数按实测反推
@@ -169,6 +193,13 @@ export component LibraryPage inherits Rectangle {
                 height: grid.content-height;
             }
         }
+
+    // ---- 探针（测试用：键盘焦点卡是否真的在可视区内）----
+    out property <length> probe-scroll-y: grid-flick.content-y;
+    out property <length> probe-viewport-h: grid-flick.height;
+    out property <length> probe-focus-top: grid.probe-focus-top;
+    out property <length> probe-focus-bottom: grid.probe-focus-bottom;
+    out property <bool> probe-zoom-on: grid.probe-zoom-on;
 
     if (root.data.empty) :
         EmptyState {

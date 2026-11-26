@@ -256,12 +256,16 @@ const TOUCH_AREAS: &[Case] = &[
         coverage: Coverage::Targets(&["detail.back"]),
     },
     // ---- 播放页 ----
+    // 音量控件：一个 TouchArea 覆盖图标 + 滑杆，但**登记两个目标**——
+    // `player.mute`（喇叭 = 静音开关，恒存在）与 `player.volume`（展开后的滑杆，
+    // 收起时宽度 0 被清单过滤）。覆盖按图标（`player.mute`）断言，
+    // 滑杆见 `volume_slider_target_appears_only_while_expanded`。
     Case {
         file: "player_overlay.slint",
         component: "VolumeControl",
         entry: "area",
         pages: &["player"],
-        coverage: Coverage::Targets(&["player.volume"]),
+        coverage: Coverage::Targets(&["player.mute"]),
     },
     Case {
         file: "player_overlay.slint",
@@ -880,10 +884,122 @@ fn center_play_icon_is_clickable_when_paused() {
     assert_invariants("player-paused", &targets);
     assert!(target.width > 0.0 && target.height > 0.0);
 
+    // 矩形必须是**图标本身**，不是整个窗口：`player_overlay.slint` 曾把坐标写成
+    // `root.absolute-position/width/height`，登记出来是 1280×800、原点 0,0，
+    // `targets` / 递增扫描都看不出它其实是一枚中央图标（体检就会报“没有中央图标”）。
+    let (center_x, center_y) = target.center();
+    assert!(
+        (target.width - target.height).abs() < 0.5,
+        "中央图标应是正方形：{}×{}",
+        target.width,
+        target.height
+    );
+    assert!(
+        target.width < WINDOW_W / 2.0 && target.height < WINDOW_H / 2.0,
+        "中央图标的目标矩形不能被登记成整个窗口：{}×{}",
+        target.width,
+        target.height
+    );
+    assert!(
+        (center_x - WINDOW_W / 2.0).abs() < 2.0 && (center_y - WINDOW_H / 2.0).abs() < 2.0,
+        "中央图标应在窗口正中，实际中心 ({center_x}, {center_y})"
+    );
+
     // 点它必须切到"播放"状态（暂停 → 播放）。
-    app.ui().invoke_player_play_pause();
+    app.click_target("player.center-play").expect("点中央图标");
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
     assert!(app.player_view().playing, "点中央图标后应开始播放");
+}
+
+/// 点喇叭图标 = 静音 / 取消静音（不是“把音量降一档”），且静音态在目标清单里看得见。
+///
+/// 体检报告的“点喇叭 0.20→0.15→0.10”在 HEAD 上无法复现（另外核对了真实 mpv：
+/// 静音走的是 `mute` 属性，音量值本身不变）；这里把正确行为固化成回归测试，
+/// 同时保证调试通道能读到静音态。
+#[test]
+fn volume_icon_toggles_mute_without_touching_volume() {
+    let app = window();
+    app.set_player(&player_view().with_volume(0.4));
+    app.show_page(Page::Player);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    settle(&app, 80);
+    assert!(!app.player_view().muted);
+
+    app.click_target("player.mute")
+        .expect("喇叭图标必须是可点目标");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    assert!(app.player_view().muted, "点喇叭图标应切到静音");
+    assert!(
+        (app.player_view().volume - 0.4).abs() < f32::EPSILON,
+        "静音不能改动音量值：{}",
+        app.player_view().volume
+    );
+
+    let targets = settle(&app, 80);
+    let target = app.target("player.mute").expect("静音后仍有喇叭图标目标");
+    assert_eq!(
+        target.label, "取消静音",
+        "静音态必须在目标清单里可见：{targets:?}"
+    );
+
+    app.click_target("player.mute")
+        .expect("再点一次应能取消静音");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    assert!(!app.player_view().muted, "再点喇叭图标应取消静音");
+    assert!((app.player_view().volume - 0.4).abs() < f32::EPSILON);
+}
+
+/// 滑杆目标只在控件展开（hover）后存在：收起时它宽度为 0，清单里点不到。
+///
+/// 这一条把两种动作分开钉死：图标（`player.mute`）= 静音开关；展开的滑杆
+/// （`player.volume`）= 直接把音量设到点击位置。不分开的话，悬停后目标矩形
+/// 会突然变宽、中心点落到滑杆上，坐标点击就会“点喇叭却改了音量”。
+#[test]
+fn volume_slider_target_appears_only_while_expanded() {
+    let app = window();
+    app.set_player(&player_view().with_volume(0.4));
+    app.show_page(Page::Player);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    let targets = settle(&app, 80);
+    let mute = app
+        .target("player.mute")
+        .unwrap_or_else(|| panic!("收起时应有喇叭图标目标：{targets:?}"));
+    assert!(
+        app.target("player.volume").is_none(),
+        "收起时滑杆不可点，不应出现在清单里：{targets:?}"
+    );
+
+    // 悬停到图标上：控件向右展开，滑杆变成可点目标。
+    let (x, y) = mute.center();
+    let position = slint::LogicalPosition::new(x, y);
+    app.ui()
+        .window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+    let targets = settle(&app, 80);
+    let slider = app
+        .target("player.volume")
+        .unwrap_or_else(|| panic!("展开后应出现滑杆目标（清单：{:?}）", targets));
+    assert!(slider.width > 0.0, "展开后的滑杆必须有面积");
+    assert!(
+        slider.x >= mute.x + mute.width - 0.5,
+        "滑杆目标不能把喇叭图标包进去：slider.x={} mute.x={} width={}",
+        slider.x,
+        mute.x,
+        mute.width
+    );
+
+    // 点滑杆 = 设到百分比（不是切静音）。
+    app.click_target("player.volume").expect("点展开的滑杆");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+    assert!(!app.player_view().muted, "点滑杆不应切静音");
+    let volume = app.player_view().volume;
+    assert!(
+        volume > 0.2 && volume < 0.8,
+        "点滑杆中部应把音量设到中间偏上，实际 {volume}"
+    );
 }
 
 #[test]
@@ -1016,4 +1132,65 @@ fn row_more_opens_the_library_page() {
         ids.iter().any(|id| id == "lib-1"),
         "「查看全部」应当切到该行的库 lib-1，实际触发：{ids:?}"
     );
+}
+
+/// 聚合行（「继续观看」「最近添加」）没有对应的媒体库页：
+/// 不显示「查看全部 ›」，清单里也不能有 `*.more` 目标。
+///
+/// 以前它会退回 `open-item(cards[0].id)`——用户点"查看全部"却进了某一部作品的
+/// 详情页，"看着有反应其实是空转"。没有可去的库页就不留这个入口（不新建列表页）。
+/// 有库 id 的库行保持原样：显示「查看全部 ›」，点击切到对应库。
+#[test]
+fn aggregate_rows_have_no_more_target() {
+    // 首页内容比一屏高（库行在 800 高窗口外，目标清单只收中心在窗口内的元素）。
+    // 给一个高窗口，让继续观看行与库行都在视口里——与 `home_targets_cover_hero_rows_and_navbar`
+    // 同一做法（真实窗口靠滚动，滚动后的坐标由 `interaction_sweep` 与真机验证覆盖）。
+    let app = window_sized(WINDOW_W, 1600.0);
+    let mut home = HomeView {
+        hero: Some(CardView::new("h1", "沙丘：第二部")),
+        continue_watching: vec![CardView::new("c1", "最后生还者")],
+        library_rows: vec![LibraryRowView {
+            library_id: "lib-1".to_string(),
+            title: "电影".to_string(),
+            items: vec![CardView::new("m1", "银翼杀手")],
+        }],
+        ..HomeView::new()
+    };
+    home.hero = home
+        .hero
+        .map(|hero| hero.with_overview("保罗·厄崔迪走上复仇之路。"));
+    app.set_home(&home);
+    app.ui().set_billboard_ratio(0.2);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+    let targets = settle(&app, 300);
+
+    // 两行的卡片都在清单里（行本身可用，只是聚合行没有"查看全部"入口）。
+    for id in ["home.row.continue.card.0", "home.row.lib.0.card.0"] {
+        assert!(
+            targets.iter().any(|target| target.id == id),
+            "缺少卡片目标 {id}（清单：{:?}）",
+            targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+    for id in ["home.row.continue.more", "home.row.recent.more"] {
+        assert!(
+            app.target(id).is_none(),
+            "聚合行不该登记「查看全部」目标 {id}（清单：{:?}）",
+            targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+    }
+    // 库行仍然有「查看全部 ›」（点击行为见 `row_more_opens_the_library_page`）。
+    assert!(
+        app.target("home.row.lib.0.more").is_some(),
+        "库行必须有「查看全部」目标（清单：{:?}）",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+
+    // 人工复核用的帧：只有库行标题右侧有「查看全部 ›」。
+    let snapshot = app.ui().window().take_snapshot().expect("首页快照");
+    let path = common::snapshots_dir().join("home-row-more-only-for-libraries.png");
+    common::write_png(&path, &snapshot);
+    println!("snapshot 首页行「查看全部」: {}", path.display());
 }

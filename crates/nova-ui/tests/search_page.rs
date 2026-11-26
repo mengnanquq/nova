@@ -144,3 +144,80 @@ fn set_search_backfills_text_when_input_is_not_focused() {
         "未聚焦时视图里的查询词仍应回填搜索框"
     );
 }
+
+/// 点搜索页的「×」：清空关键词、**留在搜索页**、焦点回输入框。
+///
+/// 回归：以前「×」与 Esc 共用 `search-clear`，点了会直接把路由换成 Home
+/// （`search` 也置空）——用户只是想改个词，却被踢回首页。
+#[test]
+fn clear_button_clears_the_term_but_stays_on_the_search_page() {
+    let app = setup();
+    // 真实入口都是 `open_search`：路由栈顶必须是搜索页，才谈得上"留在本页"。
+    app.open_search(&search_view());
+    assert_eq!(app.search_text(), "沙丘");
+
+    // Esc 链路（清空 + 回首页）的替身：真实实现在 `Shell::clear_search` 里
+    // 调 `show_home`。点「×」时它一次都不该被触发。
+    let escapes = Rc::new(RefCell::new(0));
+    {
+        let escapes = escapes.clone();
+        let weak = app.ui().as_weak();
+        app.on_search_clear(move || {
+            *escapes.borrow_mut() += 1;
+            if let Some(ui) = weak.upgrade() {
+                ui.set_page(Page::Home.index());
+            }
+        });
+    }
+
+    // 先聚焦输入框（真实点「×」时输入框本来就是焦点）。
+    assert!(app.handle_key(nova_ui::KeyCommand::Search));
+    assert!(app.target("search.clear").is_some(), "结果页应有「×」");
+    app.click_target("search.clear").expect("点「×」");
+    assert_eq!(*escapes.borrow(), 0, "「×」不能走 Esc 的清空+回首页链路");
+
+    assert_eq!(app.page(), Page::Search, "清空关键词不该离开搜索页");
+    assert_eq!(app.search_text(), "");
+    assert!(
+        app.ui().get_search_focused(),
+        "清空后焦点应回到输入框（接着输入新词）"
+    );
+    // 结果也跟着清掉：空关键词不该继续显示上一轮的卡片。
+    let view = app.search_view();
+    assert!(view.cards.is_empty(), "结果卡应清空");
+    assert_eq!(view.state, nova_ui::SearchState::Idle, "应回到 Idle 态");
+    assert_eq!(view.term, "");
+    // 「×」随之隐藏，就不能再出现在可点目标清单里（否则扫描会把它记成死按钮）。
+    app.refresh_targets();
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    assert!(
+        app.target("search.clear").is_none(),
+        "空关键词时「×」不可见，不应登记为目标"
+    );
+    // 路由仍然是搜索页（不是 Home），栈顶查询词也跟着清空。
+    assert_eq!(
+        app.current_route(),
+        Some(nova_ui::Route::Search {
+            term: String::new()
+        })
+    );
+}
+
+/// Esc 的行为不变：走 `search-clear`（Shell 侧清空 + 回首页），与「×」区分开。
+#[test]
+fn escape_still_takes_the_clear_and_home_path() {
+    let app = setup();
+    let homes = Rc::new(RefCell::new(0));
+    {
+        let homes = homes.clone();
+        app.on_search_clear(move || *homes.borrow_mut() += 1);
+    }
+    assert!(app.handle_key(nova_ui::KeyCommand::Search));
+    press(&app, Key::Escape);
+    assert_eq!(
+        *homes.borrow(),
+        1,
+        "Esc 必须走 search-clear（清空 + 回首页）"
+    );
+    assert_eq!(app.search_text(), "");
+}

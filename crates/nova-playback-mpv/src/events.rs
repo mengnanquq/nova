@@ -253,6 +253,33 @@ mod tests {
         );
     }
 
+    /// 体检报告的「某条目画面上有字幕但菜单空」不是被过滤了：mpv 没给字幕轨时
+    /// （画面上的字是**烧录在视频里的**硬字幕），`track-list` 里本来就没有 sub 轨。
+    /// 反向门控：即使字幕轨没有语言、没有标题、还是 PGS 图形字幕，也必须照原样列出，
+    /// 一行都不能被枚举层悄悄过滤。
+    #[test]
+    fn subtitle_tracks_are_never_filtered_by_missing_metadata() {
+        let mut bitmap = subtitle_track(5, "", false);
+        bitmap.lang = None;
+        bitmap.title = None;
+        bitmap.codec = "hdmv_pgs_subtitle".into();
+        let mut untagged = subtitle_track(6, "", false);
+        untagged.lang = None;
+        untagged.title = None;
+        untagged.codec = String::new();
+
+        let set = track_set(&[video(1), audio_track(2, "eng", 6), bitmap, untagged]);
+        let subtitles: Vec<&MediaStream> = set.subtitles().collect();
+        assert_eq!(subtitles.len(), 2, "无语言 / 无标题的字幕轨也必须列出");
+        assert_eq!(subtitles[0].index, 5);
+        assert_eq!(subtitles[0].codec, "hdmv_pgs_subtitle");
+        assert_eq!(subtitles[0].language, Language::undetermined());
+        assert_eq!(subtitles[1].index, 6);
+        // 没有字幕轨的文件（硬字幕）就是空列表：界面只有「关闭」，这是正确行为。
+        let hard_subbed = track_set(&[video(1), audio_track(2, "eng", 6)]);
+        assert_eq!(hard_subbed.subtitles().count(), 0);
+    }
+
     #[test]
     fn unknown_language_and_missing_fps_do_not_panic() {
         let mut track = video(1);

@@ -84,7 +84,10 @@ fn print_view_without_server_is_offline_and_empty() {
     let output = run(dir.path(), &["--print-view"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("status: 未连接服务器"), "{stdout}");
-    assert!(stdout.contains("hint: 先在终端运行 nova login"), "{stdout}");
+    assert!(
+        stdout.contains("hint: 在应用内连接服务器（Ctrl+N，或首页「连接服务器」）"),
+        "{stdout}"
+    );
     // 状态不再占用 hero 位：hero 为空（“-”），状态由顶部横幅表达。
     assert!(stdout.contains("hero: -"), "{stdout}");
     assert!(stdout.contains("recent: 0"), "{stdout}");

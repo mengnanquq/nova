@@ -183,7 +183,14 @@ export component DetailPage inherits Rectangle {
                 x: Theme.content-gutter;
                 width: parent.width - Theme.content-gutter * 2;
                 // 内容块**底端**锚定（Netflix 实测距 hero 下缘 112px，见 `Theme.detail-body-bottom-gap`）：
-                // 高度由内容撑开，所以 y 由自身高度反推。内容比 hero 还高时用 0 兜底。
+                // 高度由内容撑开，所以 y 由自身高度反推。
+                //
+                // 下界不是 0 而是 `Theme.navbar-height`：小窗口（800×600）下
+                // 底端锚定会算出 0（实测 800×600 长简介条目 body_y = 0），
+                // 标题贴到窗口顶端、与浮在上面的返回按钮（y=16..52）重叠。
+                // 顶栏高度是各页一致的"顶部安全区"，内容不得入侵；
+                // 被顶下来后内容总高仍由 `content.height` 撑开（可滚动），不丢内容。
+                //
                 // 末尾的 `motion-rise-hero * (1 - reveal)` 是入场 +8px 上浮归位；
                 // reveal 结算到 1 后该项为 0，不影响上面这条底端锚定等式。
                 //
@@ -192,7 +199,8 @@ export component DetailPage inherits Rectangle {
                 // `body.height` → `body.y` → `content.height` 成环（编译期 binding loop），
                 // 并且多出来的高度会被两个可拉伸的 `Text` 子项吃掉（实测各撑到 269px）。
                 height: self.preferred-height;
-                y: max(0px, root.backdrop-height - Theme.detail-body-bottom-gap - self.height)
+                y: max(Theme.navbar-height, root.backdrop-height
+                    - Theme.detail-body-bottom-gap - self.height)
                     + Theme.motion-rise-hero * (1 - root.reveal);
                 spacing: Theme.space-4;
                 // 子项按顺序从顶端排（高度 = 内容高，余量为 0；写死只是为了不让未来

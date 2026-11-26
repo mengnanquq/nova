@@ -213,6 +213,10 @@ mod tests {
         )
         .await;
         assert!(matches!(report.status, Status::Expired { .. }));
+        assert!(
+            report.status.banner_data().is_some(),
+            "过期状态刷新时原样返回（离线不发请求），横幅必须留着等用户重新登录"
+        );
         assert_eq!(report.item_count, 1, "离线也要能数到缓存里的条目");
         assert_eq!(local.home(None).expect("构建首页").recently_added.len(), 1);
         let _ = StoredServer {

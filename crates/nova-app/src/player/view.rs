@@ -203,6 +203,25 @@ mod tests {
         assert!(items.iter().all(|item| !item.selected));
     }
 
+    /// 字幕菜单里「一条轨都没有」只能是引擎真的没枚举到字幕轨（画面上的字烧录在
+    /// 视频里，即硬字幕）；不能是我们把没语言 / 没标题 / 图形字幕滤掉了。
+    #[test]
+    fn subtitle_list_shows_every_engine_track_and_only_what_the_engine_reports() {
+        // 无语言、无标题、无 SubtitleDetails 的 PGS 图形字幕。
+        let untagged =
+            MediaStream::subtitle(7, "hdmv_pgs_subtitle", nova_core::Language::undetermined());
+        let set = TrackSet::new(vec![untagged]);
+        let items = subtitle_tracks(&set, &SubtitleSelection::Off);
+        assert_eq!(items.len(), 1, "无元数据的字幕轨也必须列出：{items:?}");
+        assert_eq!(items[0].index, 7);
+        assert!(items[0].label.contains("未标注语言"), "{}", items[0].label);
+        assert!(items[0].is_bitmap_subtitle, "PGS 要标注为图形字幕");
+
+        // 硬字幕：引擎只有视频 + 音轨，字幕列表就是空（界面上只剩「关闭」）。
+        let hard_subbed = TrackSet::new(vec![audio(1, "eng", 2)]);
+        assert!(subtitle_tracks(&hard_subbed, &SubtitleSelection::Off).is_empty());
+    }
+
     #[test]
     fn engine_line_reports_hwdec_and_size() {
         let diagnostics = EngineDiagnostics {

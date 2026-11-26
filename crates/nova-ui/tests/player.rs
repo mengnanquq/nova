@@ -322,6 +322,49 @@ fn volume_slider_sets_absolute_volume_and_unmutes() {
     assert!((app.player_view().volume - 1.0).abs() < f32::EPSILON);
 }
 
+/// 静音后把音量调大必须**真的**解除静音：界面与引擎两份状态都要变。
+///
+/// 此前只改界面那一份：宿主每帧把自己的 `muted` 推回界面（`player/mod.rs` 的
+/// `view.muted = self.muted`），下一次 tick 又被刷回“静音”，而 mpv 的 `mute`
+/// 属性一直没被清掉——界面显示已取消静音、实际没声音。真机复现：先 M 静音，
+/// 再拖滑杆到 50%，`view` 里 muted 仍是 true、音量却变成 0.5。
+#[test]
+fn raising_volume_while_muted_unmutes_the_engine_too() {
+    let app = player_app();
+    let muted = Rc::new(RefCell::new(Vec::new()));
+    {
+        let muted = muted.clone();
+        app.on_player_muted(move |value| muted.borrow_mut().push(value));
+    }
+
+    app.ui().invoke_player_mute_toggle();
+    assert!(app.player_view().muted);
+    assert_eq!(muted.borrow().as_slice(), &[true]);
+
+    // 滑杆：非零音量 = 解除静音，并且要通知引擎。
+    app.ui().invoke_player_volume_set(0.5);
+    assert!(!app.player_view().muted, "拖滑杆后界面必须显示已取消静音");
+    assert_eq!(
+        muted.borrow().as_slice(),
+        &[true, false],
+        "引擎必须收到取消静音（否则 mpv 的 mute 仍是 yes）"
+    );
+
+    // 键盘 ↑：与滑杆同一口径。
+    app.ui().invoke_player_mute_toggle();
+    assert!(app.player_view().muted);
+    assert!(app.handle_player_key(PlayerKey::VolumeUp));
+    assert!(!app.player_view().muted, "↑ 应解除静音");
+    assert_eq!(muted.borrow().as_slice(), &[true, false, true, false]);
+
+    // 往下调音量不是“解除静音”的意图。
+    app.ui().invoke_player_mute_toggle();
+    assert!(app.player_view().muted);
+    assert!(app.handle_player_key(PlayerKey::VolumeDown));
+    assert!(app.player_view().muted, "↓ 不该悄悄取消静音");
+    assert_eq!(muted.borrow().as_slice(), &[true, false, true, false, true]);
+}
+
 #[test]
 fn engine_detail_stays_data_only_and_is_never_rendered() {
     // 引擎诊断（直连/转码、hwdec、1080p60）只是 `PlayerData` 里的数据：

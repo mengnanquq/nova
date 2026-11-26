@@ -119,6 +119,8 @@ component BackGlyph inherits Path {
 component VolumeControl inherits Rectangle {
     in property <float> volume: 0;
     in property <bool> muted: false;
+    // 音量文本（`"40%"` / `"静音"`），由视图模型给，界面不拼数字格式。
+    in property <string> volume-text: "";
     callback mute-toggle();
     callback volume-set(float);
 
@@ -203,6 +205,47 @@ component VolumeControl inherits Rectangle {
             border-radius: Theme.radius-pill;
             background: Theme.player-progress;
         }
+    }
+
+    // ---- 调试通道：一个控件、两种动作 → 两个目标 ----
+    //
+    // 以前只登记一个 `player.volume`、矩形是整个控件：鼠标一移上来控件就展开，
+    // 目标矩形跟着变宽、中心点落进滑杆区，坐标点击于是点到“设音量”而不是“静音”
+    // （体检报的“点喇叭音量 0.20→0.15→0.10”就是这类误点）。
+    // 现在拆成：`player.mute`（喇叭图标，矩形固定）+ `player.volume`（展开后的滑杆，
+    // 收起时宽度 0，清单按“正面积”过滤掉——收起时那块区域本来不可点）。
+    //
+    // 为什么用 `TargetBus` 而不是父组件的声明式数组：滑杆目标的宽度来自
+    // `animate width` 的**当前**宽度，声明式数组在真机上读到的还是收起时的值
+    // （实测：悬停已展开、`targets` 里却查不到滑杆），所以跟着 `width` 变化重新登记。
+    function register-targets() {
+        TargetBus.register({
+            id: "player.mute",
+            kind: "toggle",
+            label: root.muted ? "取消静音" : "静音",
+            x: root.absolute-position.x,
+            y: root.absolute-position.y,
+            width: Theme.player-control-size,
+            height: root.height,
+        });
+        TargetBus.register({
+            id: "player.volume",
+            kind: "slider",
+            label: root.muted ? "静音" : "音量 " + root.volume-text,
+            x: root.absolute-position.x + Theme.player-control-size,
+            y: root.absolute-position.y,
+            width: max(root.width - Theme.player-control-size, 0px),
+            height: root.height,
+        });
+    }
+
+    property <int> target-gen: TargetBus.gen;
+    changed target-gen => {
+        root.register-targets();
+    }
+    // 展开 / 收起是动画：每一帧的宽度都要重新登记，否则点“滑杆”会按旧矩形落到图标上。
+    changed width => {
+        root.register-targets();
     }
 
     // 整个控件一个命中区：左半（图标）点击 = 静音，右侧（滑杆）按下 / 拖动 = 设置音量。
@@ -798,15 +841,6 @@ export component PlayerOverlay inherits Rectangle {
             height: play-btn.height,
         },
         {
-            id: "player.volume",
-            kind: "slider",
-            label: "音量 " + root.data.volume-text,
-            x: vol.absolute-position.x,
-            y: vol.absolute-position.y,
-            width: vol.width,
-            height: vol.height,
-        },
-        {
             id: "player.seek-back",
             kind: "button",
             label: "-15s",
@@ -1057,6 +1091,10 @@ export component PlayerOverlay inherits Rectangle {
         }
 
         // 调试通道要能看到它，否则"没反应"也没法被扫描出来。
+        //
+        // 坐标必须用 `self`（这个图标矩形），不是 `root`：`root` 是外层
+        // `PlayerOverlay`，写成 `root.*` 会把目标登记成**整个窗口**（1280×720、
+        // 原点 0,0），`targets` 里完全看不出它其实只有 88×88 的中央图标。
         property <int> target-gen: TargetBus.gen;
         changed target-gen => {
             if (root.visible) {
@@ -1064,10 +1102,10 @@ export component PlayerOverlay inherits Rectangle {
                     id: "player.center-play",
                     kind: "button",
                     label: "播放",
-                    x: root.absolute-position.x,
-                    y: root.absolute-position.y,
-                    width: root.width,
-                    height: root.height,
+                    x: self.absolute-position.x,
+                    y: self.absolute-position.y,
+                    width: self.width,
+                    height: self.height,
                 });
             }
         }
@@ -1306,6 +1344,7 @@ export component PlayerOverlay inherits Rectangle {
                 vol := VolumeControl {
                     volume: root.data.volume;
                     muted: root.data.muted;
+                    volume-text: root.data.volume-text;
 
                     mute-toggle => {
                         root.mute-toggle();

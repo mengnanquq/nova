@@ -5,8 +5,8 @@
 //!
 //! billboard 88vh（最大 720px）：全宽 backdrop、底部+左侧双渐变、
 //! 标题 / 元信息 / 3 行简介 / 双按钮 / 右下徽标。
-//! 行：标题 22px + "查看全部 ›" + 横向 Flickable；卡片放大用独立覆盖层
-//! （`CardZoom`），行内基础卡片尺寸恒定，布局零跳动。
+//! 行：标题 22px + "查看全部 ›"（仅限有对应媒体库的行）+ 横向 Flickable；
+//! 卡片放大用独立覆盖层（`CardZoom`），行内基础卡片尺寸恒定，布局零跳动。
 
 import { Theme } from "theme.slint";
 import { CardData, HomeData, Target, TargetBus } from "models.slint";
@@ -28,6 +28,10 @@ import { EmptyState } from "empty_state.slint";
 component CardRow inherits Rectangle {
     in property <string> title;
     // 这一行对应的媒体库 id（「查看全部 ›」跳到这里；空串表示没有对应库）。
+    //
+    // 「继续观看」「最近添加」是**跨库聚合行**，没有对应的库页：这类行不显示
+    // 「查看全部 ›」，也不登记 `*.more` 目标（以前它会退回打开第一张卡的详情，
+    // 用户点"查看全部"却进了某一部作品——假行为）。
     in property <string> library-id;
     in property <[CardData]> cards;
     // 2:3 海报行（最近添加）；默认 16:9 横版行。
@@ -44,7 +48,8 @@ component CardRow inherits Rectangle {
     // 所以本行自己登记：卡片由 `PosterCard` 登记，"查看全部"与左右箭头在这里登记。
     in property <string> target-prefix: "";
     in property <bool> targets-visible: true;
-    out property <[Target]> targets: [
+    // 没有库 id 的行没有「查看全部 ›」可点，清单里也就不能有这一项。
+    out property <[Target]> targets: root.library-id == "" ? [] : [
         {
             id: root.target-prefix + "more",
             kind: "button",
@@ -148,10 +153,13 @@ component CardRow inherits Rectangle {
             background: transparent;
         }
 
+        // 「查看全部 ›」只属于有对应媒体库的行；聚合行连文字都不显示
+        // （不占视觉位置：背景透明，隐藏后留白与原来一致）。
         Rectangle {
             width: more-label.preferred-width;
             height: parent.height;
             background: transparent;
+            visible: root.library-id != "";
 
             more-label := Text {
                 width: parent.width;
@@ -167,14 +175,10 @@ component CardRow inherits Rectangle {
             //
             // 以前这里打开的是行内第一张卡——用户点"查看全部"却进了某一部作品，
             // 语义完全不对（审计里把它记为"看着有反应其实是空转"）。
-            // 只有在拿不到库 id 时（例如"继续观看"这种聚合行）才退回打开第一张卡。
+            // 聚合行（没有 `library-id`）干脆不显示这个入口，也不做任何退让式跳转。
             more-area := TouchArea {
                 clicked => {
-                    if (root.library-id != "") {
-                        root.tab-activated(root.library-id);
-                    } else if (root.cards.length > 0) {
-                        root.open-item(root.cards[0].id);
-                    }
+                    root.tab-activated(root.library-id);
                 }
             }
         }

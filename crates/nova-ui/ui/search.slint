@@ -15,6 +15,7 @@
 //! 4. 三态：`Loading` 文案 / `Empty` 空态 / `Error` 错误卡（带重试）。
 //!
 //! 页内不画顶栏：搜索框本身就是页头（避免出现两个搜索框）。`Esc` 清空并回首页，
+//! 「×」只清空关键词、留在本页并聚焦输入框；
 //! `Enter` 提交后把焦点还给全局键盘（方向键才能在结果网格里移动）。
 
 import { Theme } from "theme.slint";
@@ -44,6 +45,8 @@ export component SearchPage inherits Rectangle {
     callback search-submit();
     // 清空按钮 / Esc：清空查询并回首页。
     callback search-clear();
+    // 清空按钮（×）：只清空查询词、留在搜索页，焦点回输入框。
+    callback search-clear-input();
     // 顶栏输入框里的 Esc：交给上层退出聚焦。
     callback search-escape();
     // Esc 或 Enter 之后把焦点还给全局键盘（方向键导航结果网格）。
@@ -57,7 +60,19 @@ export component SearchPage inherits Rectangle {
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 页面直接摆放的搜索框与清除按钮声明式列出；结果卡片 / 顶栏标签 / 空态按钮
     // 由子组件自己登记到 `TargetBus`。
-    out property <[Target]> targets: [
+    // 清除按钮只在有输入时显示（`clear-button.visible`），隐藏时不能列为可点目标，
+    // 否则交互扫描会把一个看不见的按钮记成"点了没反应"。
+    out property <[Target]> targets: root.search-text == "" ? [
+        {
+            id: "search.input",
+            kind: "input",
+            label: "搜索页输入框",
+            x: query.absolute-position.x,
+            y: query.absolute-position.y,
+            width: query.width,
+            height: query.height,
+        },
+    ] : [
         {
             id: "search.input",
             kind: "input",
@@ -90,9 +105,44 @@ export component SearchPage inherits Rectangle {
         }
     }
 
+    // 见 `focus-input`：`set-selection-offsets` 用的是 UTF-8 字节偏移。
+    property <int> text-end: 2147483647;
+
     /// 把焦点交给本页的搜索框（Ctrl+F / 从顶栏首次输入时由上层调到这里）。
     public function focus-input() {
+        // 已经在本框里打字时不碰光标：否则在中间改字会被强行跳到末尾。
+        if (query.has-focus) {
+            return;
+        }
         query.focus();
+        // 从顶栏交接过来时，文本是经两向绑定**程序化**写进来的：TextInput 会把
+        // 光标留在旧位置（这个框刚拿到文本时是 0），接着敲的字符就插到了开头——
+        // 顶栏输入 `12345` 变成 `23451`（在本页大框里自己输入没有这个问题）。
+        // 把光标（focus）与锚点（anchor）一起推到末尾。偏移超出文本时 TextInput
+        // 会 clamp 到文本长度，所以给一个足够大的值最稳（`string.length` 是字素簇
+        // 个数，不是 UTF-8 字节偏移，不能直接拿来用）。
+        query.set-selection-offsets(root.text-end, root.text-end);
+    }
+
+    /// 键盘焦点移出可视区时，把结果网格滚到焦点卡**完全可见**。
+    ///
+    /// 与媒体库页同一套逻辑（几何都从 `PosterGrid` 读，不重写布局公式）：
+    /// 本页的 Flickable 从 `results-y` 开始，`PosterGrid` 的内容区原点在里面，
+    /// 所以只算网格内部的行位置即可。放大余量见 `theme.slint`。
+    public function scroll-to-index(index: int) {
+        if (index < 0 || index >= root.data.cards.length) {
+            return;
+        }
+        let pad = Theme.zoom-allowance-y / 2;
+        let top = grid.grid-top + floor(index / root.columns) * grid.row-height;
+        let bottom = top + grid.card-height;
+        let view-top = -results.content-y;
+        let max-y = max(0px, grid.content-height - results.height);
+        if (top - pad < view-top) {
+            results.content-y = -clamp(top - pad, 0px, max-y);
+        } else if (bottom + pad > view-top + results.height) {
+            results.content-y = -clamp(bottom + pad - results.height, 0px, max-y);
+        }
     }
 
     background: Theme.bg;
@@ -238,7 +288,8 @@ export component SearchPage inherits Rectangle {
 
             clear-area := TouchArea {
                 clicked => {
-                    root.search-clear();
+                    // 「×」只清空关键词、留在本页；`Esc` 才是"清空并回首页"。
+                    root.search-clear-input();
                 }
             }
         }
@@ -333,6 +384,13 @@ export component SearchPage inherits Rectangle {
             }
         }
     }
+
+    // ---- 探针（测试用：键盘焦点卡是否真的在可视区内）----
+    out property <length> probe-scroll-y: results.content-y;
+    out property <length> probe-viewport-h: results.height;
+    out property <length> probe-focus-top: grid.probe-focus-top;
+    out property <length> probe-focus-bottom: grid.probe-focus-bottom;
+    out property <bool> probe-zoom-on: grid.probe-zoom-on;
 
     // ---- Empty：没有命中 ----
     if (root.data.state == 3) :

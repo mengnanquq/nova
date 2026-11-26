@@ -167,6 +167,8 @@ struct Callbacks {
     search_changed: Option<StrHandler>,
     search_submit: Option<VoidHandler>,
     search_clear: Option<VoidHandler>,
+    /// 搜索页「×」：清空关键词但留在搜索页（与 Esc 的 `search_clear` 分开）。
+    search_clear_input: Option<VoidHandler>,
     // 搜索页自己的输入框 / 重试按钮（顶栏的输入框仍走上面的 search_changed / submit）。
     search_input: Option<StrHandler>,
     search_retry: Option<VoidHandler>,
@@ -1090,6 +1092,12 @@ impl App {
         self.state.borrow_mut().callbacks.search_clear = Some(Rc::new(handler));
     }
 
+    /// 搜索页「×」：清空关键词、留在搜索页（Esc 的“清空 + 回首页”仍走
+    /// [`App::on_search_clear`]）。
+    pub fn on_search_clear_input(&self, handler: impl Fn() + 'static) {
+        self.state.borrow_mut().callbacks.search_clear_input = Some(Rc::new(handler));
+    }
+
     /// 横幅动作按钮回调。
     pub fn on_banner_action(&self, handler: impl Fn() + 'static) {
         self.state.borrow_mut().callbacks.banner_action = Some(Rc::new(handler));
@@ -1402,6 +1410,17 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             if let Some(handler) = changed {
                 handler("");
             }
+        });
+    }
+    {
+        // 搜索页的“×”：清空关键词但留在搜索页（Esc 才回首页，走上面的 search_clear）。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search_clear_input(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            clear_search_input(&ui, &state);
         });
     }
     {
@@ -1796,6 +1815,13 @@ fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32
     if next != current {
         set_focus(ui, state, page, next);
     }
+    // 网格类页面（媒体库 / 搜索）：焦点可能被移出可视区，滚动让焦点卡完全可见。
+    // 焦点数学在 Rust，滚动几何在 `.slint`（`scroll-to-index`），两份不重算。
+    match page {
+        Page::Library => ui.invoke_scroll_library_to_index(next as i32),
+        Page::Search => ui.invoke_scroll_search_to_index(next as i32),
+        Page::Home | Page::Detail | Page::Player => {}
+    }
     true
 }
 
@@ -1894,6 +1920,47 @@ fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     ui.set_search_focused(true);
     ui.invoke_focus_search_input();
     let handler = state.borrow().callbacks.search.clone();
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+/// 搜索页「×」：清空关键词但**留在搜索页**，焦点交回输入框。
+///
+/// 与 Esc 分开：Esc（`search-clear`）是“清空 + 回首页”，而点「×」只是
+/// 撤掉这次查询——把用户从自己刚打开的结果页踢走不是那个按钮的意思。
+/// 路由不变，只换一份空视图（Idle）：否则清空后结果网格还留着上一轮的卡片。
+fn clear_search_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // 先只读地取出顶栏数据，`state` 的 borrow 在 `apply` 前结束（同 `set_search`）。
+    let (tabs, current_tab, images) = {
+        let state = state.borrow();
+        (
+            state.home.library_tabs.clone(),
+            state.nav_current_tab,
+            state.images.clone(),
+        )
+    };
+    let view = SearchView::default();
+    search::apply(ui, &view, &tabs, current_tab, &images.borrow());
+    {
+        let mut state = state.borrow_mut();
+        state.search = view;
+        state.focus.search = 0;
+        // 路由顶端的查询词跟着清空：否则从结果点进详情再返回，栈顶还挂着旧词。
+        if matches!(state.nav.current(), Some(Route::Search { .. })) {
+            state.nav.pop();
+            state.nav.push(Route::Search {
+                term: String::new(),
+            });
+        }
+    }
+    ui.set_search_focus(0);
+    ui.set_search_text("".into());
+    // 真焦点被交回输入框，`search-focused` 必须跟着为真：否则晚到的视图
+    // （`set_search`）会按“用户没在输入”把旧查询词回填进来。
+    ui.set_search_focused(true);
+    ui.invoke_focus_search_input();
+    let handler = state.borrow().callbacks.search_clear_input.clone();
     if let Some(handler) = handler {
         handler();
     }
@@ -2029,42 +2096,52 @@ fn player_scrub_cancel(ui: &AppWindow, _state: &Rc<RefCell<State>>) {
 
 /// 音量滑杆：把目标音量（0..1）直接写进视图模型。
 ///
-/// 只改 UI 状态 + 把目标值交给引擎回调（`on_player_volume`），不碰播放逻辑；
-/// 与 `player_volume_by` 共享同一套收尾（解除静音 / 短时数字 / 重绘 / 通知引擎）。
+/// 非零音量视为解除静音（与键盘加音量同一口径），其余收尾见 [`player_apply_volume`]。
 fn player_volume_set(ui: &AppWindow, state: &Rc<RefCell<State>>, volume: f32) {
-    let (volume, handler) = {
-        let mut state = state.borrow_mut();
-        let volume = volume.clamp(0.0, 1.0);
-        state.player.volume = volume;
-        // 往上拖滑杆视为解除静音（与键盘加音量同一口径）。
-        if volume > 0.0 {
-            state.player.muted = false;
-        }
-        state.player.note_volume_change();
-        (volume, state.callbacks.player_volume.clone())
-    };
-    player_refresh(ui, state);
-    if let Some(handler) = handler {
-        handler(volume);
-    }
+    let volume = volume.clamp(0.0, 1.0);
+    player_apply_volume(ui, state, volume, volume > 0.0);
 }
 
+/// 键盘 `↑` / `↓`：在上一次的音量上加减。
+///
+/// 只有**上调**才解除静音（下调不该悄悄把静音取消掉）。
 fn player_volume_by(ui: &AppWindow, state: &Rc<RefCell<State>>, delta: f32) {
-    let (volume, handler) = {
+    let volume = (state.borrow().player.volume + delta).clamp(0.0, 1.0);
+    player_apply_volume(ui, state, volume, delta > 0.0);
+}
+
+/// 音量收尾（滑杆 / 键盘共用）：写视图模型、按需解除静音、短时数字、重绘、通知引擎。
+///
+/// 解除静音**必须同时通知引擎**（`on_player_muted(false)`）：宿主每帧把自己的
+/// `muted` 推回界面（`player/mod.rs` 的 `view.muted = self.muted`），只改界面这一份
+/// 的话下一次 tick 就会被刷回“静音”，而 mpv 的 `mute` 属性也还是 `yes`
+/// ——界面显示已取消静音、实际却依然没声音。真机实测：先按 M 静音，再用滑杆把音量
+/// 拖到 50%，`view` 里 `muted` 仍是 true、音量却变成了 0.5。
+fn player_apply_volume(ui: &AppWindow, state: &Rc<RefCell<State>>, volume: f32, unmute: bool) {
+    let (volume, unmuted, volume_handler, mute_handler) = {
         let mut state = state.borrow_mut();
-        let volume = (state.player.volume + delta).clamp(0.0, 1.0);
         state.player.volume = volume;
-        // 调音量视为解除静音：这是用户明确的意图，不然"按了没声音"更糟。
-        if delta > 0.0 {
+        let unmuted = unmute && state.player.muted;
+        if unmuted {
             state.player.muted = false;
         }
         // 数字文本只在调节时短时显示。
         state.player.note_volume_change();
-        (volume, state.callbacks.player_volume.clone())
+        (
+            volume,
+            unmuted,
+            state.callbacks.player_volume.clone(),
+            state.callbacks.player_muted.clone(),
+        )
     };
     player_refresh(ui, state);
-    if let Some(handler) = handler {
+    if let Some(handler) = volume_handler {
         handler(volume);
+    }
+    if unmuted {
+        if let Some(handler) = mute_handler {
+            handler(false);
+        }
     }
 }
 

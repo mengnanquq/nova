@@ -93,7 +93,7 @@ fn write_all_snapshots() {
     // 横幅只应把内容整体下移 48px，元素尺寸不变（卡片高度与 home-filled 逐像素一致）。
     app.set_banner(Some(
         BannerData::new(
-            "登录已过期：重新运行 nova login；本地缓存仍可浏览",
+            "登录已过期：用「重新登录」输入密码（http://host:8096）；本地缓存仍可浏览",
             BannerLevel::Warning,
         )
         .with_action("重新登录"),

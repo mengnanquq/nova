@@ -176,6 +176,8 @@ export component AppWindow inherits Window {
     callback search-input(string);
     callback search-submit();
     callback search-clear();
+    // 搜索页「×」：只清空关键词、留在搜索页（Esc 的「清空 + 回首页」仍走 search-clear）。
+    callback search-clear-input();
     // 搜索页错误态的“重试”。
     callback search-retry();
     callback banner-action();
@@ -294,6 +296,13 @@ export component AppWindow inherits Window {
             // Ctrl+N：打开“添加服务器”对话框（与首页空态按钮、横幅动作同一路径）。
             if (event.modifiers.control && (event.text == "n" || event.text == "N")) {
                 root.key-intent(8);
+                return accept;
+            }
+            // 详情页的版本下拉展开时：Esc / Backspace 先收起下拉，**不**返回上一页
+            // （返回要再按一次）。下拉是页面局部状态，这里只改它，不发 `key-intent`。
+            if (root.page == 2 && root.detail-drop-open
+                && (event.text == Key.Escape || event.text == Key.Backspace)) {
+                root.detail-drop-open = false;
                 return accept;
             }
             if (event.text == Key.LeftArrow) {
@@ -479,6 +488,9 @@ export component AppWindow inherits Window {
                 search-clear => {
                     root.search-clear();
                 }
+                search-clear-input => {
+                    root.search-clear-input();
+                }
                 search-escape => {
                     keyboard.focus();
                     root.search-focused = false;
@@ -609,10 +621,33 @@ export component AppWindow inherits Window {
         home-page.scroll-to-offset(y);
     }
 
+    /// 把媒体库 / 搜索页的结果网格滚到键盘焦点卡（方向键移动后由 Rust 调用）。
+    public function scroll-library-to-index(index: int) {
+        lib-page.scroll-to-index(index);
+    }
+
+    /// 同上，搜索页。
+    public function scroll-search-to-index(index: int) {
+        search-page.scroll-to-index(index);
+    }
+
     out property <length> home-scroll-y: home-page.scroll-y;
+    // 测试 / 调试用：媒体库与搜索页结果网格的滚动偏移与键盘焦点卡位置
+    // （键盘导航把焦点移出可视区时必须自动滚动，断言见 `tests/grid_focus_scroll.rs`）。
+    out property <length> library-scroll-y: lib-page.probe-scroll-y;
+    out property <length> library-viewport-h: lib-page.probe-viewport-h;
+    out property <length> library-focus-top: lib-page.probe-focus-top;
+    out property <length> library-focus-bottom: lib-page.probe-focus-bottom;
+    out property <bool> library-zoom-on: lib-page.probe-zoom-on;
+    out property <length> search-scroll-y: search-page.probe-scroll-y;
+    out property <length> search-viewport-h: search-page.probe-viewport-h;
+    out property <length> search-focus-top: search-page.probe-focus-top;
+    out property <length> search-focus-bottom: search-page.probe-focus-bottom;
+    out property <bool> search-zoom-on: search-page.probe-zoom-on;
     // 测试 / 调试用：详情页的版本下拉是否展开、「我的列表」是否已加入
     // （调试状态摘要要读；两者都只存在于 .slint 局部状态里）。
-    out property <bool> detail-drop-open: detail-page.drop-open;
+    // 下拉状态需要**双向**：Esc 要先收下拉、再按一次才返回（`key-pressed` 里处理）。
+    in-out property <bool> detail-drop-open <=> detail-page.drop-open;
     out property <bool> detail-in-my-list: detail-page.in-my-list;
     // 调试用：对话框里当前聚焦的输入框（0 = 无，1 = 地址，2 = 用户名，3 = 密码）。
     out property <int> add-server-focus: add-server.focus-field;

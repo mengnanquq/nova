@@ -178,7 +178,9 @@ export component Navbar inherits Rectangle {
         tabs-stretch := Rectangle {
             horizontal-stretch: 1;
             height: parent.height;
-            clip: false;
+            // 窄窗口（800px）下标签行比标签区宽：必须裁在标签区里，
+            // 否则最后一个标签会画到右侧搜索按钮上面。
+            clip: true;
 
         tabs-view := Flickable {
             width: parent.width;
@@ -224,16 +226,27 @@ export component Navbar inherits Rectangle {
                     }
 
                     // 库标签是重复元素：只能自己登记目标（数组无法在父组件里拼接）。
+                    //
+                    // 登记的是**标签区里真正可见的那一段**：`tabs-view` 是 Flickable，
+                    // 放不下的标签被裁在视口外，但 `absolute-position` 报的是未裁剪的
+                    // 布局坐标。800px 宽下最后一个标签（x733..761）与搜索按钮
+                    // （x732..768）就这样「重叠」了——按目标坐标点击会点到搜索框。
+                    // 取与标签区视口的交集，完全看不见时不登记。
+                    property <length> target-left: max(tab-area.absolute-position.x,
+                        tabs-view.absolute-position.x);
+                    property <length> target-right: min(tab-area.absolute-position.x + tab-area.width,
+                        tabs-view.absolute-position.x + tabs-view.width);
                     property <int> target-gen: TargetBus.gen;
                     changed target-gen => {
-                        if (root.targets-visible && root.visible) {
+                        if (root.targets-visible && root.visible
+                            && self.target-right > self.target-left) {
                             TargetBus.register({
                                 id: root.target-prefix + "nav.tab." + i,
                                 kind: "tab",
                                 label: tab.title,
-                                x: tab-area.absolute-position.x,
+                                x: self.target-left,
                                 y: tab-area.absolute-position.y,
-                                width: tab-area.width,
+                                width: self.target-right - self.target-left,
                                 height: tab-area.height,
                             });
                         }

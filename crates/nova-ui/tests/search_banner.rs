@@ -104,8 +104,11 @@ fn enter_submits_search() {
 fn banner_action_button_fires_callback() {
     let app = setup();
 
-    let banner = BannerData::new("登录已过期：重新运行 nova login", BannerLevel::Warning)
-        .with_action("重新登录");
+    let banner = BannerData::new(
+        "登录已过期：用「重新登录」输入密码（http://host:8096）；本地缓存仍可浏览",
+        BannerLevel::Warning,
+    )
+    .with_action("重新登录");
     app.set_banner(Some(banner));
     assert!(app.ui().get_banner_visible());
     assert_eq!(app.ui().get_banner_level(), 1);
