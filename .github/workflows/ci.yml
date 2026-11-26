@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 env:
@@ -16,14 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install GStreamer dev packages
+      # 播放引擎只用 libmpv（GStreamer 方案已弃用，见 docs/adr/0001）；
+      # Slint 的 winit + femtovg 后端需要 fontconfig / xkbcommon / wayland 的开发包。
+      - name: Install system dev packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad gstreamer1.0-libav \
-            libmpv-dev libclang-dev
+            pkg-config libmpv-dev libclang-dev \
+            libfontconfig1-dev libxkbcommon-dev libwayland-dev fonts-noto-cjk
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -11,3 +11,6 @@ spikes/playback-proto/out/
 /dist/
 /squashfs-root/
 /packaging/appimage/AppDir/
+
+# 本地体检报告（含服务器地址等环境信息，不进仓库）
+/.claude/
