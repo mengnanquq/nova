@@ -23,6 +23,21 @@ export component PosterGrid inherits Rectangle {
     in property <[CardData]> cards;
     // 网格列数（页面决定：媒体库/搜索页目前都用 6 列）。
     in property <int> columns: 6;
+    // ---- 视口窗口化（大库 4546 张不再一次性实例化）----
+    // `window-start` 是首个实例化卡片的**全局**下标，`window-count` 是实例化张数；
+    // 取 -1 表示「不窗口化」（全部实例化，与窗口化之前的行为一致，也是几何还不可用
+    // 时的退化）。区间由 Rust 用 `viewmodel::grid::grid_window` 按视口算好 —— 布局
+    // 几何（行高 / 内容坐标）只在本文件算一次，不在别处重抄。
+    //
+    // 窗口化只影响"实例化几张"：`content-height`、行号、`target-id`、焦点几何
+    // 一律仍按全部卡片（全局下标）算。
+    in property <int> window-start: 0;
+    in property <int> window-count: -1;
+    // 视口在内容坐标里的上沿与高度（页面从 `Flickable` 报上来）。
+    in property <length> scroll-y: 0px;
+    in property <length> viewport-height: 0px;
+    // 视口 / 几何变化时通知 Rust 重算窗口（Rust 读本组件的 `probe-*` 属性）。
+    callback viewport-changed();
     // 左右留白：媒体库与搜索页都用 `Theme.content-gutter`。
     in property <length> content-gutter: Theme.content-gutter;
     // 内容区顶部到第一行卡片的距离。
@@ -59,7 +74,11 @@ export component PosterGrid inherits Rectangle {
     out property <length> row-spacing: max(Theme.card-gap, Theme.zoom-allowance-y / 2);
     out property <length> card-step: root.card-width + root.column-gap;
     out property <length> first-card-x: root.content-gutter;
-    out property <int> row-count: (root.cards.length + root.columns - 1) / root.columns;
+    out property <int> total-count: root.cards.length;
+    out property <int> row-count: (root.total-count + root.columns - 1) / root.columns;
+    // 真实实例化的卡片张数（`window-count` 夹到 `[window-start, total)` 之后）。
+    out property <int> window-length: max(0, min(root.window-count < 0
+        ? root.total-count : root.window-count, root.total-count - root.window-start));
     out property <length> row-height: root.card-height + root.row-spacing;
     // 内容区需要的总高度（含底部留白），页面据此设置 Flickable 的 content-height。
     out property <length> content-height: root.grid-top + root.row-count * root.row-height
@@ -67,15 +86,28 @@ export component PosterGrid inherits Rectangle {
     // ---- 探针（测试用：键盘焦点卡在内容坐标里的上下沿）----
     // 页面把 Flickable 的滚动偏移也报出来，两者一起断言"焦点卡完全可见"。
     out property <length> probe-focus-top: root.focus-index >= 0
-        && root.focus-index < root.cards.length
+        && root.focus-index < root.total-count
         ? root.grid-top + floor(root.focus-index / root.columns) * root.row-height : -1px;
     out property <length> probe-focus-bottom: root.focus-index >= 0
-        && root.focus-index < root.cards.length
+        && root.focus-index < root.total-count
         ? root.grid-top + floor(root.focus-index / root.columns) * root.row-height
             + root.card-height : -1px;
     // 焦点卡上的放大覆盖层是否真的在画（键盘焦点的可见指示就是它）。
-    out property <bool> probe-zoom-on: root.zoom-index >= 0
-        && root.zoom-index < root.cards.length;
+    out property <bool> probe-zoom-on: root.zoom-in-window;
+    // 窗口化探针（测试用）：实例化区间 / 总张数 / 视口几何。
+    out property <int> probe-window-start: root.window-start;
+    out property <int> probe-window-count: root.window-length;
+    out property <int> probe-total-count: root.total-count;
+    out property <length> probe-row-height: root.row-height;
+    out property <length> probe-grid-top: root.grid-top;
+
+    // 视口/几何变化：Rust 侧据此重算实例化窗口（见 `pages/app.rs` 的
+    // `sync_grid_window`）。没有订阅者时（纯 Slint 用法）是空操作。
+    changed scroll-y => { root.viewport-changed(); }
+    changed viewport-height => { root.viewport-changed(); }
+    changed row-height => { root.viewport-changed(); }
+    changed columns => { root.viewport-changed(); }
+    changed total-count => { root.viewport-changed(); }
 
     // 宽度由页面给（本组件是普通 Rectangle，不是布局元素）。
     height: root.content-height;
@@ -112,9 +144,14 @@ export component PosterGrid inherits Rectangle {
     property <bool> overlay-hovered: false;
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : (root.overlay-hovered ? root.latch : (root.nav-active ? root.focus-index : -1));
+    // 放大覆盖层只画"已经实例化"的卡：窗口化之后 `zoom-index` 可能落在窗口之外
+    // （例如悬停后把那张卡滚出视口），这时没有底卡可放大，直接不画。
+    property <bool> zoom-in-window: root.zoom-index >= 0
+        && root.zoom-index >= root.window-start
+        && root.zoom-index < root.window-start + root.window-length;
 
     states [
-        zoomed when root.zoom-index >= 0 && root.zoom-index < root.cards.length : {
+        zoomed when root.zoom-in-window : {
             zoom-factor: Theme.zoom-factor;
             in {
                 animate zoom-factor {
@@ -134,31 +171,36 @@ export component PosterGrid inherits Rectangle {
     ]
 
     // 网格：手工定位（列数固定，位置可计算），行高 = 卡片总高 + 行间距。
-    for card[i] in root.cards : PosterCard {
-        x: root.first-card-x + mod(i, root.columns) * root.card-step;
-        y: root.grid-top + floor(i / root.columns) * root.row-height;
-        card: card;
+    //
+    // 只实例化 `[window-start, window-start + window-length)`：`i` 是本窗口内的
+    // 局部下标，`g` 是**全局**下标（位置 / 目标 id / 焦点索引都用它）。窗口滚动时
+    // `window-start` 变化只改绑定，不重建元素；元素个数只在视口行数变化时变。
+    for i in root.window-length : PosterCard {
+        property <int> g: root.window-start + i;
+        x: root.first-card-x + mod(g, root.columns) * root.card-step;
+        y: root.grid-top + floor(g / root.columns) * root.row-height;
+        card: root.cards[g];
         card-width: root.card-width;
         image-height: root.poster-height;
-        target-id: root.target-prefix + "card." + i;
-        target-label: card.title;
+        target-id: root.target-prefix + "card." + g;
+        target-label: root.cards[g].title;
         targets-visible: root.targets-visible;
         clicked => {
-            root.open(card.id);
+            root.open(root.cards[g].id);
         }
         hover-changed(has) => {
             // 悬停：放大这张，同时把键盘焦点移过来（之后按方向键从这里继续）。
             if (has) {
-                root.hot = i;
-                root.focus-index = i;
-            } else if (root.hot == i) {
+                root.hot = g;
+                root.focus-index = g;
+            } else if (root.hot == g) {
                 root.hot = -1;
             }
         }
     }
 
     // 放大覆盖层。
-    if (root.zoom-index >= 0 && root.zoom-index < root.cards.length) :
+    if (root.zoom-in-window) :
         CardZoom {
             property <length> zw: root.card-width * root.zoom-factor;
             property <length> zh: root.card-height * root.zoom-factor;

@@ -96,6 +96,9 @@ export component AppWindow inherits Window {
     out property <length> detail-overview-bottom: detail-page.probe-overview-bottom;
     out property <length> detail-buttons-top: detail-page.probe-buttons-top;
     out property <length> detail-buttons-bottom: detail-page.probe-buttons-bottom;
+    // 字幕安全区（逻辑像素）：控制块顶边到窗口底边 + theme 的安全间距。
+    // `pages::app::player_push_subtitle_margin` 读它，再交给引擎换算成 `sub-pos` 百分比。
+    out property <length> player-subtitle-inset: player-page.subtitle-safe-inset;
 
     in property <HomeData> home;
     in property <LibraryData> library;
@@ -221,6 +224,9 @@ export component AppWindow inherits Window {
     callback add-server-submit();
     callback add-server-address-edited(string);
     callback sort();
+    // 网格实例化窗口（大库窗口化）：页面报视口变化，Rust 据此重算实例化区间。
+    callback library-grid-viewport-changed();
+    callback search-grid-viewport-changed();
     callback tab-activated(string);
     callback source-selected(string);
     // 「我的列表」切换（本地持久化，Rust 侧处理）。
@@ -251,6 +257,8 @@ export component AppWindow inherits Window {
     callback player-mute-toggle();
     callback player-volume-set(float);
     callback player-subtitle-delay(float);
+    // 控制层布局 / 窗口高度变化时重算字幕安全区（值从 `player-subtitle-inset` 读）。
+    callback player-subtitle-reflow();
     // 控制层显隐变化时把字幕应该抬多高（px）报出去（mpv 的 sub-margin-y）。
 
     keyboard := FocusScope {
@@ -504,6 +512,9 @@ export component AppWindow inherits Window {
                 global-shortcut(code) => {
                     root.key-intent(code);
                 }
+                grid-viewport-changed => {
+                    root.library-grid-viewport-changed();
+                }
             }
 
             detail-page := DetailPage {
@@ -579,6 +590,9 @@ export component AppWindow inherits Window {
                 search-retry => {
                     root.focus-global();
                     root.search-retry();
+                }
+                grid-viewport-changed => {
+                    root.search-grid-viewport-changed();
                 }
                 global-shortcut(code) => {
                     root.key-intent(code);
@@ -673,6 +687,10 @@ export component AppWindow inherits Window {
             root.player-subtitle-delay(seconds);
         }
 
+        subtitle-inset-changed => {
+            root.player-subtitle-reflow();
+        }
+
         }
     }
 
@@ -753,6 +771,21 @@ export component AppWindow inherits Window {
     out property <length> library-focus-top: lib-page.probe-focus-top;
     out property <length> library-focus-bottom: lib-page.probe-focus-bottom;
     out property <bool> library-zoom-on: lib-page.probe-zoom-on;
+    // 网格窗口化（大库）探针：Rust 按这些几何算实例化区间，测试断"实例数有上界"。
+    in-out property <int> library-window-start <=> lib-page.grid-window-start;
+    in-out property <int> library-window-count <=> lib-page.grid-window-count;
+    out property <int> library-probe-window-start: lib-page.probe-window-start;
+    out property <int> library-probe-window-count: lib-page.probe-window-count;
+    out property <int> library-total-count: lib-page.probe-total-count;
+    out property <length> library-grid-row-h: lib-page.probe-row-height;
+    out property <length> library-grid-top: lib-page.probe-grid-top;
+    in-out property <int> search-window-start <=> search-page.grid-window-start;
+    in-out property <int> search-window-count <=> search-page.grid-window-count;
+    out property <int> search-probe-window-start: search-page.probe-window-start;
+    out property <int> search-probe-window-count: search-page.probe-window-count;
+    out property <int> search-total-count: search-page.probe-total-count;
+    out property <length> search-grid-row-h: search-page.probe-row-height;
+    out property <length> search-grid-top: search-page.probe-grid-top;
     out property <length> search-scroll-y: search-page.probe-scroll-y;
     out property <length> search-viewport-h: search-page.probe-viewport-h;
     out property <length> search-focus-top: search-page.probe-focus-top;

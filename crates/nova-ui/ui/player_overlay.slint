@@ -824,6 +824,19 @@ export component PlayerOverlay inherits Rectangle {
     callback volume-set(float);
     callback subtitle-delay(float);
 
+    // ---- 字幕安全区 ----
+    // 控制块（标题行）顶边到播放页底边的距离 + theme 的安全间距，单位逻辑像素。
+    // `player_shell.slint` 把它推给 Rust，再换算成 mpv `sub-pos` 的百分比。
+    //
+    // 用标题行的**实际布局坐标**而不是窗口高度乘系数：控制层贴底，窗口变矮时
+    // 控制块占窗口的比例会变大（800×600 下约 42%），固定系数在矮窗口下盖不住。
+    // 标题行还没完成第一次布局（`absolute-position.y == 0`）时先报 0，等布局完成
+    // 后 `changed` 会带着真值再推一次。
+    out property <length> subtitle-safe-inset:
+        title-row.absolute-position.y <= 0px ? 0px
+            : (root.absolute-position.y + root.height - title-row.absolute-position.y
+                + Theme.player-subtitle-gap);
+
     background: transparent;
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
@@ -1267,7 +1280,7 @@ export component PlayerOverlay inherits Rectangle {
             // 整块拿掉：数据仍在 `PlayerData.transport-mode / engine-line / hwdec-notice`，
             // 由 `--debug-socket` 的 `view` 读（见 docs/ui-netflix-1to1.md §11.6）。
             // 标题字号/字重照官方 loading 层 `.title{font-size:2em;font-weight:500}`。
-            HorizontalLayout {
+            title-row := HorizontalLayout {
                 height: Theme.player-title-row-height;
                 spacing: Theme.space-3;
                 cross-axis-alignment: center;

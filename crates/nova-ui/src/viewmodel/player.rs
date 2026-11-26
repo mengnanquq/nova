@@ -23,15 +23,6 @@ pub const VOLUME_STEP: f32 = 0.05;
 /// 常驻的只有喇叭图标；数字只在“刚调过”时短时出现，不然一排数字抢注意力。
 pub const VOLUME_HINT_DURATION: Duration = Duration::from_millis(1200);
 
-/// 字幕抬升量相对画面高度的比例（控制层可见时生效）。
-///
-/// 800px 高的窗口 → 280px，正好把字幕抬到传输行上方。
-pub const SUBTITLE_SAFE_AREA_RATIO: f32 = 0.35;
-/// 字幕抬升下限（小窗口不至于把字幕顶到画面正中）。
-pub const SUBTITLE_MARGIN_MIN: i64 = 160;
-/// 字幕抬升上限（2K / 4K 大窗口不要抬过头）。
-pub const SUBTITLE_MARGIN_MAX: i64 = 400;
-
 /// 时间行的渲染模式：已播/总长 与 剩余时长**二选一**（不同时出现）。
 ///
 /// 默认 [`TimeMode::Remaining`]：官方播放器的时间位显示的就是**剩余时长**
@@ -589,10 +580,6 @@ impl PlayerView {
         self.note_input();
     }
 
-    /// 控制层可见时字幕要抬多高（mpv 的 `sub-margin-y`，单位 px）。
-    ///
-    /// `blend-subtitles=video` 时字幕烧在视频层，控制层的传输行会直接盖住底部常驻区，
-    /// 所以控制层可见时把字幕抬到传输行上方，隐藏时归零。
     /// 字幕延迟的菜单文案，例如 `"+0.5s"` / `"−1.0s"` / `"0.0s"`。
     ///
     /// 用真正的减号 `−`（U+2212）而不是连字符：负值在菜单里要一眼看出来。
@@ -606,12 +593,18 @@ impl PlayerView {
         }
     }
 
-    pub fn subtitle_margin(&self, viewport_height: f32) -> i64 {
-        if !self.controls_visible || !viewport_height.is_finite() || viewport_height <= 0.0 {
+    /// 控制层可见时字幕安全区的高度（逻辑像素）。
+    ///
+    /// 入参是 Slint 侧算好的**控制块顶边到窗口底边**的距离（`player_overlay.slint`
+    /// 的 `subtitle-safe-inset`，已含 `Theme.player-subtitle-gap`），不是窗口高度：
+    /// 控制块贴底，窗口变矮时它占的比例会变大（800×600 下约 42%），固定系数盖不住。
+    /// 引擎侧的 `sub-pos` 百分比由 `nova-app` 按画面（letterbox 后）高度换算。
+    /// 控制层隐藏时归零（字幕回原位）。
+    pub fn subtitle_margin(&self, controls_inset: f32) -> i64 {
+        if !self.controls_visible || !controls_inset.is_finite() || controls_inset <= 0.0 {
             return 0;
         }
-        let lift = (viewport_height * SUBTITLE_SAFE_AREA_RATIO).round();
-        (lift as i64).clamp(SUBTITLE_MARGIN_MIN, SUBTITLE_MARGIN_MAX)
+        controls_inset.round() as i64
     }
 
     fn decay_volume_hint(&mut self, delta: Duration) -> bool {
@@ -1010,18 +1003,21 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_margin_lifts_only_while_controls_are_visible() {
+    fn subtitle_margin_uses_the_control_block_inset() {
         let view = sample();
-        assert_eq!(view.subtitle_margin(800.0), 280, "800px 窗口抬 280px");
+        assert_eq!(
+            view.subtitle_margin(266.4),
+            266,
+            "1280×800 上控制块 + 间距的安全区 = 266px（不是窗口高的 35%）"
+        );
         assert_eq!(
             view.clone()
                 .with_controls_visible(false)
-                .subtitle_margin(800.0),
+                .subtitle_margin(266.4),
             0,
             "控制层隐藏时字幕归位"
         );
-        assert_eq!(view.subtitle_margin(200.0), 160, "小窗口有下限");
-        assert_eq!(view.subtitle_margin(4000.0), 400, "大窗口有上限");
+        assert_eq!(view.subtitle_margin(120.0), 120, "矮窗口直接用实际高度");
         assert_eq!(view.subtitle_margin(0.0), 0);
         assert_eq!(view.subtitle_margin(f32::NAN), 0);
     }

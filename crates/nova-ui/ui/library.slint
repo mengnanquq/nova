@@ -24,6 +24,11 @@ export component LibraryPage inherits Rectangle {
     in property <bool> content-focused: true;
     // 搜索框文本（与 AppWindow 双向同步）。
     in-out property <string> search-text;
+    // 网格实例化窗口（Rust 写；见 `poster_grid.slint` 的 `window-start`）。
+    in-out property <int> grid-window-start: 0;
+    in-out property <int> grid-window-count: -1;
+    // 视口 / 网格几何变化：通知 Rust 重算实例化窗口。
+    callback grid-viewport-changed();
 
     callback open-item(string);
     callback tab-activated(string);
@@ -189,6 +194,13 @@ export component LibraryPage inherits Rectangle {
                     grid-top: root.grid-y;
                     cards: root.data.cards;
                     focus-index <=> root.focus-index;
+                    window-start: root.grid-window-start;
+                    window-count: root.grid-window-count;
+                    scroll-y: -grid-flick.content-y;
+                    viewport-height: grid-flick.height;
+                    viewport-changed => {
+                        root.grid-viewport-changed();
+                    }
                     open(id) => {
                         root.open-item(id);
                     }
@@ -206,6 +218,12 @@ export component LibraryPage inherits Rectangle {
     out property <length> probe-focus-top: grid.probe-focus-top + grid-flick.content-y;
     out property <length> probe-focus-bottom: grid.probe-focus-bottom + grid-flick.content-y;
     out property <bool> probe-zoom-on: grid.probe-zoom-on;
+    // 窗口化探针：实例化区间 / 总张数 / 网格行高与起点（Rust 侧按这些算窗口）。
+    out property <int> probe-window-start: grid.probe-window-start;
+    out property <int> probe-window-count: grid.probe-window-count;
+    out property <int> probe-total-count: grid.probe-total-count;
+    out property <length> probe-row-height: grid.probe-row-height;
+    out property <length> probe-grid-top: grid.probe-grid-top;
     // 顶栏键盘焦点的几何探针（`navbar.slint` 的 `probe-*` 转发）。
     out property <length> probe-focus-tab-left: nav.probe-focus-tab-left;
     out property <length> probe-focus-tab-right: nav.probe-focus-tab-right;

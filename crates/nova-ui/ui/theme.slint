@@ -565,6 +565,9 @@ export global Theme {
     // 渐变最小高度 = 控制块 + 上下各一份留白（官方 20% 在 1080 下是 216px，装不下我们的
     // 控制块；上面多留的那一份是给渐变淡出用的 ramp，否则标题正好压在透明端点上）。
     in property <length> player-scrim-min-height: root.player-controls-block + root.player-gutter * 2;
+    // 字幕安全间距：控制块（标题行）顶边与字幕底边之间留的空隙。
+    // 只在这一处定义，`player_overlay.slint` 把它并进推给引擎的安全区高度。
+    in property <length> player-subtitle-gap: root.player-unit;
     in property <length> player-menu-width: 320px;
     in property <length> player-menu-row: 44px;
     in property <length> player-error-width: 420px;

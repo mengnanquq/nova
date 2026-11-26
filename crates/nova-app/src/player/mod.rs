@@ -1193,15 +1193,17 @@ impl Player {
 
     /// 字幕安全区：控制层可见时把字幕往上抬，隐藏时归零（只在数值变化时下发）。
     ///
-    /// 界面（`nova-ui`）传来的是**逻辑像素**：它按窗口高度的 35% 算出安全区高度
-    /// （`PlayerView::subtitle_margin`），控制层的真实高度由 theme 的
-    /// `player-controls-block + player-gutter` 推导（900px 窗口上 ≈ 屏幕高度的 28%），
-    /// 所以 35% 安全区一定盖得住它。
+    /// 界面（`nova-ui`）传来的是**逻辑像素**：控制块顶边到窗口底边的距离 + theme 的
+    /// 安全间距（`PlayerOverlay.subtitle-safe-inset`，由控制层真实布局算出），不是
+    /// 固定比例的窗口高度——矮窗口（800×600）下控制块占窗口约 42%，固定系数盖不住。
     ///
-    /// 引擎要的是百分比（mpv `sub-pos`），所以在这里换算：窗口高度必须是**逻辑像素**
-    /// （与传入的 px 同一坐标系），否则缩放变化会让字幕高低跳动。
-    pub(crate) fn set_subtitle_margin(&mut self, margin_px: i64) {
-        let lift = subtitle_lift_percent(margin_px, self.window_height_logical());
+    /// 引擎要的是百分比（mpv `sub-pos`），换算在 [`subtitle_lift_percent`] 里：
+    /// 窗口尺寸必须是**逻辑像素**（与传入的 px 同一坐标系），且要去掉 letterbox 的
+    /// 下黑边——`sub-pos` 的百分比是相对**画面**高度，不是窗口高度。
+    pub(crate) fn set_subtitle_margin(&mut self, safe_inset_px: i64) {
+        let window = self.window_logical_size();
+        let video = self.host.borrow().video_size();
+        let lift = subtitle_lift_percent(safe_inset_px, window, video);
         if self.subtitle_margin == lift {
             return;
         }
@@ -1210,15 +1212,18 @@ impl Player {
         self.host.borrow_mut().set_subtitle_margin(&runtime, lift);
     }
 
-    /// 窗口高度（逻辑像素）；读不到时返回 0（调用方按"不抬"处理）。
-    fn window_height_logical(&self) -> f64 {
+    /// 窗口逻辑尺寸；读不到时返回 `(0, 0)`（调用方按“不抬”处理）。
+    fn window_logical_size(&self) -> (f64, f64) {
         let window = self.app.ui().window();
         let scale = f64::from(window.scale_factor());
-        let height = f64::from(window.size().height);
-        if scale > 0.0 && height > 0.0 {
-            height / scale
+        let size = window.size();
+        if scale > 0.0 {
+            (
+                f64::from(size.width) / scale,
+                f64::from(size.height) / scale,
+            )
         } else {
-            0.0
+            (0.0, 0.0)
         }
     }
 
@@ -1597,16 +1602,44 @@ impl Player {
     }
 }
 
-/// 字幕上抬量：窗口逻辑像素 → 屏幕高度的百分比（mpv `sub-pos` 的坐标系）。
+/// 字幕上抬量：窗口逻辑像素 → **画面**高度的百分比（mpv `sub-pos` 的坐标系）。
 ///
-/// 输入是 `nova-ui` 按布局算出的安全区高度（逻辑像素），窗口高度也是逻辑像素——
-/// 同一坐标系相除，缩放因子自然消掉。读不到窗口尺寸（尺寸为 0 / 非有限值）时返回 0
-/// （= 不抬，回到 mpv 原位）：宁可不抬，也不能因为一个坏读数把字幕推到画面中间。
-fn subtitle_lift_percent(margin_px: i64, window_height_logical: f64) -> i64 {
-    if margin_px <= 0 || !window_height_logical.is_finite() || window_height_logical <= 0.0 {
+/// `safe_inset_px` 是从窗口底边到控制块顶边的距离 + 安全间距（逻辑像素）；
+/// `window_logical` 是窗口逻辑尺寸；`video` 是画面像素尺寸（拿不到时按“画面铺满窗口”）。
+///
+/// 关键：mpv 的 `sub-pos` 百分比相对**画面**高度，不是窗口高度。letterbox 时画面
+/// 比窗口矮、上下各有一条黑边，字幕原位在画面底边（= 窗口底部往上一条黑边），
+/// 所以先减掉下方黑边，再除以画面高度。读不到窗口尺寸（ 0 / 非有限值）或没有
+/// 需要抬起的距离时返回 0（= 不抬，回到 mpv 原位）：宁可不抬，也不能因为一个
+/// 坏读数把字幕推到画面中间。
+fn subtitle_lift_percent(
+    safe_inset_px: i64,
+    window_logical: (f64, f64),
+    video: Option<(u32, u32)>,
+) -> i64 {
+    let (window_w, window_h) = window_logical;
+    if safe_inset_px <= 0
+        || !window_w.is_finite()
+        || !window_h.is_finite()
+        || window_w <= 0.0
+        || window_h <= 0.0
+    {
         return 0;
     }
-    let percent = (margin_px as f64 * 100.0 / window_height_logical).round();
+    // 画面按 `contain` 缩放到窗口内（mpv 默认 `keepaspect`）：宽度受限时上下留黑边，
+    // 高度受限时左右留黑边（后者不影响纵向换算）。没有画面尺寸时按无黑边处理。
+    let (picture_h, letterbox_bottom) = match video {
+        Some((video_w, video_h)) if video_w > 0 && video_h > 0 => {
+            let picture_h = (window_w * f64::from(video_h) / f64::from(video_w)).min(window_h);
+            (picture_h, (window_h - picture_h) / 2.0)
+        }
+        _ => (window_h, 0.0),
+    };
+    let lift_px = safe_inset_px as f64 - letterbox_bottom;
+    if lift_px <= 0.0 {
+        return 0;
+    }
+    let percent = (lift_px * 100.0 / picture_h).round();
     percent.clamp(0.0, 90.0) as i64
 }
 
@@ -2055,19 +2088,39 @@ mod tests {
         assert_ne!(progress.position, Duration::ZERO);
     }
 
-    /// 字幕安全区的单位换算：界面给的是窗口逻辑像素，mpv 要的是屏幕高度百分比。
+    /// 字幕安全区的单位换算：界面给的是控制块到窗口底边的逻辑像素，mpv 要的是
+    /// **画面**高度的百分比（letterbox 时要先减掉下黑边）。
     #[test]
-    fn subtitle_lift_is_converted_from_pixels_to_a_percentage() {
-        // 900px 高窗口、界面按 35% 算出的 315px 安全区 → 35%。
-        assert_eq!(subtitle_lift_percent(315, 900.0), 35);
+    fn subtitle_lift_is_converted_from_pixels_to_picture_percentage() {
+        let video_16_9 = Some((1920, 1080));
+        let video_21_9 = Some((2560, 1080));
+        // 1600×900 窗口、16:9 片源：无纵向黑边，266px / 900 = 29.6% → 30%。
+        assert_eq!(subtitle_lift_percent(266, (1600.0, 900.0), video_16_9), 30);
+        // 800×600、16:9：画面高 450px、下黑边 75px，抬 (266-75)/450 = 42.4% → 42%。
+        assert_eq!(subtitle_lift_percent(266, (800.0, 600.0), video_16_9), 42);
+        // 控制块变矮（安全区 250px）：抬 (250-75)/450 = 38.9% → 39%。
+        assert_eq!(subtitle_lift_percent(250, (800.0, 600.0), video_16_9), 39);
+        // 21:9 片源在 1600×900 里 letterbox：画面高 675、下黑边 112.5，
+        // (266-112.5)/675 = 22.7% → 23%。
+        assert_eq!(subtitle_lift_percent(266, (1600.0, 900.0), video_21_9), 23);
+        // 拿不到画面尺寸时按无黑边（画面铺满窗口）。
+        assert_eq!(subtitle_lift_percent(266, (800.0, 600.0), None), 44);
         // 控制层隐藏时界面给 0 → 不抬（mpv 回原位）。
-        assert_eq!(subtitle_lift_percent(0, 900.0), 0);
+        assert_eq!(subtitle_lift_percent(0, (1600.0, 900.0), video_16_9), 0);
         // 读不到窗口尺寸 / 坏值：不抬也比乱抬好。
-        assert_eq!(subtitle_lift_percent(315, 0.0), 0);
-        assert_eq!(subtitle_lift_percent(315, f64::NAN), 0);
-        assert_eq!(subtitle_lift_percent(-10, 900.0), 0);
-        // 极端窗口尺寸夹到 90%（再高字幕就跑到画面中间了）。
-        assert_eq!(subtitle_lift_percent(1_000_000, 900.0), 90);
+        assert_eq!(subtitle_lift_percent(266, (0.0, 0.0), video_16_9), 0);
+        assert_eq!(subtitle_lift_percent(266, (f64::NAN, 900.0), video_16_9), 0);
+        assert_eq!(subtitle_lift_percent(-10, (1600.0, 900.0), video_16_9), 0);
+        // 安全区完全落在下黑边里：无需抬起。
+        assert_eq!(
+            subtitle_lift_percent(75, (800.0, 600.0), Some((1920, 1080))),
+            0
+        );
+        // 极端值夹到 90%（再高字幕就跑到画面中间了）。
+        assert_eq!(
+            subtitle_lift_percent(1_000_000, (1600.0, 900.0), video_16_9),
+            90
+        );
     }
 
     /// 控制层显隐 → 下发给引擎的字幕位置（百分比）：隐藏归零、可见抬起。
@@ -2083,16 +2136,16 @@ mod tests {
             .window()
             .set_size(slint::PhysicalSize::new(1600, 900));
 
-        // 控制层可见（`nova-ui` 按窗口高度的 35% 算 → 315px），然后隐藏。
-        player.set_subtitle_margin(315);
+        // 控制层可见（`nova-ui` 推 266px 安全区），然后隐藏。
+        player.set_subtitle_margin(266);
         player.set_subtitle_margin(0);
         // 重复的同一值不重复下发。
         player.set_subtitle_margin(0);
 
         assert_eq!(
             player.host.borrow().subtitle_margins,
-            vec![35, 0],
-            "可见 → 屏幕高度 35%，隐藏 → 0（回原位），重复值不重复下发"
+            vec![30, 0],
+            "可见 → 画面高度 30%（266/900），隐藏 → 0（回原位），重复值不重复下发"
         );
     }
 

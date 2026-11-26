@@ -747,18 +747,18 @@ impl Worker {
     }
 }
 
-/// 可以用 `sub-pos` 把字幕抬起来的上限（屏幕高度的百分比）。
+/// 可以用 `sub-pos` 把字幕抬起来的上限（**画面**高度的百分比）。
 ///
-/// 再高就会把字幕推到画面上半部（40% 以上开始盖人物），所以夹住；
-/// 控制层的真实高度（`Theme.player-controls-block + player-gutter`）在 900px 窗口上
-/// 约是屏幕高度的 28%，正常值远低于这个上限。
-const SUBTITLE_LIFT_MAX_PERCENT: i64 = 40;
-/// 字幕位置对应的 mpv 属性（屏幕高度百分比，100 = 原位）。
+/// 再高就会把字幕推到画面上半部，所以夹住。这个上限不能太小：控制块贴底、
+/// 矮窗口（800×600）下它占了画面高度约 42%，固定 40% 会盖住标题行；
+/// 60% 仍然让字幕留在画面下半部（40% 以下再也盖不到人物脸部的主体）。
+const SUBTITLE_LIFT_MAX_PERCENT: i64 = 60;
+/// 字幕位置对应的 mpv 属性（画面高度百分比，100 = 原位）。
 const SUBTITLE_POS_PROPERTY: &str = "sub-pos";
 /// mpv 的 `sub-pos` 原位值。
 const SUBTITLE_POS_HOME: i64 = 100;
 
-/// 字幕上抬量（屏幕高度的百分比，0 = 原位）→ mpv `sub-pos`。
+/// 字幕上抬量（**画面**高度的百分比，0 = 原位）→ mpv `sub-pos`。
 ///
 /// 注意 `sub-pos` 越小字幕越高：0 = 画面顶部。
 pub(crate) fn subtitle_pos(lift_percent: i64) -> i64 {
@@ -792,8 +792,12 @@ mod tests {
         assert_eq!(SUBTITLE_POS_PROPERTY, "sub-pos");
         // 控制层隐藏：回原位。
         assert_eq!(subtitle_pos(0), 100);
-        // 控制层可见：900px 窗口的控制层安全区约 35% → sub-pos=65。
+        // 控制层可见：画面高度的百分比（`nova-app` 已把像素换算成画面百分比）。
         assert_eq!(subtitle_pos(35), 65);
+        // 矮窗口（800×600 + 16:9 letterbox）需要 42%，不能被 40% 截掉，
+        // 否则字幕又差 2% × 450 ≈ 9px，正好压在标题行上（实测间距只剩
+        // “安全间距 − 9px”）。
+        assert_eq!(subtitle_pos(42), 58);
         // 异常值不越界：负数当 0，过大夹到上限。
         assert_eq!(subtitle_pos(-5), 100);
         assert_eq!(

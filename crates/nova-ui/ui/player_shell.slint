@@ -36,11 +36,26 @@ export component PlayerShellPage inherits Rectangle {
     callback mute-toggle();
     callback volume-set(float);
     callback subtitle-delay(float);
+    // 字幕安全区（逻辑像素）：控制块顶边到窗口底边 + theme 安全间距。
+    // 控制层真实布局 / 窗口高度变化时推一次，Rust 侧再换算成 `sub-pos` 百分比。
+    callback subtitle-inset-changed();
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 播放页的控件全在 `PlayerOverlay` 里（子组件），本页自己不直接摆放控件，
     // 所以声明式数组为空；`PlayerOverlay` 会把自己的目标登记到 `TargetBus`。
     out property <[Target]> targets: [];
+
+    // 控制层的字幕安全区，来自 `PlayerOverlay` 的真实布局（标题行位置 + 安全间距）。
+    // Rust 读这个值（不存副本），布局变化时只发个通知让它重算百分比。
+    out property <length> subtitle-safe-inset: overlay.subtitle-safe-inset;
+    changed subtitle-safe-inset => {
+        root.subtitle-inset-changed();
+    }
+    // 窗口高度变了要重推：控制块贴底，像素距离不变但引擎侧的百分比是相对
+    // **画面**高度算的（letterbox 后画面高随窗口宽高变化），必须重新换算。
+    changed height => {
+        root.subtitle-inset-changed();
+    }
 
     background: Theme.player-bg;
 
@@ -94,7 +109,7 @@ export component PlayerShellPage inherits Rectangle {
         }
     }
 
-    PlayerOverlay {
+    overlay := PlayerOverlay {
         width: 100%;
         height: 100%;
         data: root.data;

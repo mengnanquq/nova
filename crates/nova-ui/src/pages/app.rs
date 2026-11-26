@@ -17,7 +17,7 @@ use slint::{ComponentHandle, Model};
 use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
 use crate::viewmodel::{
     AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
-    Navigator, PlayerView, Route, SearchView, TargetInfo, move_focus, rebase_focus,
+    Navigator, PlayerView, Route, SearchView, TargetInfo, grid_window, move_focus, rebase_focus,
 };
 use crate::{AppWindow, Target, TargetBus};
 
@@ -299,8 +299,10 @@ struct State {
     player_fullscreen: bool,
     // 当前顶部横幅；`None` 表示隐藏。
     banner: Option<BannerData>,
-    // 上一次推给引擎的字幕抬升量（`sub-margin-y`）：不变就不重复发。
-    subtitle_margin: Option<i64>,
+    // 上一次推给引擎的字幕安全区（像素 + 窗口物理尺寸）：不变就不重复发。
+    // 窗口尺寸也要进缓存键：引擎按**画面**（letterbox 后）高度换算百分比，
+    // 窗口一变百分比就变了，像素没变也得重推一次。
+    subtitle_margin: Option<(i64, (u32, u32))>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
     add_server: AddServerView,
@@ -915,6 +917,8 @@ impl App {
         state.focus.library = focus;
         drop(state);
         self.ui.set_library_focus(focus as i32);
+        // 数据一落地就按当前视口窗口化（否则首帧还是"全部实例化"）。
+        sync_grid_window(&self.ui, &self.state, Page::Library);
     }
 
     /// 设置搜索页视图并刷新界面。
@@ -940,6 +944,8 @@ impl App {
         let focus = state.focus.search;
         drop(state);
         self.ui.set_search_focus(focus as i32);
+        // 与媒体库同口径：数据一落地就按视口窗口化。
+        sync_grid_window(&self.ui, &self.state, Page::Search);
         // 用户正在输入框里打字时不回填：视图可能晚到一拍，回填会把
         // 光标位置与已输入文本重置成旧查询词。
         if !self.ui.get_search_focused() && self.ui.get_search_text() != view.term {
@@ -1334,7 +1340,8 @@ impl App {
 
     /// 字幕安全区回调：控制层可见时抬起 `y` px（mpv 的 `sub-margin-y`），隐藏时为 `0`。
     ///
-    /// 只在数值真正变化时发（`blend-subtitles=video` 的字幕烧在视频层，控制层会盖住它）。
+    /// `y` 来自 `AppWindow::player-subtitle-inset`（控制层真实布局），引擎再按
+    /// 画面高度换算成 `sub-pos` 百分比。只在（像素值，窗口尺寸）确实变化时发。
     pub fn on_player_subtitle_margin(&self, handler: impl Fn(i64) + 'static) {
         self.state.borrow_mut().callbacks.player_subtitle_margin = Some(Rc::new(handler));
     }
@@ -1351,6 +1358,26 @@ fn page_of_route(route: Option<&Route>) -> Page {
 }
 
 fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // 网格窗口化：页面报"视口 / 几何变了"（滚动、resize、列数、总数）时重算
+    // 实例化区间。回调里只做整数/浮点运算与两个属性写入，不碰数据层。
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_library_grid_viewport_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                sync_grid_window(&ui, &state, Page::Library);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search_grid_viewport_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                sync_grid_window(&ui, &state, Page::Search);
+            }
+        });
+    }
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -1799,6 +1826,17 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             }
         });
     }
+    {
+        // 控制层布局 / 窗口高度变化：只重算字幕安全区，别的什么都不动。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_player_subtitle_reflow(move || {
+            if let Some(ui) = weak.upgrade() {
+                let view = state.borrow().player.clone();
+                player_push_subtitle_margin(&ui, &state, &view);
+            }
+        });
+    }
 }
 
 fn focus_rows(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> Vec<usize> {
@@ -1822,6 +1860,47 @@ fn set_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, index: usiz
         Page::Search => ui.set_search_focus(index as i32),
         Page::Player => {}
     }
+}
+
+/// 网格窗口化：按**当前视口**重算需要实例化的卡片区间。
+///
+/// 大库（海外电影 4546 张）以前会一次性实例化全部卡片。现在只实例化"可见行 ±
+/// 缓冲行"，区间由纯函数 [`grid_window`] 算：布局几何（行高 / 网格起点 / 视口高）
+/// 全部从 `.slint` 侧的 `probe-*` 属性读，Rust 不重算一遍布局公式；卡片总数也来自
+/// 同一份数据（`State` 里的视图），列数用 `grid-columns`。
+///
+/// 触发点：
+/// 1. 视图落地（`App::set_library` / `App::set_search`）；
+/// 2. 页面报"视口 / 几何变了"（`PosterGrid.viewport-changed`）：滚动、窗口 resize、
+///    列数变化、卡片总数变化；
+/// 3. 键盘焦点移动后 `scroll-to-index` 改了滚动偏移（同样走第 2 条）。
+fn sync_grid_window(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
+    let columns = ui.get_grid_columns().max(1) as usize;
+    let (total, scroll_y, viewport_h, grid_top, row_height, set_start, set_count) = match page {
+        Page::Library => (
+            state.borrow().library.cards.len(),
+            // `content-y` 向下滚为负；窗口化用内容坐标里的视口上沿。
+            -f64::from(ui.get_library_scroll_y()),
+            f64::from(ui.get_library_viewport_h()),
+            f64::from(ui.get_library_grid_top()),
+            f64::from(ui.get_library_grid_row_h()),
+            AppWindow::set_library_window_start as fn(&AppWindow, i32),
+            AppWindow::set_library_window_count as fn(&AppWindow, i32),
+        ),
+        Page::Search => (
+            state.borrow().search.cards.len(),
+            -f64::from(ui.get_search_scroll_y()),
+            f64::from(ui.get_search_viewport_h()),
+            f64::from(ui.get_search_grid_top()),
+            f64::from(ui.get_search_grid_row_h()),
+            AppWindow::set_search_window_start as fn(&AppWindow, i32),
+            AppWindow::set_search_window_count as fn(&AppWindow, i32),
+        ),
+        Page::Home | Page::Detail | Page::Player => return,
+    };
+    let window = grid_window(scroll_y, viewport_h, grid_top, row_height, columns, total);
+    set_start(ui, window.start as i32);
+    set_count(ui, window.count as i32);
 }
 
 fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -> bool {
@@ -2401,24 +2480,25 @@ fn player_refresh(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     player_push_subtitle_margin(ui, state, &view);
 }
 
-/// 把字幕抬升量推给引擎（`sub-margin-y`）：控制层可见时抬起，隐藏时归零。
+/// 把字幕安全区推给引擎（最终换算成 `sub-pos`）：控制层可见时抬起，隐藏时归零。
 ///
-/// 只在数值真正变化时发，所以 250ms 的 tick 不会刷屏。
+/// 入参是 Slint 按控制层**真实布局**算出的“控制块顶边到窗口底边”+ theme 安全间距
+/// （`AppWindow::player-subtitle-inset`，逻辑像素），不是窗口高度乘系数：
+/// 固定系数在矮窗口（800×600 控制块约占 42%）下盖不住控制层。
+/// 百分比换算在引擎侧做（那里才知道 letterbox 后的画面高度）。
+/// 只在（像素值，窗口尺寸）真正变化时发，所以 250ms 的 tick 不会刷屏；
+/// 但窗口 resize 时即使像素值不变也会重推，让引擎按新画面高度重算。
 fn player_push_subtitle_margin(ui: &AppWindow, state: &Rc<RefCell<State>>, view: &PlayerView) {
-    let scale = ui.window().scale_factor();
-    let physical_height = f64::from(ui.window().size().height);
-    let height = if scale > 0.0 {
-        (physical_height / f64::from(scale)) as f32
-    } else {
-        physical_height as f32
-    };
-    let margin = view.subtitle_margin(height);
+    let inset = ui.get_player_subtitle_inset();
+    let margin = view.subtitle_margin(inset);
+    let size = ui.window().size();
+    let window = (size.width, size.height);
     let handler = {
         let mut state = state.borrow_mut();
-        if state.subtitle_margin == Some(margin) {
+        if state.subtitle_margin == Some((margin, window)) {
             return;
         }
-        state.subtitle_margin = Some(margin);
+        state.subtitle_margin = Some((margin, window));
         state.callbacks.player_subtitle_margin.clone()
     };
     if let Some(handler) = handler {

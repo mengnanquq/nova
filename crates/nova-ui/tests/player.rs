@@ -595,10 +595,35 @@ fn subtitle_margin_follows_control_visibility() {
     // 先隐藏一次：把内部缓存的值变成 0，再显示才能观察到一次上升。
     app.set_player(&player_view().with_controls_visible(false));
     app.set_player(&player_view());
+    // 1280×800：控制块 178.4 + 底边 gutter 72 + 字幕安全间距 16 = 266.4 → 266。
+    // 控制层隐藏时归零。不是窗口高 800 的 35%（280）。
     assert_eq!(
         margins.borrow().as_slice(),
-        &[0, 280],
-        "控制层隐藏时归零，可见时抬起（800px 窗口 → 280px）"
+        &[0, 266],
+        "控制层隐藏时归零，可见时按控制块实际布局高度抬起"
+    );
+}
+
+/// 矮窗口回归：800×600 时控制块（标题行 + 进度条 + 按钮行 + gutter）占窗口高度
+/// 约 42%（≈250px），旧的固定系数 0.35 × 600 = 210px 盖不住它（字幕贴到标题行）。
+/// 现在推的是控制块顶边到窗口底边的实际距离 266px。
+#[test]
+fn subtitle_margin_covers_the_control_block_in_a_short_window() {
+    let app = player_app();
+    app.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(800.0, 600.0));
+    let margins = Rc::new(RefCell::new(Vec::new()));
+    {
+        let margins = margins.clone();
+        app.on_player_subtitle_margin(move |margin| margins.borrow_mut().push(margin));
+    }
+
+    app.set_player(&player_view());
+    assert_eq!(
+        margins.borrow().as_slice(),
+        &[266],
+        "800×600：旧公式 600×0.35=210 小于控制块 250，会重叠；新值按实际布局 266"
     );
 }
 
