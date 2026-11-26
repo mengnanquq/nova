@@ -216,7 +216,13 @@ pub trait PlaybackEngine: Send {
         }
     }
 
-    /// 字幕底部安全区：把字幕往上抬 `y` 像素（mpv 的 `sub-margin-y`），`0` 表示归位。
+    /// 字幕底部安全区：把字幕往上抬到控制层上方，`0` 表示归位（mpv 原位）。
+    ///
+    /// `y` 是**屏幕高度的百分比**（0..=90，0 = 不抬）：mpv 侧能用得上的属性
+    /// （`sub-pos`）就是百分比，而 ASS 字幕不认 `sub-margin-y`（实测：mpv 0.42 下
+    /// `sub-margin-y` / `sub-margin-y-offset` / `sub-ass-force-margins` 对 ASS 字幕
+    /// 全部无效，只有 `sub-pos` 能把它抬起来）。像素 → 百分比的换算由界面侧完成
+    /// （只有它知道窗口高度），引擎如实按百分比下发。
     ///
     /// 用于控制层可见时避开传输行（`blend-subtitles=video` 时字幕烧在视频层，
     /// 界面上的控件会直接盖住它）。

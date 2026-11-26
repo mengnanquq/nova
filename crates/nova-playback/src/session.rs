@@ -22,6 +22,16 @@
 //!   否则进度条自己的估算会把真正的卡死掩盖掉。
 //!
 //! 缓冲期间不推进本地位置：缓冲中引擎给出的位置不写回，用户拖动 seek 例外（那是明确意图）。
+//!
+//! # 位置只属于"本次打开"
+//!
+//! `mpv` 在一个实例里复用（`loadfile replace`），切换文件的那一段时间里进程里还挂着
+//! **上一部片子**：它仍会发出 `time-pos`（旧值、0、或 `end-file` 之前的最后位置）。
+//! 这些读数如果在 `Opening`（实测最长 18s 的缓冲期）被接受，就会被当成 "本次打开的真实位置"
+//! ——退出时按它提交，服务端续播点被写成别的片子的位置或 0（体检 R5-1）。
+//!
+//! 所以本状态机有一条硬门：**只有 `FirstFrame` 之后（= 本次打开真的出过画面）才接受引擎位置**，
+//! 也只有那时候的位置才可以提交给服务端（[`Session::reportable_position`]）。
 
 use std::fmt;
 use std::sync::Arc;
@@ -89,6 +99,10 @@ pub struct Session {
     duration: Option<Duration>,
     opening_since: Option<Instant>,
     last_activity: Option<Instant>,
+    /// 本次打开是否**真的出过画面**（`FirstFrame`）。
+    ///
+    /// 它是位置可信度的门：之前的一切位置属于上一部片子、或者根本不存在（体检 R5-1）。
+    started: bool,
     buffering_returns_to: SessionState,
     tracks: TrackSet,
     diagnostics: EngineDiagnostics,
@@ -106,6 +120,7 @@ impl Session {
             duration: None,
             opening_since: None,
             last_activity: None,
+            started: false,
             buffering_returns_to: SessionState::Playing,
             tracks: TrackSet::default(),
             diagnostics: EngineDiagnostics::default(),
@@ -120,8 +135,26 @@ impl Session {
     }
 
     /// 当前位置。
+    ///
+    /// 缓冲期它等于本次 open 的续播点（不是上一部片子的读数）：[`Session::begin`] 就把它
+    /// 设成 `resume_at`，而 `FirstFrame` 之前的引擎位置一律不写回。
     pub fn position(&self) -> Duration {
         self.position
+    }
+
+    /// 本次打开是否已经真的出过画面（`FirstFrame`）。
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// 可以提交给服务端的位置。
+    ///
+    /// `None` = 本次打开还没有可信的位置（`file-loaded` / 首帧之前，或已经退出到 `Idle`）。
+    /// 调用方这时**一条进度都不要发**：缓冲期能拿到的任何值都可能是上一部片子的残留、0，
+    /// 或者就是本来就存在的续播点；前两者会把服务端已有的续播点写坏（体检 R5-1 实证：
+    /// `Progress@0` 会把 Emby 的续播点清零），后者没有任何信息量。
+    pub fn reportable_position(&self) -> Option<Duration> {
+        self.started.then_some(self.position)
     }
 
     /// 总时长（未知时为 `None`）。
@@ -184,6 +217,8 @@ impl Session {
         self.state = SessionState::Opening;
         self.opening_since = Some(now);
         self.last_activity = Some(now);
+        // 新的一次打开：引擎里可能还挂着上一部片子，它的位置不算本次会话的。
+        self.started = false;
         self.buffering_returns_to = SessionState::Playing;
         self.tracks = TrackSet::default();
         self.error = None;
@@ -208,6 +243,7 @@ impl Session {
         self.duration = None;
         self.opening_since = None;
         self.last_activity = None;
+        self.started = false;
         self.buffering_returns_to = SessionState::Playing;
         self.tracks = TrackSet::default();
         self.error = None;
@@ -284,8 +320,11 @@ impl Session {
     ///
     /// 只在 `Playing` 生效：缓冲与暂停都不推进。**不会**刷新卡死计时器——
     /// 本地插值不是引擎仍然活着的证据。
+    ///
+    /// 还要求本次打开已经有真实位置基准（`FirstFrame`）：否则插值就是在
+    /// "上一次会话的读数"或续播点原值上凭空加时间，退出一提交就漂到服务端（体检 R5-1）。
     pub fn advance_position(&mut self, delta: Duration) {
-        if !self.state.advances_position() {
+        if !self.state.advances_position() || !self.started {
             return;
         }
         self.position = clamp_position(self.position.saturating_add(delta), self.duration);
@@ -295,6 +334,8 @@ impl Session {
     pub fn handle(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::FirstFrame => {
+                // 本次打开真的出过画面了：从这一刻起引擎给的位置才属于本次会话。
+                self.started = true;
                 if matches!(self.state, SessionState::Opening | SessionState::Buffering) {
                     self.state = SessionState::Playing;
                 }
@@ -304,12 +345,18 @@ impl Session {
             }
             EngineEvent::FramePresented => self.touch(),
             EngineEvent::PositionChanged(position) => {
-                // 只有"还在播"的状态才接受位置：缓冲期按规范不推进，Ended 后固定为时长，
-                // Failed 要保留失败瞬间的位置供重试。位置报告本身仍算引擎活着的证据。
-                if matches!(
-                    self.state,
-                    SessionState::Opening | SessionState::Playing | SessionState::Paused
-                ) {
+                // 只有"本次打开已经出过画面"且"还在播（或暂停在同一点）"时才接受位置：
+                //
+                // - `Opening`：还没出画。这段时间 mpv 里可能还是**上一部**片子（`loadfile
+                //   replace` 切完之前它的 `time-pos` 照发），也可能刚复位成 0。接受它就会
+                //   把上一部的读数写进本次会话，退出时提交到服务端（体检 R5-1）。
+                // - `Buffering`：按规范不推进（保留最后一帧的位置）。
+                // - `Ended` 固定为时长，`Failed` 要保留失败瞬间的位置供重试。
+                //
+                // 位置报告本身仍算引擎活着的证据，所以 `touch()` 无条件执行。
+                if self.started
+                    && matches!(self.state, SessionState::Playing | SessionState::Paused)
+                {
                     self.position = clamp_position(position, self.duration);
                 }
                 self.touch();
@@ -386,6 +433,7 @@ impl fmt::Debug for Session {
         f.debug_struct("Session")
             .field("state", &self.state)
             .field("position", &self.position)
+            .field("started", &self.started)
             .field("duration", &self.duration)
             .field("tracks", &self.tracks.len())
             .field("error", &self.error)
@@ -717,5 +765,95 @@ mod tests {
         };
         assert_eq!(progress.position, Duration::from_secs(60));
         assert_eq!(session.state(), SessionState::Playing);
+    }
+
+    /// 体检 R5-1：缓冲期（首帧之前）引擎给的位置属于**上一次打开的文件**。
+    ///
+    /// 服务端实证：从未真正播过的 47156 被写成 5286.033s（= 上一会话的读数），6489 的
+    /// 续播点 555.488s 被清成 0。这里复现同一条时序：A 播到 X → 退出 → B 以续播点 Y
+    /// 打开 → 引擎在首帧前发 A 的 X 与 0 → 位置必须还是 Y，且**不可提交**。
+    #[test]
+    fn positions_before_the_first_frame_of_this_open_are_ignored() {
+        let (mut session, _clock) = session();
+        let total = Some(Duration::from_secs(7000));
+
+        // 会话 A：真的播过，位置推到 5286s。
+        session.begin(Duration::ZERO, total);
+        session.handle(EngineEvent::FirstFrame);
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(5286)));
+        assert_eq!(session.position(), Duration::from_secs(5286));
+        assert_eq!(
+            session.reportable_position(),
+            Some(Duration::from_secs(5286))
+        );
+
+        // 会话 B：续播点 555.488s，还在缓冲（实测起播要 12–18s）。
+        session.begin(Duration::from_millis(555_488), total);
+        // 引擎在 `file-loaded` / 首帧之前发来上一部的读数与 0。
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(5286)));
+        session.handle(EngineEvent::PositionChanged(Duration::ZERO));
+
+        assert_eq!(
+            session.position(),
+            Duration::from_millis(555_488),
+            "缓冲期不接受任何引擎位置（上一部的读数 / 0 都不行）"
+        );
+        assert_eq!(
+            session.reportable_position(),
+            None,
+            "缓冲期不能提交位置：提交就会把服务端的续播点写坏"
+        );
+
+        // 真的出画之后，位置才可信。
+        session.handle(EngineEvent::FirstFrame);
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(556)));
+        assert_eq!(session.position(), Duration::from_secs(556));
+        assert_eq!(
+            session.reportable_position(),
+            Some(Duration::from_secs(556))
+        );
+    }
+
+    /// `Buffering(false)` 从 `Opening` 回来时状态是 `Playing`，但本次打开**还没出过画面**。
+    /// 这种 `Playing` 也不能接受位置 / 不能做本地插值（同一个 R5-1 门）。
+    #[test]
+    fn playing_without_a_first_frame_still_rejects_positions() {
+        let (mut session, _clock) = session();
+        session.begin(Duration::from_secs(300), Some(Duration::from_secs(7000)));
+        session.handle(EngineEvent::Buffering(true));
+        session.handle(EngineEvent::Buffering(false));
+        assert_eq!(session.state(), SessionState::Playing);
+        assert!(!session.started());
+
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(5226)));
+        session.advance_position(Duration::from_secs(3));
+        assert_eq!(
+            session.position(),
+            Duration::from_secs(300),
+            "还没出画就不该有任何位置变化"
+        );
+        assert_eq!(session.reportable_position(), None);
+
+        session.handle(EngineEvent::FirstFrame);
+        session.advance_position(Duration::from_secs(3));
+        assert_eq!(session.position(), Duration::from_secs(303));
+    }
+
+    /// 退出（`reset`）与重试（`retry`）都把"已出画"门复位：下一次打开要重新等首帧。
+    #[test]
+    fn reset_and_retry_forget_the_started_gate() {
+        let (mut session, _clock) = playing(600);
+        assert!(session.started());
+
+        let resume = session.retry();
+        assert_eq!(resume, Duration::ZERO);
+        assert!(!session.started(), "重试 = 新的一次打开，要重新等首帧");
+        assert_eq!(session.reportable_position(), None);
+
+        session.handle(EngineEvent::FirstFrame);
+        assert_eq!(session.reportable_position(), Some(Duration::ZERO));
+        session.reset();
+        assert!(!session.started());
+        assert_eq!(session.reportable_position(), None, "Idle 不提交任何位置");
     }
 }

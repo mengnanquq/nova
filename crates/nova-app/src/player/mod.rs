@@ -135,6 +135,9 @@ pub(crate) struct Host {
     shot_error: Option<String>,
     /// 上一次 `AfterRendering` 的时刻（判断合成器还在不在给帧回调）。
     last_present: Option<Instant>,
+    /// 测试：实际交给引擎的字幕上抬量（百分比）序列。
+    #[cfg(test)]
+    subtitle_margins: Vec<i64>,
 }
 
 impl Host {
@@ -158,6 +161,8 @@ impl Host {
             shot: None,
             shot_error: None,
             last_present: None,
+            #[cfg(test)]
+            subtitle_margins: Vec::new(),
         }
     }
 
@@ -359,6 +364,15 @@ impl Host {
         drained
     }
 
+    /// 测试注入：把一条引擎事件排进待处理队列。
+    ///
+    /// 真实路径上这些事件来自 `drain_stream(engine.events())`；测试里没有 mpv，
+    /// 但 `pump_events` 对它们的处理（代次门、会话门）是一致的。
+    #[cfg(test)]
+    fn push_event(&mut self, event: EngineEvent) {
+        self.events.push(event);
+    }
+
     /// 如果引擎已接入并且有排队的 open，就现在发起。
     fn try_open(&mut self, runtime: &Handle) -> Option<Result<(), PlaybackError>> {
         let engine = self.engine.as_mut()?;
@@ -420,10 +434,16 @@ impl Host {
         }
     }
 
-    /// 字幕安全区：控制层可见时把字幕往上抬（`sub-margin-y`）。
-    fn set_subtitle_margin(&mut self, runtime: &Handle, y: i64) {
+    /// 字幕安全区：把字幕抬到控制层上方。
+    ///
+    /// 传入的 `lift_percent` 是**屏幕高度的百分比**（0 = 原位）。窗口像素 → 百分比的
+    /// 换算在 [`Player::set_subtitle_margin`] 里做（那里才知道窗口高度）；
+    /// mpv 那边只有百分比属性（`sub-pos`）真的能抬动 ASS 字幕。
+    fn set_subtitle_margin(&mut self, runtime: &Handle, lift_percent: i64) {
+        #[cfg(test)]
+        self.subtitle_margins.push(lift_percent);
         if let Some(engine) = self.engine.as_mut()
-            && let Err(error) = runtime.block_on(engine.set_subtitle_margin(y))
+            && let Err(error) = runtime.block_on(engine.set_subtitle_margin(lift_percent))
         {
             tracing::warn!(%error, "engine.set_subtitle_margin 失败");
         }
@@ -630,7 +650,7 @@ pub(crate) struct Player {
     volume: f32,
     muted: bool,
     rate: f32,
-    /// 当前字幕抬升量（`sub-margin-y`，px）：避免重复下发。
+    /// 当前字幕上抬量（屏幕高度的百分比，`0` = 原位）：避免重复下发。
     subtitle_margin: i64,
     /// 当前字幕延迟（秒，可为负）：菜单显示用，同时下发给 mpv `sub-delay`。
     subtitle_delay: f64,
@@ -1045,6 +1065,17 @@ impl Player {
 
     fn pump_events(&mut self) {
         let events = self.host.borrow_mut().drain_events();
+        // 本次 open 的请求还没下发时，事件流里的一切都属于**上一次**会话：
+        // 退出播放页只 `pause` 引擎（不 unload），mpv 里还挂着上一部片子，属性观察、
+        // 帧回调、缓冲翻转都照跑，排队等 `try_open` 的这段时间（取直链的网络往返）里
+        // 它们仍在往通道里落。把它们写进刚 `begin()` 的新会话，就是把上一部的位置 /
+        // 轨道 / 首帧当成新会话的（体检 R5-1：缓冲期读数 = 上一部的续播点）。
+        if self.request.is_none() {
+            if !events.is_empty() {
+                tracing::trace!(events = events.len(), "丢弃属于上一次会话的引擎事件");
+            }
+            return;
+        }
         for event in events {
             match &event {
                 EngineEvent::TracksChanged(tracks) => {
@@ -1160,14 +1191,35 @@ impl Player {
         self.dirty = true;
     }
 
-    /// 字幕安全区：控制层可见时把字幕抬起，隐藏时归零（只在数值变化时下发）。
-    pub(crate) fn set_subtitle_margin(&mut self, y: i64) {
-        if self.subtitle_margin == y {
+    /// 字幕安全区：控制层可见时把字幕往上抬，隐藏时归零（只在数值变化时下发）。
+    ///
+    /// 界面（`nova-ui`）传来的是**逻辑像素**：它按窗口高度的 35% 算出安全区高度
+    /// （`PlayerView::subtitle_margin`），控制层的真实高度由 theme 的
+    /// `player-controls-block + player-gutter` 推导（900px 窗口上 ≈ 屏幕高度的 28%），
+    /// 所以 35% 安全区一定盖得住它。
+    ///
+    /// 引擎要的是百分比（mpv `sub-pos`），所以在这里换算：窗口高度必须是**逻辑像素**
+    /// （与传入的 px 同一坐标系），否则缩放变化会让字幕高低跳动。
+    pub(crate) fn set_subtitle_margin(&mut self, margin_px: i64) {
+        let lift = subtitle_lift_percent(margin_px, self.window_height_logical());
+        if self.subtitle_margin == lift {
             return;
         }
-        self.subtitle_margin = y;
+        self.subtitle_margin = lift;
         let runtime = self.runtime.clone();
-        self.host.borrow_mut().set_subtitle_margin(&runtime, y);
+        self.host.borrow_mut().set_subtitle_margin(&runtime, lift);
+    }
+
+    /// 窗口高度（逻辑像素）；读不到时返回 0（调用方按"不抬"处理）。
+    fn window_height_logical(&self) -> f64 {
+        let window = self.app.ui().window();
+        let scale = f64::from(window.scale_factor());
+        let height = f64::from(window.size().height);
+        if scale > 0.0 && height > 0.0 {
+            height / scale
+        } else {
+            0.0
+        }
     }
 
     /// 倍速。
@@ -1271,15 +1323,13 @@ impl Player {
     }
 
     /// 退出播放页：先提交一次进度并尽力补发，再停掉引擎与计时器。
-    pub(crate) fn exit(&mut self, ui_position: Duration) {
-        // 界面传进来的是它自己的插值位置，未必跟上了引擎；进度必须以引擎播放时钟为准，
-        // 否则退出上报会写成 0（实测：服务端日志 `stopped playback ... at 0ms`）。
-        let position = if self.session.position().is_zero() {
-            ui_position
-        } else {
-            self.session.position()
-        };
-        if let Some(progress) = self.build_progress_at(position) {
+    ///
+    /// `_ui_position` 是界面自己的读数，**不再使用**：旧实现拿它当
+    /// `session.position()` 为 0 时的兜底，结果是两边都可能被污染（界面读数基于节流
+    /// 推送的视图，缓冲期它就是上一部片子的位置或 0）。现在只提交
+    /// `Session::reportable_position()`：本次打开还没出过画面就一条也不发。
+    pub(crate) fn exit(&mut self, _ui_position: Duration) {
+        if let Some(progress) = self.build_progress() {
             self.progress.submit(ProgressTrigger::Exit, progress);
         }
         if let Some(outcome) = self.progress.flush() {
@@ -1382,7 +1432,11 @@ impl Player {
     }
 
     fn build_progress(&self) -> Option<PlaybackProgress> {
-        self.build_progress_at(self.session.position())
+        // **只有本次打开真的出过画面之后的位置才可以上报**（见
+        // `Session::reportable_position`）：缓冲期不提交任何东西，服务端已有的续播点
+        // 既不会被写成上一部的位置，也不会被清成 0（体检 R5-1 / W5-2 实证）。
+        let position = self.session.reportable_position()?;
+        self.build_progress_at(position)
     }
 
     fn build_progress_at(&self, position: Duration) -> Option<PlaybackProgress> {
@@ -1541,6 +1595,19 @@ impl Player {
             }
         }
     }
+}
+
+/// 字幕上抬量：窗口逻辑像素 → 屏幕高度的百分比（mpv `sub-pos` 的坐标系）。
+///
+/// 输入是 `nova-ui` 按布局算出的安全区高度（逻辑像素），窗口高度也是逻辑像素——
+/// 同一坐标系相除，缩放因子自然消掉。读不到窗口尺寸（尺寸为 0 / 非有限值）时返回 0
+/// （= 不抬，回到 mpv 原位）：宁可不抬，也不能因为一个坏读数把字幕推到画面中间。
+fn subtitle_lift_percent(margin_px: i64, window_height_logical: f64) -> i64 {
+    if margin_px <= 0 || !window_height_logical.is_finite() || window_height_logical <= 0.0 {
+        return 0;
+    }
+    let percent = (margin_px as f64 * 100.0 / window_height_logical).round();
+    percent.clamp(0.0, 90.0) as i64
 }
 
 /// 把 provider 的错误翻译成可行动的中文（不含 URL / 令牌）。
@@ -1892,5 +1959,166 @@ mod tests {
         // 空流：立刻返回，不 await。
         let mut stream = futures::stream::iter(Vec::<EngineEvent>::new());
         assert!(drain_stream(&mut stream).is_empty());
+    }
+
+    /// 体检 R5-1：缓冲期（首帧之前）引擎发来的一切都属于**上一次**会话。
+    ///
+    /// 时序完全照真机：会话 A 真的播到 `OLD` → 退出 → 会话 B 以续播点 `Y` 打开 →
+    /// 引擎在 `file-loaded` / 首帧之前发 A 的位置与 0 → 退出。断言：
+    ///
+    /// - `pump_events` 在本次 open 下发之前丢弃所有事件；
+    /// - 下发之后、首帧之前的位置也不进会话（`Opening` 门）；
+    /// - 界面显示的是本次 open 的续播点 `Y`（R5-2）；
+    /// - `build_progress()`（`exit` / Tick / Pause / 切轨的唯一入口）返回 `None`：
+    ///   一条进度都不发，服务端已有的续播点不可能被写成 `OLD` 或 0。
+    #[test]
+    fn buffering_session_never_reports_the_previous_sessions_position() {
+        let (mut player, _dir) = silent_player();
+        let total = Some(Duration::from_secs(7000));
+        let old = Duration::from_secs(5286);
+        let resume = Duration::from_millis(555_488);
+
+        // 会话 A：真的出过画，位置推到 5286s。
+        player.session.begin(Duration::ZERO, total);
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.handle(EngineEvent::PositionChanged(old));
+        assert_eq!(
+            player.session.reportable_position(),
+            Some(old),
+            "正常播放的会话应该可以提交"
+        );
+
+        // 退出播放页（真实路径：`exit()` 提交后 `session.reset()`）。
+        player.exit(old);
+
+        // 会话 B：续播点 555.488s，请求还没下发（取直链的网络往返中）——
+        // 这段窗口里 mpv 里还是上一部片子，事件照发。
+        player.session.begin(resume, total);
+        player.request = None;
+        player.target = Some(Target {
+            item_id: ItemId::new("b"),
+            source_id: nova_core::SourceId::new("src-b"),
+            title: "新片 B".to_owned(),
+            subtitle: None,
+            duration: total,
+        });
+        player
+            .host
+            .borrow_mut()
+            .push_event(EngineEvent::PositionChanged(old));
+        player
+            .host
+            .borrow_mut()
+            .push_event(EngineEvent::PositionChanged(Duration::ZERO));
+        player.pump_events();
+        assert_eq!(
+            player.session.position(),
+            resume,
+            "open 请求下发之前的事件必须整条丢掉（它们属于上一部）"
+        );
+
+        // 本次 open 的请求下发了（真实路径：`on_open_ready` → `enqueue_open`），
+        // 但 mpv 还在加载新文件：旧的 `time-pos` 与 0 仍会从通道里冒出来。
+        player.request = Some(OpenRequest::new("http://127.0.0.1:1/Videos/b/stream"));
+        player
+            .host
+            .borrow_mut()
+            .push_event(EngineEvent::PositionChanged(old));
+        player
+            .host
+            .borrow_mut()
+            .push_event(EngineEvent::PositionChanged(Duration::ZERO));
+        player.pump_events();
+
+        assert_eq!(
+            player.live_view().position,
+            resume,
+            "缓冲期界面显示本次 open 的续播点（R5-2），不是上一部的 {old:?}"
+        );
+        assert_eq!(
+            player.build_progress(),
+            None,
+            "缓冲期 Tick / 退出都不得提交位置"
+        );
+        assert_eq!(player.session.reportable_position(), None);
+
+        // 真的出画之后，位置才可信，且必须是本次会话的值。
+        player.session.handle(EngineEvent::FirstFrame);
+        player
+            .host
+            .borrow_mut()
+            .push_event(EngineEvent::PositionChanged(Duration::from_millis(556_500)));
+        player.pump_events();
+        let progress = player.build_progress().expect("出画后应该可以上报");
+        assert_eq!(progress.position, Duration::from_millis(556_500));
+        assert_ne!(progress.position, old);
+        assert_ne!(progress.position, Duration::ZERO);
+    }
+
+    /// 字幕安全区的单位换算：界面给的是窗口逻辑像素，mpv 要的是屏幕高度百分比。
+    #[test]
+    fn subtitle_lift_is_converted_from_pixels_to_a_percentage() {
+        // 900px 高窗口、界面按 35% 算出的 315px 安全区 → 35%。
+        assert_eq!(subtitle_lift_percent(315, 900.0), 35);
+        // 控制层隐藏时界面给 0 → 不抬（mpv 回原位）。
+        assert_eq!(subtitle_lift_percent(0, 900.0), 0);
+        // 读不到窗口尺寸 / 坏值：不抬也比乱抬好。
+        assert_eq!(subtitle_lift_percent(315, 0.0), 0);
+        assert_eq!(subtitle_lift_percent(315, f64::NAN), 0);
+        assert_eq!(subtitle_lift_percent(-10, 900.0), 0);
+        // 极端窗口尺寸夹到 90%（再高字幕就跑到画面中间了）。
+        assert_eq!(subtitle_lift_percent(1_000_000, 900.0), 90);
+    }
+
+    /// 控制层显隐 → 下发给引擎的字幕位置（百分比）：隐藏归零、可见抬起。
+    ///
+    /// 走真实的 `Player::set_subtitle_margin`（`nova-ui` 的 `player-subtitle-margin`
+    /// 回调落到这里），并用测试后端上的窗口尺寸换算。
+    #[test]
+    fn control_visibility_toggles_the_engine_subtitle_lift() {
+        let (mut player, _dir) = silent_player();
+        player
+            .app
+            .ui()
+            .window()
+            .set_size(slint::PhysicalSize::new(1600, 900));
+
+        // 控制层可见（`nova-ui` 按窗口高度的 35% 算 → 315px），然后隐藏。
+        player.set_subtitle_margin(315);
+        player.set_subtitle_margin(0);
+        // 重复的同一值不重复下发。
+        player.set_subtitle_margin(0);
+
+        assert_eq!(
+            player.host.borrow().subtitle_margins,
+            vec![35, 0],
+            "可见 → 屏幕高度 35%，隐藏 → 0（回原位），重复值不重复下发"
+        );
+    }
+
+    /// 一个不上报进度的播放器（没有 provider），配一个空数据库。
+    fn silent_player() -> (Player, tempfile::TempDir) {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let player = Player::new(
+            app,
+            local,
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+        (player, dir)
     }
 }

@@ -63,7 +63,10 @@ pub(crate) enum Command {
     SelectSubtitle(SubtitleChoice),
     /// 字幕延迟（秒，**可负**：正数表示字幕更晚出现）。
     SetSubtitleDelay(f64),
-    /// 字幕安全区（`sub-margin-y`，px）：控制层可见时把字幕往上抬。
+    /// 字幕上抬量（屏幕高度的百分比，0 = 原位）：控制层可见时把字幕抬到它上方。
+    ///
+    /// 百分比而不是像素：mpv 能用得上的那个属性（`sub-pos`）就是百分比，
+    /// 而像素值需要屏幕高度才能换算——那个信息在界面侧，不在引擎里。
     SetSubtitleMargin(i64),
     SetRate(f32),
     Quit,
@@ -212,7 +215,7 @@ pub(crate) struct Worker {
     muted: bool,
     rate: f32,
     subtitle_delay: f64,
-    /// 字幕底部安全区（px，`sub-margin-y`）。
+    /// 字幕上抬量（屏幕高度的百分比，`0` = 原位）。
     subtitle_margin: i64,
 }
 
@@ -317,7 +320,7 @@ impl Worker {
                 self.apply_subtitle_delay();
             }
             Command::SetSubtitleMargin(y) => {
-                self.subtitle_margin = y.max(0);
+                self.subtitle_margin = y.clamp(0, SUBTITLE_LIFT_MAX_PERCENT);
                 self.apply_subtitle_margin();
             }
             Command::SetRate(rate) => {
@@ -471,6 +474,19 @@ impl Worker {
             ObservedProperty::Pause(_) | ObservedProperty::CoreIdle(_) | ObservedProperty::Cache(_)
         ) {
             self.refresh_buffering();
+        }
+        // `time-pos` 只在本次文件 **file-loaded 之后**才算数。
+        //
+        // `loadfile replace` 从下发到新文件真正加载完成之间（WAN 上实测能到几秒），
+        // mpv 里还是**上一部片子**：它的 `time-pos` 依旧会被观察者送进来，新文件刚接上时
+        // 也可能先报一个 0。这些值一旦被当成"当前会话的位置"，退出时就会被提交到服务端
+        // （体检 R5-1：从未播放的条目被写入上一部的读数、已有续播点被清成 0）。
+        //
+        // 实测（mpv 0.42，IPC 观察同一组属性）：`loadfile replace` 之后依次是
+        // `end-file` → `time-pos=None` → `start-file` → `file-loaded` → `time-pos=<新起点>`；
+        // 也就是说 `file-loaded` 之前还会有一拍旧文件的读数，滤掉它才是"本次打开的事件"。
+        if matches!(observed, ObservedProperty::TimePos(_)) && !self.loaded {
+            return;
         }
         if matches!(observed, ObservedProperty::Eof(true)) {
             // END_FILE 已经报过 Ended 时不重复。
@@ -671,9 +687,30 @@ impl Worker {
         self.set_property("sub-delay", &format!("{:.3}", self.subtitle_delay));
     }
 
-    /// 字幕安全区：`sub-margin-y`（px）把字幕往上抬，避开控制层的传输行。
+    /// 字幕安全区：把字幕往上抬到控制层上方，避开传输行。
+    ///
+    /// 用的属性是 **`sub-pos`**（屏幕高度百分比，100 = 原位），不是 `sub-margin-y`：
+    /// 真实渲染实测（mpv 0.42，1280x720 黑底 + 同一行字幕，量字幕像素行的位置）：
+    ///
+    /// | 选项 | ASS 字幕 | 纯文本（SRT） |
+    /// |---|---|---|
+    /// | 基线（底部 32px） | 32px | 38px |
+    /// | `sub-margin-y=280` | **32px（不动）** | 286px |
+    /// | `sub-margin-y-offset=280` | **32px（不动）** | **38px（不动）** |
+    /// | `sub-ass-force-margins=yes` + `sub-margin-y` | **32px（不动）** | — |
+    /// | `sub-pos=70` | 240px | 240px |
+    /// | `sub-pos=85` | 136px | 136px |
+    ///
+    /// 手册对上了：`--sub-margin-y` 是"**unstyled text subtitles**（无样式文本字幕）"的
+    /// 边距，ASS 由脚本自己摆位置；`--sub-margin-y-offset` 也只在文本路径生效；
+    /// `--sub-ass-force-margins` 只管"黑边里"那一种情况。ASS 里唯一生效的是 `sub-pos`
+    /// （实测只动底部对齐的事件：顶部 / 中间的对齐事件位置不变，不会把特效字幕弄乱）。
+    ///
+    /// `sub-pos` 对纯文本字幕同样生效（实测 SRT `sub-pos=85` 与 ASS 完全一致），
+    /// 所以不需要再另外下发 `sub-margin-y`。
     fn apply_subtitle_margin(&mut self) {
-        self.set_property("sub-margin-y", &self.subtitle_margin.to_string());
+        let pos = subtitle_pos(self.subtitle_margin).to_string();
+        self.set_property(SUBTITLE_POS_PROPERTY, &pos);
     }
 
     fn set_flag(&mut self, name: &str, value: bool) {
@@ -710,8 +747,25 @@ impl Worker {
     }
 }
 
-/// `http-header-fields` 的拼装。
+/// 可以用 `sub-pos` 把字幕抬起来的上限（屏幕高度的百分比）。
 ///
+/// 再高就会把字幕推到画面上半部（40% 以上开始盖人物），所以夹住；
+/// 控制层的真实高度（`Theme.player-controls-block + player-gutter`）在 900px 窗口上
+/// 约是屏幕高度的 28%，正常值远低于这个上限。
+const SUBTITLE_LIFT_MAX_PERCENT: i64 = 40;
+/// 字幕位置对应的 mpv 属性（屏幕高度百分比，100 = 原位）。
+const SUBTITLE_POS_PROPERTY: &str = "sub-pos";
+/// mpv 的 `sub-pos` 原位值。
+const SUBTITLE_POS_HOME: i64 = 100;
+
+/// 字幕上抬量（屏幕高度的百分比，0 = 原位）→ mpv `sub-pos`。
+///
+/// 注意 `sub-pos` 越小字幕越高：0 = 画面顶部。
+pub(crate) fn subtitle_pos(lift_percent: i64) -> i64 {
+    SUBTITLE_POS_HOME - lift_percent.clamp(0, SUBTITLE_LIFT_MAX_PERCENT)
+}
+
+/// `http-header-fields` 的拼装。
 /// **实测**（mpv 0.42）：逗号是列表分隔符，值里的逗号必须写成 `\,`，多个头之间用
 /// **不含空格**的逗号分隔。否则 mpv 会把后续的头折成上一个头的续行（服务器收到
 /// `X-A: a\r\n X-B: c` 这种一整个值），而 Jellyfin 的 Authorization 头恰好含逗号，
@@ -727,6 +781,27 @@ pub(crate) fn join_http_headers(headers: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 控制层显隐 → 下发给 mpv 的字幕位置属性。
+    ///
+    /// 隐藏时必须回到原位（`sub-pos=100`），可见时必须真的抬高，且只能是 `sub-pos`——
+    /// 真实渲染实测 `sub-margin-y` / `sub-margin-y-offset` / `sub-ass-force-margins`
+    /// 对 ASS 字幕**完全无效**（本机 6489 就是 ASS，字幕因此一直被控制层盖住）。
+    #[test]
+    fn subtitle_lift_maps_to_sub_pos_and_returns_home() {
+        assert_eq!(SUBTITLE_POS_PROPERTY, "sub-pos");
+        // 控制层隐藏：回原位。
+        assert_eq!(subtitle_pos(0), 100);
+        // 控制层可见：900px 窗口的控制层安全区约 35% → sub-pos=65。
+        assert_eq!(subtitle_pos(35), 65);
+        // 异常值不越界：负数当 0，过大夹到上限。
+        assert_eq!(subtitle_pos(-5), 100);
+        assert_eq!(
+            subtitle_pos(999),
+            SUBTITLE_POS_HOME - SUBTITLE_LIFT_MAX_PERCENT
+        );
+        assert!(subtitle_pos(999) > 0, "不能把字幕推到画面上边缘以外");
+    }
 
     #[test]
     fn headers_escape_commas_and_avoid_spaces() {
