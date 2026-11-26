@@ -367,6 +367,13 @@ impl Worker {
             self.events
                 .emit(EngineEvent::Error(PlaybackError::engine(message)));
         }
+        // `pause` 是 mpv 的 **core 级**属性：`loadfile` 不会把它复位。上一次会话退出时
+        // `Player::exit` 设了 `pause=yes`（离开播放页就该停声），这里如果不清，新文件会
+        // 以暂停状态加载——表现为第二次起播位置冻结在续播点、不出帧、15 秒后报卡死
+        // （体检 R4-1；实测 `loadfile` 前后 `pause` 都是 yes、`core-idle` 是 yes）。
+        // 打开即"开始播放"：紧跟 `loadfile` 下发（排在同一个命令队列里，新文件加载完
+        // 之前就生效，同时避免把上一部片子意外解暂停而闪一下声音）。
+        self.set_flag("pause", false);
     }
 
     fn on_event(&mut self, event: MpvEvent) {

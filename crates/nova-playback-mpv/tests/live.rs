@@ -684,3 +684,142 @@ impl EngineDiagnosticsView {
         self.degraded
     }
 }
+
+/// 一次 `open` 之后必须真的开始播放：**会话 1 退出（`pause`）→ 会话 2 起播**不能停在暂停。
+///
+/// 复现序列与产品一致（体检 R4-1）：`open` → 出帧 → `Player::exit` 会 `pause`（离开播放页
+/// 就该停声，引擎不销毁）→ 再 `open` 同一素材的续播点。`pause` 是 mpv 的 **core 级**属性，
+/// `loadfile` 不会复位它：修复前第二次 `open` 之后位置冻结在续播点、`core-idle` 恒为 yes、
+/// 再也拿不到帧（`FirstFrame` 不放，上层 15 秒后报卡死），按一次 Space×2 才救活。
+///
+/// 素材用 ffmpeg 在临时目录里现生成，不需要 Jellyfin；但仍然 `#[ignore]`：它要真实 libmpv +
+/// 真实 GPU（EGL surfaceless 上下文）与 ffmpeg，CI / 容器里都不具备（同 `docs/testing.md`
+/// 的"真机用例默认跳过"策略）。
+#[test]
+#[ignore = "需要真实 libmpv + GPU（EGL surfaceless）与 ffmpeg；不需要 Jellyfin"]
+fn live_reopen_after_exit_pause_starts_playing() {
+    let dir = tempfile::Builder::new()
+        .prefix("nova-reopen-")
+        .tempdir()
+        .expect("建临时目录失败");
+    let media = dir.path().join("clip.mp4");
+    let generated = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=8:size=320x240:rate=15",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&media)
+        .status();
+    if !matches!(generated, Ok(status) if status.success()) {
+        eprintln!("跳过：没有可用的 ffmpeg，无法生成测试素材");
+        return;
+    }
+    let url = media.to_string_lossy().into_owned();
+
+    let (functions, _gl) = gl_functions();
+    let mut engine = MpvEngine::new(EngineOptions::new().audio_output("null")).expect("建引擎失败");
+    engine.attach_gl(functions).expect("attach_gl 失败");
+
+    // 会话 1：正常起播（第一次会话里 mpv 的 pause 初值是 no）。
+    block_on(engine.open(OpenRequest::new(url.clone()))).expect("第一次 open 失败");
+    let mut first = Pumped::default();
+    pump(&mut engine, &mut first, Duration::from_secs(20), |state| {
+        state.first_frames > 0 && state.max_position >= Duration::from_millis(800)
+    });
+    eprintln!("会话 1：{first:?}");
+    assert!(first.first_frames > 0, "会话 1 没有出帧：{first:?}");
+    assert!(
+        first.max_position >= Duration::from_millis(800),
+        "会话 1 位置没有推进：{first:?}"
+    );
+
+    // 会话 1 结束：产品里 `Player::exit` 就是这么做的（引擎与渲染上下文都留着）。
+    block_on(engine.pause()).expect("pause 失败");
+    let mut paused = Pumped::default();
+    pump(&mut engine, &mut paused, Duration::from_millis(500), |_| {
+        false
+    });
+    let paused_at = paused.max_position;
+    pump(&mut engine, &mut paused, Duration::from_millis(500), |_| {
+        false
+    });
+    eprintln!("暂停：{:?} → {:?}", paused_at, paused.max_position);
+    assert!(
+        paused.max_position <= paused_at + Duration::from_millis(100),
+        "pause 之后位置还在推进：{paused_at:?} → {:?}",
+        paused.max_position
+    );
+
+    // 会话 2：同一个素材 + 续播点，走 `Player::begin` → `open` 的同一条路径。
+    block_on(
+        engine.open(OpenRequest::new(url.clone()).with_resume_at(Duration::from_millis(1000))),
+    )
+    .expect("第二次 open 失败");
+    let mut second = Pumped::default();
+    pump(&mut engine, &mut second, Duration::from_secs(15), |state| {
+        state.first_frames > 0 && state.max_position >= Duration::from_millis(1600)
+    });
+    eprintln!("会话 2（续播点 1000ms）：{second:?}");
+    assert!(second.errors.is_empty(), "会话 2 引擎报错：{second:?}");
+    assert!(
+        second.first_frames > 0,
+        "第二次 open 之后一帧都没出（上一会话的 pause 还留在 mpv 里）：{second:?}"
+    );
+    assert!(
+        second.max_position >= Duration::from_millis(1600),
+        "第二次 open 之后位置冻结在 {:?}（续播点 1000ms，期望推进到 ≥1600ms）：{second:?}",
+        second.max_position
+    );
+
+    let _ = block_on(engine.close());
+}
+
+/// 泵事件 + 按需渲染一帧。
+fn pump(
+    engine: &mut MpvEngine,
+    state: &mut Pumped,
+    timeout: Duration,
+    mut done: impl FnMut(&Pumped) -> bool,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        for event in drain(engine) {
+            match event {
+                EngineEvent::FirstFrame => state.first_frames += 1,
+                EngineEvent::PositionChanged(position) => {
+                    state.max_position = state.max_position.max(position);
+                }
+                EngineEvent::Error(error) => state.errors.push(format!("{error:?}")),
+                EngineEvent::FramePresented => {}
+                _ => {}
+            }
+        }
+        if engine.needs_redraw() {
+            match engine.render(0, 640, 360) {
+                Ok(true) => state.frames += 1,
+                Ok(false) => {}
+                Err(error) => state.errors.push(format!("render: {error:?}")),
+            }
+        }
+        if done(state) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+}
+
+/// `pump` 的观测结果。
+#[derive(Debug, Default)]
+struct Pumped {
+    first_frames: usize,
+    frames: u64,
+    max_position: Duration,
+    errors: Vec<String>,
+}
