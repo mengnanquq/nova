@@ -14,15 +14,16 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 播放引擎只用 libmpv（GStreamer 方案已弃用，见 docs/adr/0001）；
-      # Slint 的 winit + femtovg 后端需要 fontconfig / xkbcommon / wayland 的开发包。
+      # Slint 的 winit + femtovg 后端需要 fontconfig / xkbcommon / wayland 的开发包；
+      # 凭证存储（系统密钥环）经 libdbus-sys 需要 libdbus-1-dev。
       - name: Install system dev packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libmpv-dev libclang-dev \
+            pkg-config libmpv-dev libclang-dev libdbus-1-dev \
             libfontconfig1-dev libxkbcommon-dev libwayland-dev fonts-noto-cjk
 
       - uses: dtolnay/rust-toolchain@stable
