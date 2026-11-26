@@ -396,13 +396,17 @@ nova items — 列出媒体库里的条目
 
   --library <id>  媒体库 id（`nova libraries` 输出里的第一列）
   --search <s>    按标题搜索（`--cached` 时在本地缓存里过滤）
-  --limit N       最多返回 N 条（默认由服务端决定）
+  --limit N       最多返回 N 条（默认 200，与桌面端刷新每页一致；
+                  数的是服务端原始记录，文件夹 / 季 / 集也会占名额）
   --cached        只读本地 SQLite 缓存，一个网络请求都不发（断网可用）；
                   缓存里没有时先不带 `--cached` 跑一次同步
   --json          输出 JSON
   --server <id>   多台服务器时指定用哪一台
 
-联网拉到的条目会写进 nova.db（`upsert_items`），`--cached` 读的就是这份数据。";
+联网拉到的**电影 / 剧集**会写进 nova.db：父项记为 `--library` 指定的库（与桌面端
+刷新同一规则，见 `nova_storage::library_items`），季 / 集是播放层级，不入库。
+`--cached` 读的就是这份数据；需要把整个库完整拉全并清理服务端已删除条目时，
+用桌面端刷新（它分页拉全后才清理）。";
 
 const INFO: &str = "\
 nova info — 查看单个条目及其可播放资源

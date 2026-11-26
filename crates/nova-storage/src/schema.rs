@@ -10,7 +10,7 @@
 //! - 本模块的语句都是静态字面量，不存在运行期拼装。
 
 /// 当前 schema 版本，写入 `PRAGMA user_version`。
-pub(crate) const SCHEMA_VERSION: i64 = 2;
+pub(crate) const SCHEMA_VERSION: i64 = 3;
 
 /// `preferences` 表里 [`nova_core::UserPreferences`] 的键名。
 pub(crate) const PREFERENCES_KEY: &str = "user_preferences";
@@ -182,6 +182,24 @@ WHERE server_id = ?1
 ORDER BY index_number IS NULL, index_number, sort_title
 ";
 
+/// 跨库、按标题匹配（本地搜索在输入时的即时反馈与离线结果）。
+///
+/// 匹配在 SQL 侧做，因为库归属写对之后顶层行几乎不存在（`parent_id IS NULL`
+/// 只有历史脏数据），不能再用 `children(None)` 拉一小撮再筛；而整库几万行也不
+/// 能全读进内存。`LIKE` 的通配符由调用方转义（见
+/// [`Database::search_items`](../items/struct.Database.html#method.search_items)），
+/// 这里的 `ESCAPE '\\'` 只是告诉 SQLite 用反斜杠做转义符。
+///
+/// 类型过滤仍在 Rust 侧（`MediaKind` 是 `nova-core` 的枚举），索引不需要额外
+/// 加：`LIKE '%词%'` 前缀是通配符，任何索引都用不上，扫 `(server_id)` 这一段
+/// 已经是最省的读法。
+pub(crate) const SQL_SELECT_SEARCH: &str = "
+SELECT id, kind, payload FROM items
+WHERE server_id = ?1
+  AND title LIKE ?2 ESCAPE '\\'
+ORDER BY updated_at DESC, sort_title, id
+";
+
 /// 同 [`SQL_SELECT_CHILDREN`]，但按**加入时间倒序**（"最近添加"排序）。
 ///
 /// `updated_at` 是同步时写入的时间戳（有 `idx_items_updated_at` 索引）。
@@ -237,7 +255,7 @@ SELECT id, kind FROM items WHERE server_id = ?1 AND parent_id = ?2
 /// 是否是媒体库；季 / 集只要父项不是本地条目就算断了）——
 /// 见 [`Database::unreachable_item_ids`](../items/struct.Database.html)。
 ///
-/// 媒体库本身不在 `items` 表里（SQLite 里没有 libraries 表），所以这里的子查询
+/// 媒体库本身不在 `items` 表里（v3 的 `libraries` 表不参与这条查询），所以这里的子查询
 /// 查不到库 id，调用方必须用当前库列表把它们排除，否则会把整个库的条目当成悬空。
 /// `parent_id = ''`（空串）也算不可用：它既不是库也不是条目，任何视图都查不到。
 pub(crate) const SQL_SELECT_UNREACHABLE_ID_KINDS: &str = "
@@ -399,6 +417,53 @@ CREATE TABLE mylist (
 );
 ";
 
+/// v3：持久化服务端媒体库列表。
+///
+/// 以前媒体库只存在 `nova_app::Local` 的内存里（`set_libraries`），进程一退就没了：
+/// 离线启动时标签只能靠"缓存里有条目就合成一个「全部」"兜底，真实库名（电影 /
+/// 动画电影 / 剧集）看不到。列表本身是服务端结构的本地副本，条目才是缓存；但
+/// 它决定顶部标签与库页的 `ParentId`，没有它离线浏览只能退化。
+///
+/// `kind` 存 `MediaKind` 的 serde 文本（与 `items.kind` 同一编码，见
+/// `crate::codec::enum_to_text`）；`collection_type` 保留服务端原值（`movies` /
+/// `tvshows`），`item_count` 服务端没给就是 NULL。
+pub(crate) const MIGRATION_V3: &str = "
+CREATE TABLE libraries (
+    server_id       TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    id              TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    collection_type TEXT,
+    item_count      INTEGER,
+    PRIMARY KEY (server_id, id)
+);
+";
+
+// ---------------------------------------------------------------------------
+// libraries
+// ---------------------------------------------------------------------------
+
+/// 覆盖一台服务器的媒体库列表（先删后插，调用方负责放进事务）。
+pub(crate) const SQL_DELETE_LIBRARIES: &str = "DELETE FROM libraries WHERE server_id = ?1";
+
+/// 写入一个媒体库。
+pub(crate) const SQL_INSERT_LIBRARY: &str = "
+INSERT INTO libraries (server_id, id, name, kind, collection_type, item_count)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(server_id, id) DO UPDATE SET
+    name            = excluded.name,
+    kind            = excluded.kind,
+    collection_type = excluded.collection_type,
+    item_count      = excluded.item_count
+";
+
+/// 列出一台服务器的媒体库（按显示名排序，与标签顺序一致）。
+pub(crate) const SQL_SELECT_LIBRARIES: &str = "
+SELECT id, name, kind, collection_type, item_count FROM libraries
+WHERE server_id = ?1
+ORDER BY name COLLATE NOCASE, id
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +481,7 @@ mod tests {
             SQL_UPSERT_ITEM,
             SQL_SELECT_ITEM,
             SQL_SELECT_CHILDREN,
+            SQL_SELECT_SEARCH,
             SQL_SELECT_IN_PROGRESS,
             SQL_COUNT_ITEMS,
             SQL_SELECT_CHILD_ID_KINDS,
@@ -432,6 +498,9 @@ mod tests {
             SQL_COUNT_SOURCES,
             SQL_UPSERT_PREFERENCES,
             SQL_SELECT_PREFERENCES,
+            SQL_DELETE_LIBRARIES,
+            SQL_INSERT_LIBRARY,
+            SQL_SELECT_LIBRARIES,
             SQL_UPSERT_SYNC_STATE,
             SQL_SELECT_SYNC_STATE,
             SQL_UPSERT_IMAGE,
@@ -441,6 +510,9 @@ mod tests {
             SQL_SELECT_IMAGES_BY_LRU,
             SQL_DELETE_IMAGE,
         ] {
+            // `LIKE ... ESCAPE '\'` 里的单引号是**语法**（转义符字面量），不是值；
+            // 守卫的本意是"别把标题 / URL / 令牌拼进 SQL"，这里先把它剔掉再检查。
+            let sql = sql.replace("ESCAPE '\\'", "");
             assert!(!sql.contains('\''), "SQL 中出现了字符串字面量：{sql}");
             assert!(!sql.contains("format!"), "SQL 中出现了 format!：{sql}");
         }

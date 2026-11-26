@@ -236,11 +236,21 @@ async fn cli_flow_against_live_server() {
         !page_items.is_empty() && page_items.len() <= 5,
         "`--limit 5` 应当返回 1..=5 条（文件夹会被过滤掉）：{page}"
     );
-    let cached_id = page_items[0]["id"]
+    // `items` 的缓存路径与桌面端刷新一致：只写电影 / 剧集（季 / 集是播放层级，
+    // 不作为孤儿行进库）。列表输出仍然是服务端这一页，所以先从里面挑一个可缓存的条目。
+    let cacheable: Vec<&Value> = page_items
+        .iter()
+        .filter(|item| matches!(item["kind"].as_str(), Some("movie" | "series")))
+        .collect();
+    let Some(first_cached) = cacheable.first() else {
+        eprintln!("提示：这一页没有电影 / 剧集（本地缓存不写季 / 集），跳过缓存命中与播放断言");
+        return;
+    };
+    let cached_id = first_cached["id"]
         .as_str()
         .expect("条目应当有 id")
         .to_owned();
-    let cached_title = page_items[0]["title"]
+    let cached_title = first_cached["title"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
@@ -266,10 +276,16 @@ async fn cli_flow_against_live_server() {
             .any(|item| item["id"].as_str() == Some(cached_id.as_str())),
         "缓存里应当有刚同步的条目：{cached}"
     );
+    assert!(
+        cached_items
+            .iter()
+            .all(|item| matches!(item["kind"].as_str(), Some("movie" | "series"))),
+        "缓存里不能出现季 / 集：{cached}"
+    );
     assert_eq!(
         cached["cached_total"],
-        page_items.len() as u64,
-        "缓存里的条目数应当与刚同步的那一页一致"
+        cacheable.len() as u64,
+        "缓存条目数 = 这一页里的电影 / 剧集数（季 / 集不写缓存）"
     );
 
     // 本地缓存上的搜索也必须能用（不发网络请求）。

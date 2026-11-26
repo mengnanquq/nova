@@ -64,6 +64,16 @@ const KNOWN_DEAD: &[(&str, &str, &str)] = &[
   就是"回调空实现"，它应该被修掉，而不是写进白名单。
 - 真机上的完整清单用 `--debug-socket` 的 `sweep` / `dead` 命令拿（见 `docs/debugging.md`）。
 
+## 真机测试用真实数据
+
+真机（Wayland 窗口 + 调试通道）验证一律用真实数据目录 `NOVA_DATA_DIR=$HOME/.local/share/nova`
+与真实服务器，不用副本——副本会掩盖真实数据才有的问题（库规模、归属、凭证状态）。约束：
+
+- 同一时刻只跑**一个**写真实目录的实例，用完 `{"cmd":"quit"}` 退出；
+- 不执行 `nova login`、不写密钥环、不手改 `servers.auth_state`；
+- 播放会向服务端提交进度：固定用少数几个条目（例如 6489 / 47156 / 6857），并记录改动过的续播点；
+- 会改变 schema 或批量删写缓存的改动，测试前先 `sqlite3 nova.db ".backup /tmp/…"` 备份。
+
 ## 起一个真实 Jellyfin
 
 ```bash

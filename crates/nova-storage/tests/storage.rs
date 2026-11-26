@@ -482,7 +482,7 @@ fn migration_is_idempotent_across_opens() {
 
     for _ in 0..3 {
         let db = Database::open(&path).expect("打开");
-        assert_eq!(db.schema_version().expect("版本"), 2);
+        assert_eq!(db.schema_version().expect("版本"), 3);
         db.upsert_server(&server_info(), 1).expect("写入");
     }
 
@@ -491,7 +491,7 @@ fn migration_is_idempotent_across_opens() {
     let version: i64 = conn
         .pragma_query_one(None, "user_version")
         .expect("读取版本");
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 
     // 文件库必须走 WAL。
     let journal: String = conn
@@ -517,7 +517,7 @@ fn schema_newer_than_supported_is_rejected() {
             error,
             StorageError::SchemaTooNew {
                 found: 99,
-                supported: 2
+                supported: 3
             }
         ),
         "错误的变体：{error:?}"
@@ -538,7 +538,7 @@ fn migration_failure_rolls_back() {
 
     let error = Database::open(&path).expect_err("迁移应失败");
     assert!(
-        matches!(error, StorageError::Migrate { from: 0, to: 2, .. }),
+        matches!(error, StorageError::Migrate { from: 0, to: 3, .. }),
         "错误的变体：{error:?}"
     );
 
@@ -933,4 +933,125 @@ fn browse_recent_spans_libraries_and_filters_kinds() {
     let limited = db.browse_recent(&server_id(), &kinds, 1).expect("取一条");
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].id.as_str(), "newer");
+}
+
+/// 本地搜索：跨库按标题匹配（库归属已写好的数据），只回电影 / 剧集，`limit` 生效。
+///
+/// 修复前 `views::search_view` 用的是 `children(None)`（`parent_id IS NULL`），
+/// 库归属写对之后这条查询几乎取不到任何条目。
+#[test]
+fn search_matches_across_libraries_and_skips_hierarchy() {
+    let db = Database::open_in_memory().expect("内存库");
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let mut dune = movie("dune", Duration::ZERO, false);
+    dune.title = "Dune".into();
+    dune.sort_title = "Dune".into();
+    dune.parent_id = Some(ItemId::new("lib-movies"));
+    let mut prophecy = item("prophecy", MediaKind::Series, Some("lib-series"), None);
+    prophecy.title = "Dune Prophecy".into();
+    prophecy.sort_title = "Dune Prophecy".into();
+    let mut episode = item("ep", MediaKind::Episode, Some("prophecy"), Some(1));
+    episode.title = "Dune 第 1 集".into();
+    episode.sort_title = episode.title.clone();
+    let mut season = item("season", MediaKind::Season, Some("prophecy"), Some(1));
+    season.title = "Dune 第 1 季".into();
+    season.sort_title = season.title.clone();
+    db.upsert_items(&server_id(), &[dune, prophecy, episode, season], 10)
+        .expect("写条目");
+
+    let kinds = [MediaKind::Movie, MediaKind::Series];
+    let hits = db
+        .search_items(&server_id(), &kinds, "dune", 10)
+        .expect("搜索");
+    let ids: Vec<&str> = hits.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["dune", "prophecy"], "大小写不敏感，且不含季 / 集");
+
+    // `limit` 在迭代时生效，且类型过滤先于计数（季 / 集不占名额）。
+    let limited = db
+        .search_items(&server_id(), &kinds, "dune", 1)
+        .expect("搜索");
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id.as_str(), "dune");
+
+    // 只要电影时，剧集不出现。
+    let movies = db
+        .search_items(&server_id(), &[MediaKind::Movie], "dune", 10)
+        .expect("搜索");
+    assert_eq!(movies.len(), 1);
+
+    // 中文标题按字节包含匹配。
+    let cn = db
+        .search_items(&server_id(), &kinds, "第 1 季", 10)
+        .expect("搜索");
+    assert!(cn.is_empty(), "季不在搜索类型里");
+}
+
+/// `%` / `_` 必须按字面量匹配，不能当通配符。
+#[test]
+fn search_escapes_like_wildcards() {
+    let db = Database::open_in_memory().expect("内存库");
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let mut percent = movie("pct", Duration::ZERO, false);
+    percent.title = "100% 纯爱".into();
+    percent.sort_title = percent.title.clone();
+    let mut underscore = movie("under", Duration::ZERO, false);
+    underscore.title = "A_B 计划".into();
+    underscore.sort_title = underscore.title.clone();
+    let mut plain = movie("plain", Duration::ZERO, false);
+    plain.title = "普通片".into();
+    plain.sort_title = plain.title.clone();
+    db.upsert_items(&server_id(), &[percent, underscore, plain], 10)
+        .expect("写条目");
+
+    let kinds = [MediaKind::Movie, MediaKind::Series];
+    let hits = db
+        .search_items(&server_id(), &kinds, "%", 10)
+        .expect("搜索");
+    let ids: Vec<&str> = hits.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["pct"]);
+
+    let hits = db
+        .search_items(&server_id(), &kinds, "_", 10)
+        .expect("搜索");
+    let ids: Vec<&str> = hits.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["under"]);
+
+    // 反斜杠本身也是转义符，不能把后面那个字符吃掉。
+    let mut slash = movie("slash", Duration::ZERO, false);
+    slash.title = r"路径 C:\media".into();
+    slash.sort_title = slash.title.clone();
+    db.upsert_items(&server_id(), &[slash], 10).expect("写条目");
+    let hits = db
+        .search_items(&server_id(), &kinds, r"C:\media", 10)
+        .expect("搜索");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id.as_str(), "slash");
+}
+
+/// 库归属规则只有一份（`nova_storage::library_items`）：电影 / 剧集的父项一律
+/// 写成库，季 / 集丢弃。CLI 与桌面端刷新都走它。
+#[test]
+fn library_items_force_membership_and_drop_hierarchy() {
+    let mut in_folder = movie("in-folder", Duration::ZERO, false);
+    in_folder.parent_id = Some(ItemId::new("folder-physical"));
+    let mut no_parent = movie("no-parent", Duration::ZERO, false);
+    no_parent.parent_id = None;
+    let mut series = item("series", MediaKind::Series, None, None);
+    series.parent_id = Some(ItemId::new("lib"));
+    let season = item("season", MediaKind::Season, Some("series"), Some(1));
+    let episode = item("episode", MediaKind::Episode, Some("season"), Some(1));
+
+    let library = ItemId::new("lib");
+    let normalized = nova_storage::library_items(
+        vec![in_folder, no_parent, series, season, episode],
+        &library,
+    );
+    let ids: Vec<&str> = normalized.iter().map(|item| item.id.as_str()).collect();
+    assert_eq!(ids, ["in-folder", "no-parent", "series"]);
+    assert!(
+        normalized
+            .iter()
+            .all(|item| item.parent_id.as_ref() == Some(&library)),
+        "列表刷新 / CLI 同步是库归属的权威来源"
+    );
 }

@@ -9,9 +9,9 @@
 //! 三条边界值得写清楚：
 //!
 //! - **列表刷新是库归属的权威来源**：每个库按 `ParentId=<库>` 递归分页，拿回来的
-//!   电影 / 剧集一律把父项写成这个库（[`library_items`]），历史坏归属
-//!   顺手被纠正。详情 / 搜索路径不参与这件事（见 `Local::cache_item_and_sources`
-//!   的 `keep_library_membership`）。
+//!   电影 / 剧集一律把父项写成这个库（[`nova_storage::library_items`]，与 CLI
+//!   `items` 的缓存路径共用同一份规则），历史坏归属顺手被纠正。详情 / 搜索路径
+//!   不参与这件事（见 `Local::cache_item_and_sources` 的 `keep_library_membership`）。
 //! - **只有完整拉完才删**：一个库翻完最后一页后，才删除"归属这个库、本次列表里
 //!   没有"的电影 / 剧集（服务端删掉的片子不该继续显示）；所有库都拉完后，再清
 //!   一遍"父项不可用"的历史坏数据（见 [`prune_unreachable`]）。中途失败、写库
@@ -27,6 +27,7 @@ use std::sync::Arc;
 use nova_core::{ItemId, MediaItem, MediaKind};
 use nova_provider::{ItemQuery, Library, MediaProvider, ProviderError};
 use nova_storage::Database;
+use nova_storage::library_items;
 
 use crate::error::AppError;
 use crate::local::Local;
@@ -266,43 +267,6 @@ async fn sync_library(
     Ok(result)
 }
 
-/// 把列表刷新拿到的条目压成"库的直接子项"：电影 / 剧集的父项**一律**写成库。
-///
-/// 列表刷新是库归属的权威来源（体检 R4-3 的反面）：服务端对子文件夹里的条目会
-/// 返回物理 `ParentId`，而 provider 只在响应缺字段时才回填库 id（见
-/// `nova_provider::client` 的 `items()`），因此这类条目会带着文件夹父项入库、
-/// 在按 `ParentId=<库>` 查询的库页里消失。这里统一纠正。
-///
-/// 季 / 集**丢弃**：它们不是库的直接子项，父项该是剧集 / 季（播放层级）。列表
-/// 响应缺 `ParentId`，硬写库归属会让它们在真正的层级里查不到、在顶层列表里
-/// 凭空出现；即使服务端无视 `IncludeItemTypes` 把它们混进来，这里也不会入库
-/// （详情页打开剧集时用 `children()` 拉，父项是准确的）。
-fn library_items(items: Vec<MediaItem>, library: &ItemId) -> Vec<MediaItem> {
-    items
-        .into_iter()
-        .filter_map(|mut item| {
-            if !matches!(item.kind, MediaKind::Movie | MediaKind::Series) {
-                tracing::debug!(
-                    item = item.id.as_str(),
-                    kind = ?item.kind,
-                    "媒体库列表里的季 / 集跳过（由详情页按需拉取）"
-                );
-                return None;
-            }
-            if item.parent_id.as_ref() != Some(library) {
-                tracing::debug!(
-                    item = item.id.as_str(),
-                    fresh = ?item.parent_id,
-                    library = library.as_str(),
-                    "按列表刷新纠正库归属"
-                );
-                item.parent_id = Some(library.clone());
-            }
-            Some(item)
-        })
-        .collect()
-}
-
 /// 库完整拉取后，删除"归属这个库、但服务端列表里已经没有"的电影 / 剧集。
 ///
 /// 剧集被删时它的季与集一起删（[`Database::delete_item_trees`] 递归），否则那些
@@ -472,6 +436,7 @@ fn failure_status(local: &Local, error: &ProviderError) -> Status {
     }
 }
 
+/// 写一页条目（调用方已用 [`nova_storage::library_items`] 纠正过库归属）。
 async fn cache_items(local: &Arc<Local>, items: Vec<MediaItem>) -> Result<(), AppError> {
     if items.is_empty() {
         return Ok(());

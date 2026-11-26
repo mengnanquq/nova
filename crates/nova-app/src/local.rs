@@ -131,6 +131,20 @@ impl Local {
             Err(error) => tracing::warn!(%error, "启动时清理图片缓存失败"),
         }
 
+        // 媒体库列表是持久化的（schema v3）：离线启动时标签仍是真实库名，
+        // 而不是靠"缓存里有条目就合成一个「全部」"。旧库里还没写过列表时
+        // `tabs()` 会继续用那个兜底。
+        let libraries = match &server {
+            Some(stored) => match db.libraries(&stored.info.id) {
+                Ok(libraries) => libraries.into_iter().map(library_from_stored).collect(),
+                Err(error) => {
+                    tracing::warn!(%error, "读取媒体库列表失败，离线标签退化为「全部」");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+
         Ok(Self {
             data_dir: env.data_dir.clone(),
             db,
@@ -142,7 +156,7 @@ impl Local {
             server: Mutex::new(server),
             provider: Mutex::new(provider),
             status: Mutex::new(status),
-            libraries: Mutex::new(Vec::new()),
+            libraries: Mutex::new(libraries),
         })
     }
 
@@ -166,13 +180,27 @@ impl Local {
         *lock(&self.status) = status;
     }
 
-    /// 当前已知的服务端媒体库（刷新后才有）。
+    /// 当前已知的服务端媒体库（刷新后才有；启动时从 SQLite 读回）。
     pub fn libraries(&self) -> Vec<Library> {
         lock(&self.libraries).clone()
     }
 
-    /// 记录刷新拿到的媒体库列表。
+    /// 记录刷新拿到的媒体库列表，并持久化（schema v3）。
+    ///
+    /// 以前只放内存：进程一退，离线启动就只剩一个合成的「全部」标签，真实库名
+    /// 全部丢失。写入失败只记日志（内存里仍是新的，下一次刷新还会重试）。
     pub fn set_libraries(&self, libraries: Vec<Library>) {
+        if let Some(server) = self.server() {
+            let stored: Vec<nova_storage::StoredLibrary> =
+                libraries.iter().map(library_to_stored).collect();
+            if let Err(error) = self.db.replace_libraries(&server.info.id, &stored) {
+                tracing::warn!(
+                    %error,
+                    server = server.info.id.as_str(),
+                    "媒体库列表写入本地库失败（离线标签可能退化）"
+                );
+            }
+        }
         *lock(&self.libraries) = libraries;
     }
 
@@ -562,6 +590,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// `nova-provider::Library` → 存储层记录（schema v3 的 `libraries` 表）。
+fn library_to_stored(library: &Library) -> nova_storage::StoredLibrary {
+    nova_storage::StoredLibrary {
+        id: library.id.clone(),
+        name: library.name.clone(),
+        kind: library.kind,
+        collection_type: library.collection_type.clone(),
+        item_count: library.item_count,
+    }
+}
+
+/// 存储层记录 → `nova-provider::Library`。
+fn library_from_stored(library: nova_storage::StoredLibrary) -> Library {
+    Library {
+        id: library.id,
+        name: library.name,
+        kind: library.kind,
+        collection_type: library.collection_type,
+        item_count: library.item_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nova_core::{
@@ -761,6 +811,89 @@ mod tests {
             .expect("重建媒体库");
         assert_eq!(after.cards.len(), 1, "搜索不能把条目踢出媒体库");
         assert_eq!(after.cards[0].item_id, "m1");
+    }
+
+    fn library(id: &str, name: &str, kind: MediaKind) -> Library {
+        let collection_type = match kind {
+            MediaKind::Movie => "movies",
+            MediaKind::Series => "tvshows",
+            MediaKind::Season | MediaKind::Episode => "",
+        };
+        Library {
+            id: nova_core::ItemId::new(id),
+            name: name.to_owned(),
+            kind,
+            collection_type: Some(collection_type.to_owned()),
+            item_count: None,
+        }
+    }
+
+    /// 离线启动时标签要来自**持久化**的媒体库列表，而不是靠“缓存里有条目就合成
+    /// 一个「全部」”。
+    ///
+    /// 修复前：`Local::set_libraries` 只写内存，重启后 `libraries` 是空的，标签
+    /// 退化成 `首页,全部`——库里真实的名字（“动画电影”）丢了。
+    #[test]
+    fn offline_start_keeps_persisted_library_tabs() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&info("srv-a"), 1).expect("写服务器");
+            let mut movie = movie("m1", "五等分的新娘＊");
+            movie.parent_id = Some(nova_core::ItemId::new("lib-anime"));
+            db.upsert_items(&ServerId::new("srv-a"), &[movie], 1)
+                .expect("写条目");
+        }
+
+        // 第一次启动：刷新把媒体库列表写进本层（内存 + SQLite）。
+        {
+            let local = Local::open(&env, None).expect("打开状态目录");
+            local.set_libraries(vec![library("lib-anime", "动画电影", MediaKind::Movie)]);
+            assert_eq!(
+                local
+                    .tabs()
+                    .iter()
+                    .map(|tab| tab.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["首页", "动画电影"]
+            );
+        }
+
+        // 第二次启动（离线）：标签仍是真实库名，库页也能按库列出条目。
+        let local = Local::open(&env, None).expect("重新打开状态目录");
+        let titles: Vec<String> = local.tabs().into_iter().map(|tab| tab.title).collect();
+        assert_eq!(
+            titles,
+            vec!["首页".to_owned(), "动画电影".to_owned()],
+            "离线启动必须读回持久化的媒体库标签"
+        );
+        let library = local
+            .library("lib-anime", None, views::LibrarySort::default())
+            .expect("构建媒体库");
+        assert_eq!(library.title, "动画电影");
+        assert_eq!(library.cards.len(), 1);
+        assert_eq!(library.cards[0].title, "五等分的新娘＊");
+    }
+
+    /// 旧缓存（媒体库列表还没持久化）离线启动时只剩合成的「全部」标签：
+    /// 这一页也必须是内容，而不是空的顶层列表。
+    #[test]
+    fn offline_all_tab_lists_library_owned_items() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let local = local_with_library_movie(&dir);
+
+        let titles: Vec<String> = local.tabs().into_iter().map(|tab| tab.title).collect();
+        assert_eq!(titles, vec!["首页".to_owned(), "全部".to_owned()]);
+
+        let all = local
+            .library("", None, views::LibrarySort::default())
+            .expect("构建「全部」");
+        assert_eq!(all.cards.len(), 1, "「全部」不能是空的：{all:?}");
+        assert_eq!(all.cards[0].item_id, "m1");
     }
 
     /// 层级（季 / 集）仍以服务端为准：这条规则只保电影 / 剧集的库归属。

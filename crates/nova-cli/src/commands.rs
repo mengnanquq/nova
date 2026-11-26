@@ -51,6 +51,14 @@ impl Origin {
     }
 }
 
+/// `nova items` 不带 `--limit` 时每页取多少条。
+///
+/// 与桌面端刷新每页（`nova_app::refresh::ITEMS_PER_PAGE`）一致：以前不带 `--limit`
+/// 时把服务端返回的整库（真实数据目录曾被撑到 4 万行，含 `parent_id = NULL`
+/// 的季 / 集孤儿行）原样写进 nova.db。缓存写入量必须有上限，而"翻完整个库"
+/// 是 App 刷新的活（它会在完整拉完后清理服务端已删除的条目）。
+pub const DEFAULT_ITEMS_LIMIT: u32 = 200;
+
 impl App {
     // -----------------------------------------------------------------
     // login
@@ -367,13 +375,14 @@ impl App {
         }
 
         let (stored, provider) = self.session(server)?;
+        // 不指定 `--limit` 时按页取（见 [`DEFAULT_ITEMS_LIMIT`]），不再一次把整库
+        // 拉回来写进缓存。
+        let limit = limit.unwrap_or(DEFAULT_ITEMS_LIMIT);
         let mut query = ItemQuery::in_parent(ItemId::new(library.to_owned()));
         if let Some(term) = search {
             query = query.with_search(term);
         }
-        if let Some(limit) = limit {
-            query = query.paged(0, limit);
-        }
+        query = query.paged(0, limit);
 
         let page = match provider.items(query).await {
             Ok(page) => page,
@@ -384,16 +393,21 @@ impl App {
             }
             Err(error) => return Err(crate::error::provider(error)),
         };
+        // 缓存只看电影 / 剧集，父项写成这个库——与桌面端刷新共用同一条规则
+        // （`nova_storage::library_items`），不另写一份归属逻辑。
+        //
         // 缓存只是加速：写失败不该让"已经拉到的这一页"作废，但要让用户知道。
-        if let Err(error) = self.cache_items(&stored, &page.items) {
+        let cacheable = nova_storage::library_items(page.items.clone(), &ItemId::new(library));
+        if let Err(error) = self.cache_items(&stored, &cacheable) {
             tracing::warn!(%error, "条目写入本地缓存失败");
         }
         self.persist_info(&provider)?;
 
         let total = page.total;
         let mut text = format!(
-            "媒体库 {library}：{total} 条（服务端；本页 {} 条已缓存到本地）{}{}\n",
+            "媒体库 {library}：{total} 条（服务端；本页 {} 条，其中 {} 条电影 / 剧集已缓存到本地）{}{}\n",
             page.items.len(),
+            cacheable.len(),
             search
                 .map(|term| format!("（搜索 `{term}`）"))
                 .unwrap_or_default(),
@@ -423,7 +437,7 @@ impl App {
                 "search": search,
                 "data_source": Origin::Server.json(),
                 "total": total,
-                "cached_in_page": page.items.len(),
+                "cached_in_page": cacheable.len(),
                 "items": page.items.iter().map(item_json).collect::<Vec<_>>(),
             }),
         ))

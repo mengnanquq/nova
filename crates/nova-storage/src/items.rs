@@ -111,6 +111,61 @@ impl Database {
         read_items(&mut rows)
     }
 
+    /// 跨库按标题匹配，只保留 `kinds` 里的类型，最多 `limit` 条。
+    ///
+    /// 本地搜索用它：列表刷新把电影 / 剧集的父项写成所属媒体库之后，
+    /// `children(None)`（`parent_id IS NULL`）几乎一条都拿不到，本地搜索就废了；
+    /// 而把整库拉进内存再筛又会被几万条条目拖垮。标题匹配因此下推到 SQL：
+    ///
+    /// - `%` / `_` / `\` 按字面量处理（`like_pattern` 转义），搜 `%` 不会
+    ///   把所有条目都匹配出来；
+    /// - 大小写语义对齐 `views::matches`：needle 先 `to_lowercase()`，SQLite 的
+    ///   `LIKE` 对 ASCII 大小写不敏感、对中文按字节相等。**已知差异**：非 ASCII
+    ///   字母的大小写折叠只在 Rust 侧做，SQL 侧看不到（如标题 `AMÉLIE` 与小写
+    ///   查询 `é`），这类极端组合可能漏一条——为了把全表读进内存换这个边缘
+    ///   场景不值得；
+    /// - 顺序是 `updated_at DESC`（最近加入的在前），与首页「最近添加」一致；
+    /// - 类型过滤在 Rust 侧做（`MediaKind` 是 `nova-core` 的枚举），并且**先于**
+    ///   `limit` 计数：一页里混着的季 / 集不会占掉电影 / 剧集的名额。
+    pub fn search_items(
+        &self,
+        server_id: &ServerId,
+        kinds: &[MediaKind],
+        term: &str,
+        limit: usize,
+    ) -> Result<Vec<MediaItem>> {
+        let needle = term.trim().to_lowercase();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let wanted = kind_texts(kinds)?;
+        let pattern = like_pattern(&needle);
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(schema::SQL_SELECT_SEARCH)?;
+        let mut rows = stmt.query(params![server_id.as_str(), pattern])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let kind: String = row.get(1)?;
+            if !wanted.is_empty() && !wanted.iter().any(|candidate| candidate == &kind) {
+                continue;
+            }
+            let payload: String = row.get(2)?;
+            let item: MediaItem =
+                codec::decode("items", codec::item_key(server_id.as_str(), &id), &payload)?;
+            // SQL 的 `LIKE` 只是预筛（ASCII 大小写不敏感）；最终语义以这里为准，
+            // 与首页 / 媒体库 / 搜索页共用的 `matches` 完全一致。
+            if !item.title.to_lowercase().contains(&needle) {
+                continue;
+            }
+            out.push(item);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// "继续观看"：未看完、有进度、且不接近片尾。
     ///
     /// 语义等同于 [`MediaItem::is_in_progress`]，但过滤在 SQL 里完成——
@@ -303,6 +358,61 @@ impl Database {
 /// 见 [`crate::codec::enum_to_text`]）。
 fn kind_texts(kinds: &[MediaKind]) -> Result<Vec<String>> {
     kinds.iter().map(codec::enum_to_text).collect()
+}
+
+/// 把搜索词包成 `LIKE` 模式，并转义通配符。
+///
+/// `%` / `_` 是 SQL 的通配符，`\` 是语句里声明的转义符：三个都得先转义，
+/// 否则搜 `%` 会匹配全表、搜 `_` 会匹配任意单字符。
+fn like_pattern(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
+/// 把列表刷新 / CLI 同步拿到的条目压成"媒体库的直接子项"。
+///
+/// 列表刷新与 CLI `items` 共用同一条归属规则（不要各写一份）：
+///
+/// - 电影 / 剧集的父项**一律**写成库。列表刷新是库归属的权威来源（体检 R4-3 的反面）：
+///   服务端对子文件夹里的条目会返回物理 `ParentId`，而 provider 只在响应缺字段时
+///   回填库 id（见 `nova_provider::client` 的 `items()`），因此这类条目会带着文件夹
+///   父项入库、在按 `ParentId=<库>` 查询的库页里消失。这里统一纠正。
+/// - 季 / 集**丢弃**：它们不是库的直接子项，父项该是剧集 / 季（播放层级）。列表响应
+///   缺 `ParentId`，硬写库归属会让它们在真正的层级里查不到、在顶层列表里凭空出现；
+///   即使服务端无视 `IncludeItemTypes` 把它们混进来，这里也不会入库（详情页打开
+///   剧集时用 `children()` 拉，父项是准确的）。
+pub fn library_items(items: Vec<MediaItem>, library: &ItemId) -> Vec<MediaItem> {
+    items
+        .into_iter()
+        .filter_map(|mut item| {
+            if !matches!(item.kind, MediaKind::Movie | MediaKind::Series) {
+                tracing::debug!(
+                    item = item.id.as_str(),
+                    kind = ?item.kind,
+                    "媒体库列表里的季 / 集跳过（由详情页按需拉取）"
+                );
+                return None;
+            }
+            if item.parent_id.as_ref() != Some(library) {
+                tracing::debug!(
+                    item = item.id.as_str(),
+                    fresh = ?item.parent_id,
+                    library = library.as_str(),
+                    "按列表刷新纠正库归属"
+                );
+                item.parent_id = Some(library.clone());
+            }
+            Some(item)
+        })
+        .collect()
 }
 
 /// 把 `SELECT id, kind` 的结果读成 id 列表，并按 `wanted` 过滤类型。

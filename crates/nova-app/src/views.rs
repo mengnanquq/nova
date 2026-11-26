@@ -197,7 +197,11 @@ pub fn library_view(
     };
     // 「最近添加」要真的按加入时间排（`updated_at`），不能用 `children` 的顺序
     // ——那是 `index_number, sort_title`，电影没有集号时就退化成字母序。
-    let mut items = if sort == LibrarySort::RecentlyAdded {
+    // 合成的「全部」标签（空 id，老缓存 / 媒体库列表还没持久化时才有）
+    // 按类型跨库列电影 / 剧集：库归属写对之后 `parent_id IS NULL` 的顶层行几乎不存在。
+    let mut items = if tab.id.is_empty() {
+        db.browse_recent(server_id, &SEARCH_KINDS, usize::MAX)?
+    } else if sort == LibrarySort::RecentlyAdded {
         db.children_recent(server_id, parent.as_ref())?
     } else {
         db.children(server_id, parent.as_ref())?
@@ -238,12 +242,17 @@ pub fn library_view(
 /// 搜索页一次最多展示的结果数（与服务端的 `limit` 一致）。
 pub const SEARCH_LIMIT: usize = 60;
 
-/// 「找片」页只收这两种类型。
-///
+/// 搜索页只收这两种类型（`is_search_kind` 的口径）：
 /// 集（Episode）/ 季（Season）是播放层级，只应出现在详情页的选集里；
 /// 混进搜索结果会让"找片"变成"找某一集"，所以这里明确过滤掉。
+///
+/// 定义成常量是因为本地搜索要把同一份类型下推到 `Database::search_items`
+/// （在 SQL 游标上先过滤类型、再计 `limit`，季 / 集不会占掉名额）。
+const SEARCH_KINDS: [MediaKind; 2] = [MediaKind::Movie, MediaKind::Series];
+
+/// 是否属于「找片」页收录的类型。
 pub fn is_search_kind(kind: MediaKind) -> bool {
-    matches!(kind, MediaKind::Movie | MediaKind::Series)
+    SEARCH_KINDS.contains(&kind)
 }
 
 /// 媒体条目 → 搜索结果卡片。
@@ -266,19 +275,17 @@ pub fn search_view_from_items(term: &str, items: &[MediaItem]) -> SearchView {
 ///
 /// 缓存里没有服务端的搜索索引，这里按"标题包含关键字"做与首页/媒体库一致的
 /// 本地过滤；联网结果回来后界面会被服务端结果替换。
+///
+/// 标题匹配在 SQL 侧做（[`Database::search_items`]）：列表刷新把电影 / 剧集的
+/// 父项写成所属媒体库后，按"顶层行"（`parent_id IS NULL`）取条目几乎什么也
+/// 取不到，本地搜索会整页落空。
 pub fn search_view(
     db: &Database,
     server_id: &ServerId,
     term: &str,
     limit: usize,
 ) -> Result<SearchView, nova_storage::StorageError> {
-    let mut items = db.children(server_id, None)?;
-    let needle = term.trim().to_lowercase();
-    if !needle.is_empty() {
-        items.retain(|item| matches(&item.title, &needle));
-    }
-    items.retain(|item| is_search_kind(item.kind));
-    items.truncate(limit);
+    let items = db.search_items(server_id, &SEARCH_KINDS, term, limit)?;
     Ok(search_view_from_items(term, &items))
 }
 
@@ -993,6 +1000,101 @@ mod tests {
         // 没有命中 → Empty（不是 Error）。
         let none = search_view(&db, &server.info.id, "zzz", SEARCH_LIMIT).expect("本地搜索");
         assert_eq!(none.state, nova_ui::SearchState::Empty);
+    }
+
+    /// 列表刷新把库归属写进电影 / 剧集之后（`parent_id` = 库 id），本地搜索
+    /// 再按“顶层行”（`parent_id IS NULL`）取条目就基本一条都搜不到。
+    ///
+    /// 修复前：`children(server, None)` 只返回顶层行，这个用例的条目全都挂在库 /
+    /// 剧集下，`search_view` 命中 0 条。修复后按类型跨库做 SQL 标题匹配。
+    #[test]
+    fn cached_search_finds_library_owned_movies_and_series() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let mut movie = movie_with("m1", "沙丘", "沙丘", Some(2021));
+        movie.parent_id = Some(ItemId::new("lib-movies"));
+        let mut series = item("s1", "沙丘：预言", MediaKind::Series, Duration::ZERO, None);
+        series.parent_id = Some(ItemId::new("lib-series"));
+        let mut season = item(
+            "se1",
+            "沙丘 第 1 季",
+            MediaKind::Season,
+            Duration::ZERO,
+            None,
+        );
+        season.parent_id = Some(ItemId::new("s1"));
+        let mut episode = item(
+            "e1",
+            "沙丘 第 1 集",
+            MediaKind::Episode,
+            Duration::ZERO,
+            None,
+        );
+        episode.parent_id = Some(ItemId::new("se1"));
+        db.upsert_items(&server.info.id, &[movie, series, season, episode], 1)
+            .expect("写条目");
+
+        let view = search_view(&db, &server.info.id, "沙丘", SEARCH_LIMIT).expect("本地搜索");
+        assert_eq!(view.state, nova_ui::SearchState::Ready);
+        let ids: Vec<&str> = view
+            .cards
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["m1", "s1"],
+            "库归属的电影 / 剧集都要搜到，季 / 集不要"
+        );
+
+        // limit 在 SQL / 迭代上生效（不是先全取再截断）。
+        let limited = search_view(&db, &server.info.id, "沙丘", 1).expect("本地搜索");
+        assert_eq!(limited.total, 1);
+        assert_eq!(limited.cards[0].item_id, "m1");
+
+        let none = search_view(&db, &server.info.id, "不存在的片", SEARCH_LIMIT).expect("本地搜索");
+        assert_eq!(none.state, nova_ui::SearchState::Empty);
+    }
+
+    /// `%` / `_` 是 SQL `LIKE` 的通配符，必须按字面量匹配（转义）：
+    /// 搜 `%` 不能把所有电影都匹配出来，搜 `_` 不能匹配任意单字符。
+    #[test]
+    fn cached_search_treats_like_wildcards_as_literals() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let with = |id: &str, title: &str, parent: &str| {
+            let mut item = movie_with(id, title, title, Some(2020));
+            item.parent_id = Some(ItemId::new(parent));
+            item
+        };
+        db.upsert_items(
+            &server.info.id,
+            &[
+                with("pct", "100% 纯爱", "lib-a"),
+                with("under", "A_B 计划", "lib-a"),
+                with("plain", "普通片", "lib-a"),
+            ],
+            1,
+        )
+        .expect("写条目");
+
+        let percent = search_view(&db, &server.info.id, "%", SEARCH_LIMIT).expect("本地搜索");
+        let ids: Vec<&str> = percent
+            .cards
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["pct"], "`%` 只能匹配标题里真的含 % 的条目");
+
+        let underscore = search_view(&db, &server.info.id, "_", SEARCH_LIMIT).expect("本地搜索");
+        let ids: Vec<&str> = underscore
+            .cards
+            .iter()
+            .map(|card| card.item_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["under"], "`_` 不能匹配任意单字符");
     }
 
     #[test]

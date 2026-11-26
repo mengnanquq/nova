@@ -1288,7 +1288,10 @@ impl Shell {
             return;
         }
         let generation = self.search_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let online = self.local.provider_dyn();
+        // 离线（未登录 / 令牌过期 / 没有服务器）时不发服务端搜索：本地命中就是
+        // 最终结果。以前照样发一次注定失败的请求，它的错误页会在几秒后把本地
+        // 结果整页替换成“搜索失败”——而本地搜索正是离线时唯一的搜索。
+        let online = server_search_provider(&self.local.status(), self.local.provider_dyn());
         // 1) 本地缓存即时反馈：命中就立刻是一屏结果；本地没有命中时先显示
         //    “搜索中…”，避免先闪一下“没有结果”再被服务端结果替换。
         match self.local.search_view(term, views::SEARCH_LIMIT) {
@@ -2268,6 +2271,22 @@ pub(crate) fn accept_search_result(
         && message_term.trim() == current_input.trim()
 }
 
+/// 这次搜索要不要再打服务端：只有已连接（令牌可用）时才发。
+///
+/// 离线（未登录 / 令牌过期 / 没有服务器）时本地缓存命中就是最终结果。以前照样
+/// 发一次注定失败的请求，它的错误页会在几秒后把本地结果整页替换成“搜索失败”——
+/// 而本地搜索正是离线时唯一的搜索（也是输入时的即时反馈）。
+pub(crate) fn server_search_provider(
+    status: &Status,
+    provider: Option<Arc<dyn MediaProvider>>,
+) -> Option<Arc<dyn MediaProvider>> {
+    if status.is_connected() {
+        provider
+    } else {
+        None
+    }
+}
+
 /// 播放时用哪个版本：显式 `--play --source` > 详情页里用户选中的版本。
 ///
 /// `selected` 只在用户**停留在详情/播放页**时才算数：用户离开详情页后，
@@ -2308,7 +2327,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use super::{LibraryView, Route, Status, server_search_provider};
     use super::{accept_search_result, debounce_still_current, refresh_library_target};
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
     use nova_core::{
@@ -2317,7 +2338,6 @@ mod tests {
     };
     use nova_provider::Library;
 
-    use super::{LibraryView, Route};
     use crate::views;
 
     #[test]
@@ -2356,6 +2376,58 @@ mod tests {
         let counter = AtomicU64::new(3);
         assert!(debounce_still_current(&counter, 3));
         assert!(!debounce_still_current(&counter, 2));
+    }
+
+    fn dummy_provider() -> Arc<dyn nova_provider::MediaProvider> {
+        use nova_provider::{Flavor, Provider, ProviderConfig};
+        let store: Arc<dyn nova_secrets::CredentialStore> =
+            Arc::new(nova_secrets::MemoryStore::new());
+        Arc::new(
+            Provider::new(
+                Flavor::Jellyfin,
+                ProviderConfig::new(ServerId::new("srv-test"), "http://127.0.0.1:8096"),
+                store,
+            )
+            .expect("构造测试 provider"),
+        )
+    }
+
+    /// 离线时不再发服务端搜索：否则它的错误页会把本地命中整页替换掉
+    /// （本地搜索是离线时唯一的搜索）。
+    #[test]
+    fn offline_status_never_starts_a_server_search() {
+        let provider = dummy_provider();
+        for status in [
+            Status::NoServer,
+            Status::AmbiguousServer { count: 2 },
+            Status::MissingToken {
+                url: "http://127.0.0.1:8096".to_owned(),
+                note: None,
+            },
+            Status::Expired {
+                url: "http://127.0.0.1:8096".to_owned(),
+            },
+            Status::RefreshFailed {
+                message: "网络错误".to_owned(),
+            },
+        ] {
+            assert!(
+                server_search_provider(&status, Some(Arc::clone(&provider))).is_none(),
+                "{status:?} 不该发起服务端搜索"
+            );
+        }
+        let connected = Status::Connected {
+            server: "测试".to_owned(),
+            base_url: "http://127.0.0.1:8096".to_owned(),
+        };
+        assert!(
+            server_search_provider(&connected, Some(provider)).is_some(),
+            "已连接时才发服务端搜索"
+        );
+        assert!(
+            server_search_provider(&connected, None).is_none(),
+            "没有 provider 时也不发"
+        );
     }
 
     // ---- 后台刷新：不能把用户所在的库页换成别的库 / 默认排序（R2-8）----

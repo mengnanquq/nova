@@ -143,6 +143,10 @@ fn migrate(conn: &mut Connection, path: Option<&Path>) -> Result<()> {
         tx.execute_batch(schema::MIGRATION_V2)
             .map_err(|source| StorageError::Migrate { from, to, source })?;
     }
+    if from < 3 {
+        tx.execute_batch(schema::MIGRATION_V3)
+            .map_err(|source| StorageError::Migrate { from, to, source })?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|source| StorageError::Migrate { from, to, source })?;
     tx.commit()
@@ -153,4 +157,117 @@ fn migrate(conn: &mut Connection, path: Option<&Path>) -> Result<()> {
 
 fn read_user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.pragma_query_one(None, "user_version")
+}
+
+#[cfg(test)]
+mod tests {
+    use nova_core::{ImageSet, ItemId, MediaItem, MediaKind, ServerId, UserData};
+    use rusqlite::params;
+
+    use super::*;
+    use crate::codec;
+
+    /// v2 旧库升到 v3：`libraries` 表要建出来，旧数据一条不能丢。
+    ///
+    /// 迁移前（`SCHEMA_VERSION == 2`）：这条用例读不到 `libraries` 表，会直接失败。
+    #[test]
+    fn v2_database_is_upgraded_to_v3_without_losing_data() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("nova.db");
+        let item = MediaItem {
+            id: ItemId::new("m1"),
+            kind: MediaKind::Movie,
+            title: "旧库里的电影".to_owned(),
+            sort_title: "旧库里的电影".to_owned(),
+            original_title: None,
+            year: Some(2001),
+            overview: None,
+            genres: Vec::new(),
+            runtime: None,
+            parent_id: Some(ItemId::new("lib-old")),
+            index_number: None,
+            index_number_end: None,
+            child_count: None,
+            images: ImageSet::default(),
+            user_data: UserData::default(),
+        };
+        {
+            // 手工做一个 v2 库（v1 + v2 的 DDL + user_version=2），写入要保住的旧数据。
+            let conn = Connection::open(&path).expect("建旧库");
+            conn.execute_batch(schema::MIGRATION_V1).expect("建 v1");
+            conn.execute_batch(schema::MIGRATION_V2).expect("建 v2");
+            conn.pragma_update(None, "user_version", 2_i64)
+                .expect("标记 v2");
+            conn.execute(
+                schema::SQL_UPSERT_SERVER,
+                params![
+                    "srv-old",
+                    codec::enum_to_text(&nova_core::ServerKind::Jellyfin).expect("服务器类型文本"),
+                    "旧服务器",
+                    "http://127.0.0.1:8096",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "{\"state\":\"unauthorized\"}",
+                    "zh-CN",
+                    1_i64,
+                ],
+            )
+            .expect("写服务器");
+            conn.execute(
+                schema::SQL_UPSERT_ITEM,
+                params![
+                    "srv-old",
+                    "m1",
+                    codec::enum_to_text(&MediaKind::Movie).expect("枚举文本"),
+                    item.title.as_str(),
+                    item.sort_key(),
+                    item.year.map(i64::from),
+                    Option::<i64>::None,
+                    "lib-old",
+                    Option::<i64>::None,
+                    0_i64,
+                    0_i64,
+                    codec::encode(&item).expect("payload"),
+                    10_i64,
+                ],
+            )
+            .expect("写条目");
+            conn.execute(
+                "INSERT INTO mylist (server_id, item_id, added_at) VALUES (?1, ?2, ?3)",
+                params!["srv-old", "m1", 20_i64],
+            )
+            .expect("写收藏");
+        }
+
+        let db = Database::open(&path).expect("打开旧库并升级");
+        assert_eq!(db.schema_version().expect("读版本"), 3);
+        // 旧数据都在。
+        let server_id = ServerId::new("srv-old");
+        assert!(db.server(&server_id).expect("读服务器").is_some());
+        let stored = db
+            .item(&server_id, &ItemId::new("m1"))
+            .expect("读条目")
+            .expect("旧条目还在");
+        assert_eq!(stored.title, "旧库里的电影");
+        assert_eq!(
+            stored.parent_id.as_ref().map(ItemId::as_str),
+            Some("lib-old")
+        );
+        assert!(
+            db.in_mylist(&server_id, &ItemId::new("m1"))
+                .expect("读收藏"),
+            "v2 写入的收藏不能在升级时丢掉"
+        );
+        // 新表建好了，而且是空的（等下一次刷新 / `set_libraries` 写入）。
+        assert!(
+            db.libraries(&server_id).expect("读媒体库").is_empty(),
+            "升级出来的 libraries 表应当为空"
+        );
+
+        // 再次打开是幂等的，版本不回退、数据不变。
+        drop(db);
+        let db = Database::open(&path).expect("再次打开");
+        assert_eq!(db.schema_version().expect("读版本"), 3);
+        assert_eq!(db.item_count(&server_id).expect("条目数"), 1);
+    }
 }
