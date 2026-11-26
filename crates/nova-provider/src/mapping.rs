@@ -1511,6 +1511,13 @@ mod tests {
         assert_eq!(items[0].title, "银翼杀手 2049");
         assert_eq!(items[1].title, "沙丘");
         assert_eq!(items[2].title, "降临");
+        // 列表响应里的 `ProductionYear` 必须进 `MediaItem::year`：
+        // 以前请求不带 `Fields=ProductionYear` 时服务端给 null，
+        // 本地缓存全库年份为空 →「发行年份从新到旧」排序退化成标题序。
+        assert_eq!(
+            items.iter().map(|item| item.year).collect::<Vec<_>>(),
+            vec![Some(2017), Some(2021), Some(2016)]
+        );
         assert!(items.iter().all(|item| item.kind == MediaKind::Movie));
         // 带路径前缀的基址也要拼对。
         assert!(

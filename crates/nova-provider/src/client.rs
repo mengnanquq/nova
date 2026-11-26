@@ -878,7 +878,15 @@ impl MediaProvider for Provider {
         // 千万不要加 `RunTimeTicks`：它不在 `ItemFields` 枚举里，服务端静默忽略；
         // 列表里的 `MediaSources[].RunTimeTicks` 实测也是 `null`，时长只有详情与
         // `PlaybackInfo` 才有（所以列表里的 `MediaSource::runtime` 通常为 `None`）。
-        params.push(("Fields".to_owned(), "MediaSources,ChildCount".to_owned()));
+        //
+        // `ProductionYear` 必须显式要：实测 Emby 4.x 的**列表**接口不请求它时
+        // 整页条目的 `ProductionYear` 都是 `null`（详情接口才会无条件带上），
+        // 结果本地缓存几千条里只有点开过详情的几条有年份 →「发行年份从新到旧」
+        // 排序退化成标题序。加上它之后同一接口立刻返回年份（已用真实服务器验证）。
+        params.push((
+            "Fields".to_owned(),
+            "MediaSources,ChildCount,ProductionYear".to_owned(),
+        ));
         if let Some(start) = query.start {
             params.push(("StartIndex".to_owned(), start.to_string()));
         }
@@ -928,7 +936,8 @@ impl MediaProvider for Provider {
                 ("Recursive", "false"),
                 ("SortBy", "ParentIndexNumber,IndexNumber"),
                 ("SortOrder", "Ascending"),
-                ("Fields", "ChildCount"),
+                // 季 / 集的年份同样要显式要（理由见 `items()` 里 `Fields` 的注释）。
+                ("Fields", "ChildCount,ProductionYear"),
             ],
         )?;
         let response: RawItemsResponse = self.get_json(url).await?;

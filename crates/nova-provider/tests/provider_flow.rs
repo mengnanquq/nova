@@ -80,6 +80,8 @@ async fn jellyfin_flow_from_login_to_progress() {
     assert_eq!(libraries[1].kind, MediaKind::Series);
 
     // --- 条目列表（分页参数必须原样传给服务端）--------------------------------
+    // `Fields` 里必须有 `ProductionYear`：列表接口不请求它时整页年份都是 null
+    // （实测 Emby），「发行年份从新到旧」排序会退化成标题序。
     Mock::given(method("GET"))
         .and(path(format!("/Users/{USER_ID}/Items")))
         .and(query_param("StartIndex", "40"))
@@ -88,6 +90,10 @@ async fn jellyfin_flow_from_login_to_progress() {
         .and(query_param("Recursive", "true"))
         .and(query_param("SortBy", "PremiereDate"))
         .and(query_param("SortOrder", "Ascending"))
+        .and(query_param(
+            "Fields",
+            "MediaSources,ChildCount,ProductionYear",
+        ))
         .and(common::auth_header("authorization", Some(JELLYFIN_TOKEN)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json_fixture("items_movies")))
         .expect(1)
@@ -108,6 +114,11 @@ async fn jellyfin_flow_from_login_to_progress() {
     assert_eq!(page.limit, 20);
     assert_eq!(page.items.len(), 3, "BoxSet 这类未知类型应当被跳过");
     assert_eq!(page.items[0].title, "银翼杀手 2049");
+    assert_eq!(
+        page.items.iter().map(|item| item.year).collect::<Vec<_>>(),
+        vec![Some(2017), Some(2021), Some(2016)],
+        "列表响应里的 ProductionYear 必须映射成 MediaItem::year（否则年份排序无效）"
+    );
     assert_eq!(
         page.items[0].images.poster_tag.as_deref(),
         Some("d41d8cd98f00b204e9800998ecf8427e"),
