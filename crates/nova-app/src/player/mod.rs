@@ -90,9 +90,29 @@ pub(crate) enum Message {
     OpenReady {
         /// 用来丢弃过期的请求（用户已经换了条目）。
         generation: u64,
-        /// `OpenRequest` 或可读的失败原因。
-        request: Result<Box<OpenRequest>, String>,
+        /// `OpenRequest` 或失败原因。
+        request: Result<Box<OpenRequest>, OpenFailure>,
     },
+}
+
+/// 取直链失败的原因。
+///
+/// 保留 [`nova_provider::ProviderError`] 而不是当场转成文案：界面文案会随产品调整，
+/// 调用方 / 测试要按**错误码**（`NoToken` / `Unauthorized` / `NotFound` …）判定，
+/// 匹配字符串等于把文案钉死在测试里。
+#[derive(Debug)]
+pub(crate) enum OpenFailure {
+    /// provider 返回的错误（没有令牌 / 未授权 / 找不到 / 网络）。
+    Provider(nova_provider::ProviderError),
+}
+
+impl OpenFailure {
+    /// 给界面看的文案。
+    fn text(&self) -> String {
+        match self {
+            Self::Provider(error) => player_error_text(error),
+        }
+    }
 }
 
 /// 后台 → 主线程的投递函数（`Send`：它只把消息塞进跨线程队列并唤醒事件循环）。
@@ -728,6 +748,12 @@ impl Player {
         prefs: Option<UserPreferences>,
         post: &Post,
     ) {
+        // 换片：先把旧会话收尾。只 `session.reset()`（旧实现）会让旧片子的最后一段进度
+        // 永远上不了报：Exit 提交、`stop`、补发都不发生，服务端的续播点停在上一次
+        // 定时上报的位置，服务端也一直不知道这次会话已经结束。
+        if self.session.state() != SessionState::Idle {
+            self.end_session();
+        }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.error = None;
@@ -868,7 +894,7 @@ impl Player {
                 ))),
                 Err(error) => {
                     tracing::warn!(%error, "取播放直链失败");
-                    Err(player_error_text(&error))
+                    Err(OpenFailure::Provider(error))
                 }
             };
             post(Message::OpenReady {
@@ -882,7 +908,7 @@ impl Player {
     pub(crate) fn on_open_ready(
         &mut self,
         generation: u64,
-        request: Result<Box<OpenRequest>, String>,
+        request: Result<Box<OpenRequest>, OpenFailure>,
     ) {
         if generation != self.generation {
             return;
@@ -894,8 +920,9 @@ impl Player {
                 self.host.borrow_mut().enqueue_open(*request);
                 self.dirty = true;
             }
-            Err(message) => {
+            Err(failure) => {
                 self.pending = None;
+                let message = failure.text();
                 self.fail(&message);
             }
         }
@@ -1365,26 +1392,7 @@ impl Player {
     /// 推送的视图，缓冲期它就是上一部片子的位置或 0）。现在只提交
     /// `Session::reportable_position()`：本次打开还没出过画面就一条也不发。
     pub(crate) fn exit(&mut self, _ui_position: Duration) {
-        // `submitted` 才是"本次退出有没有把进度交给上报队列"；下面的 `flushed` 只是
-        // 补发队列（之前没发出去的）这次发出去了几条。旧日志把补发条数写成 `sent`，
-        // 正常（无需补发）时永远是 0，被误读成"退出时没有上报进度"。
-        let submitted = if let Some(progress) = self.build_progress() {
-            self.progress.submit(ProgressTrigger::Exit, progress)
-        } else {
-            false
-        };
-        if let Some(outcome) = self.progress.flush() {
-            tracing::info!(
-                submitted,
-                flushed = outcome.sent,
-                failed = outcome.failed,
-                queued = outcome.queued,
-                "退出播放页：补发进度"
-            );
-        }
-        let runtime = self.runtime.clone();
-        self.host.borrow_mut().pause(&runtime);
-        self.session.reset();
+        self.end_session();
         // 会话级的错误也属于这次播放：退出播放页必须一并收尾。只 `session.reset()`
         // 不够——起播早退（没有服务器 / 条目不在缓存）走的是 `fail()` 设置的
         // `self.error`，不清理就会一直被调试通道读成「当前错误」，进另一个条目的
@@ -1411,6 +1419,34 @@ impl Player {
         view.reset_session();
         self.pending_view = Some(view);
         self.dirty = true;
+    }
+
+    /// 结束当前会话：提交一次 `Exit` 进度（服务端据此把续播点落盘并收到 `stop`），
+    /// 尽力补发，再把引擎停下来、会话复位。
+    ///
+    /// 退出播放页（[`Player::exit`]）与换片（[`Player::begin`] 里已有会话）都走这里。
+    /// 换片以前只 `session.reset()`：旧会话最后一段进度既没提交，服务端也收不到 `stop`。
+    fn end_session(&mut self) {
+        // `submitted` 才是"本次退出有没有把进度交给上报队列"；下面的 `flushed` 只是
+        // 补发队列（之前没发出去的）这次发出去了几条。旧日志把补发条数写成 `sent`，
+        // 正常（无需补发）时永远是 0，被误读成"退出时没有上报进度"。
+        let submitted = if let Some(progress) = self.build_progress() {
+            self.progress.submit(ProgressTrigger::Exit, progress)
+        } else {
+            false
+        };
+        if let Some(outcome) = self.progress.flush() {
+            tracing::info!(
+                submitted,
+                flushed = outcome.sent,
+                failed = outcome.failed,
+                queued = outcome.queued,
+                "退出播放页：补发进度"
+            );
+        }
+        let runtime = self.runtime.clone();
+        self.host.borrow_mut().pause(&runtime);
+        self.session.reset();
     }
 
     /// 进程退出前的收尾（落盘补发文件）。
@@ -1711,6 +1747,7 @@ fn pick_source(
 mod tests {
     use super::*;
     use nova_core::{MediaSource, SourceId};
+    use nova_playback::{ProgressSink, ReportError};
 
     fn source(id: &str) -> MediaSource {
         MediaSource {
@@ -1745,7 +1782,11 @@ mod tests {
         };
         let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
         let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        // 多线程 runtime：这个 `Local` 有服务器（也就有 provider），换片时
+        // `end_session()` 会 `block_on` 等上报 worker 补发；current_thread runtime
+        // 上那个 worker（以及超时定时器）永远轮不到，用例会挂死。
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .expect("tokio runtime");
@@ -1915,19 +1956,34 @@ mod tests {
     ///
     /// 引擎返回 `Err` 时**立刻**失败并把错误打出来：以前只认 `Ok`，取直链失败会被
     /// 2 秒超时掩盖成“没等到 OpenReady”，真正的失败原因反而看不到。
+    ///
+    /// 错误用 `{:?}` 打印：带上错误**类型**（`Provider(NoToken)` / `Provider(Unauthorized)`
+    /// …），而不是界面文案——文案会随产品调整，不能钉在断言里。
     fn wait_for_resume_at(posted: &Arc<std::sync::Mutex<Vec<Message>>>) -> Duration {
+        match wait_for_open(posted) {
+            Ok(request) => request.resume_at,
+            Err(failure) => panic!("引擎返回错误（begin() 失败）：{failure:?}"),
+        }
+    }
+
+    /// 轮询等待 `begin()` 投递 `OpenReady`（上限 2s），把结果原样交出去。
+    ///
+    /// 取走队列里的第一条消息（`OpenFailure` 不可 `Clone`：它保留 provider 的错误，
+    /// 而 `ProviderError` 不是 `Copy`）。
+    fn wait_for_open(
+        posted: &Arc<std::sync::Mutex<Vec<Message>>>,
+    ) -> Result<Box<OpenRequest>, OpenFailure> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             {
-                let queue = match posted.lock() {
+                let mut queue = match posted.lock() {
                     Ok(queue) => queue,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                if let Some(Message::OpenReady { request, .. }) = queue.first() {
-                    match request {
-                        Ok(request) => return request.resume_at,
-                        Err(error) => panic!("引擎返回错误（begin() 失败）：{error}"),
-                    }
+                if !queue.is_empty() {
+                    let message = queue.remove(0);
+                    let Message::OpenReady { request, .. } = message;
+                    return request;
                 }
             }
             assert!(
@@ -1974,30 +2030,36 @@ mod tests {
         let post = post_to(&posted);
         player.begin("item-1", None, None, &post);
 
-        let started = Instant::now();
-        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            wait_for_resume_at(&posted);
-        }));
-        let message = panic_message(failure.expect_err("引擎错误必须让等待立刻失败"));
+        // 不能等完 2 秒超时：错误必须立刻回来。
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let failure = loop {
+            {
+                // 锁必须在 sleep 之前放掉：拿着锁轮询会把后台线程（它要 push 消息）
+                // 饿死，永远等不到结果。
+                let mut queue = match posted.lock() {
+                    Ok(queue) => queue,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if !queue.is_empty() {
+                    let message = queue.remove(0);
+                    let Message::OpenReady { request, .. } = message;
+                    break request.expect_err("没有令牌时取直链必须失败");
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "取直链失败也必须立刻回到界面上，不能等 2 秒超时"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // 按错误**类型**判定（本机没有令牌），不匹配界面文案。
         assert!(
-            message.contains("引擎返回错误") && message.contains("未登录"),
-            "要直接把引擎错误打出来（不是超时）：{message}"
+            matches!(
+                failure,
+                OpenFailure::Provider(nova_provider::ProviderError::NoToken)
+            ),
+            "失败原因必须保留 provider 的错误码：{failure:?}"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "必须立刻失败，不能空转到 2 秒超时"
-        );
-    }
-
-    /// `catch_unwind` 的 payload → 可断言的文本。
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-        match payload.downcast_ref::<String>() {
-            Some(message) => message.clone(),
-            None => payload
-                .downcast_ref::<&str>()
-                .map(|message| (*message).to_owned())
-                .unwrap_or_default(),
-        }
     }
 
     /// 起播与详情页必须读同一个偏好来源：详情每次读 `db.preferences()`，
@@ -2194,6 +2256,170 @@ mod tests {
             view.error
         );
         assert!(view.playing, "起播期间视为播放中（不是上一部的暂停态）");
+    }
+
+    /// 记录上报调用的假 sink（换片收尾必须能被观测到）。
+    ///
+    /// `stop` 只应发生在 `Exit` 那一条上报之后：它是服务端落盘续播点的唯一入口。
+    #[derive(Default)]
+    struct RecordingSink {
+        reports: std::sync::Mutex<Vec<PlaybackProgress>>,
+        stops: std::sync::Mutex<Vec<PlaybackProgress>>,
+    }
+
+    impl RecordingSink {
+        fn reports(&self) -> Vec<(String, Duration)> {
+            freeze(&self.reports)
+        }
+
+        fn stops(&self) -> Vec<(String, Duration)> {
+            freeze(&self.stops)
+        }
+    }
+
+    fn freeze(calls: &std::sync::Mutex<Vec<PlaybackProgress>>) -> Vec<(String, Duration)> {
+        let calls = calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        calls
+            .iter()
+            .map(|progress| (progress.item_id.as_str().to_owned(), progress.position))
+            .collect()
+    }
+
+    #[async_trait::async_trait]
+    impl nova_playback::ProgressSink for RecordingSink {
+        async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
+            self.reports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(progress.clone());
+            Ok(())
+        }
+
+        async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
+            self.stops
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(progress.clone());
+            Ok(())
+        }
+    }
+
+    /// 本地缓存里有两个条目（`a` / `b`），但本机没有令牌：起播会走到取直链那一步
+    /// 并立刻失败（`base_url` 指向 `127.0.0.1:1`），不需要 mpv。会话状态由用例自己推进。
+    fn switch_fixture() -> (
+        tempfile::TempDir,
+        Arc<Local>,
+        Player,
+        tokio::runtime::Runtime,
+    ) {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let server = test_server_info();
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&server, 1).expect("写服务器");
+            let items: Vec<nova_core::MediaItem> = ["a", "b"]
+                .iter()
+                .map(|id| nova_core::MediaItem {
+                    id: ItemId::new(*id),
+                    kind: nova_core::MediaKind::Movie,
+                    title: format!("片子 {id}"),
+                    sort_title: String::new(),
+                    original_title: None,
+                    year: None,
+                    overview: None,
+                    genres: Vec::new(),
+                    runtime: Some(Duration::from_secs(5400)),
+                    parent_id: None,
+                    index_number: None,
+                    index_number_end: None,
+                    child_count: None,
+                    images: nova_core::ImageSet::default(),
+                    user_data: nova_core::UserData::default(),
+                })
+                .collect();
+            db.upsert_items(&server.id, &items, 2).expect("写条目");
+            let sources: Vec<nova_core::MediaSource> = ["a", "b"]
+                .iter()
+                .map(|id| {
+                    let mut source = source(&format!("src-{id}"));
+                    source.item_id = ItemId::new(*id);
+                    source.runtime = Some(Duration::from_secs(5400));
+                    source
+                })
+                .collect();
+            db.upsert_sources(&server.id, &sources).expect("写播放源");
+        }
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        // 多线程 runtime：`end_session()` 要 `block_on` 等上报 worker 补发完，
+        // current_thread runtime 上那个 worker 永远轮不到（同 `resume_fixture`）。
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let player = Player::new(
+            app,
+            Arc::clone(&local),
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+        (dir, local, player, runtime)
+    }
+
+    /// 换片必须先结束旧会话：`Exit` 进度交给上报队列，服务端收到 `stop`。
+    ///
+    /// 以前 `begin` 开头只有 `session.reset()`：旧片最后一段进度（上一次定时上报之后的
+    /// 十几秒）既没提交，`stop` 也从不发出去，服务端的续播点停在上一次 Tick 的位置。
+    #[test]
+    fn beginning_another_item_ends_the_previous_session() {
+        let (_dir, local, mut player, runtime) = switch_fixture();
+        let recorder = Arc::new(RecordingSink::default());
+        player.progress = sink::Progress::for_test(
+            &local,
+            runtime.handle(),
+            Arc::clone(&recorder) as Arc<dyn ProgressSink>,
+        );
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+        // A 真的播起来了：首帧到了，看到了 10:00。
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.advance_position(Duration::from_secs(600));
+        assert_eq!(player.session.position(), Duration::from_secs(600));
+
+        player.begin("b", None, None, &post);
+
+        assert_eq!(
+            recorder.reports(),
+            vec![("a".to_owned(), Duration::from_secs(600))],
+            "换片前必须把 A 的进度（10:00，不是 0 也不是上次 Tick）作为 Exit 交出去"
+        );
+        assert_eq!(
+            recorder.stops(),
+            vec![("a".to_owned(), Duration::from_secs(600))],
+            "服务端只在收到 stop 时落盘续播点"
+        );
+        assert!(
+            player.target.is_none(),
+            "B 还没有直链，不能把 A 的目标留在会话里"
+        );
+        assert_eq!(
+            player.session.position(),
+            Duration::ZERO,
+            "B 从头开始（不是 A 的 10:00）"
+        );
     }
 
     fn init_test_backend() {

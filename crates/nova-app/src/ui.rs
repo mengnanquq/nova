@@ -1164,6 +1164,47 @@ impl Shell {
         })
     }
 
+    /// 测试用装配：与 `run_window` 同一组字段，但不需要事件循环 / 渲染回调。
+    ///
+    /// 为什么需要它：扫描的副作用（点到播放器的音量 / 静音）只有走 [`Shell::sweep`]
+    /// 才能真正测到。以前只测 `sweep_preserving_audio` 这个接缝，把 `Shell::sweep`
+    /// 里的恢复调用删掉，测试照样绿。
+    #[cfg(test)]
+    fn for_test(app: Rc<App>, local: Arc<Local>, runtime: Handle) -> Self {
+        let images = Arc::new(ImageService::new(
+            Arc::clone(&local.image_cache),
+            Arc::new(ProviderFetcher::from_local(Arc::clone(&local))),
+        ));
+        let home = local.home(None).unwrap_or_default();
+        Self {
+            channel: Arc::new(UiChannel::new(app.ui().as_weak())),
+            state: RefCell::new(UiState {
+                status: local.status(),
+                home,
+                library: None,
+                detail: None,
+                player: None,
+                search: None,
+            }),
+            app,
+            local,
+            runtime,
+            images,
+            host: Rc::new(RefCell::new(player::Host::new(true))),
+            pending_shot: RefCell::new(None),
+            player: RefCell::new(None),
+            timer: slint::Timer::default(),
+            pending_capture: RefCell::new(None),
+            pending_source: RefCell::new(None),
+            selected_source: RefCell::new(None),
+            capture_out: Rc::new(RefCell::new(None)),
+            search_generation: Arc::new(AtomicU64::new(0)),
+            search_debounce: RefCell::new(None),
+            library_sort: RefCell::new(views::LibrarySort::default()),
+            detail_generation: RefCell::new(0),
+        }
+    }
+
     /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
     ///
     /// Shell 额外做三件事：
@@ -2769,16 +2810,19 @@ mod tests {
         sweep_preserving_audio,
     };
     use super::{accept_detail, sweep_with_audio_guard};
+    use std::rc::Rc;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
 
-    use nova_ui::{App, AppWindow};
+    use nova_ui::{App, AppWindow, Page};
 
     use nova_core::{
         AuthState, ItemId, Language, MediaItem, MediaKind, ServerId, ServerInfo, ServerKind,
         UserData,
     };
     use nova_provider::Library;
+
+    use slint::ComponentHandle;
 
     use crate::views;
 
@@ -2888,6 +2932,67 @@ mod tests {
             PlayerAudio::from_view(&app.player_view()),
             before,
             "扫描结束后音量与静音都要回到扫描前的值"
+        );
+    }
+
+    /// 体检 R7-D4：走真实 `Shell::sweep`（不是它内部的接缝）确认音频被放回去了。
+    ///
+    /// 以前只测 `sweep_preserving_audio`：把 `Shell::sweep` 里那次调用删掉，
+    /// 测试依旧绿。这里直接调 `Shell::sweep`，断它返回的 `audio_restored`
+    /// 与扫描后的音量 / 静音——删掉调用就会失败（音量留在扫描点到的新值上）。
+    #[test]
+    fn shell_sweep_restores_the_player_audio_it_clicks() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(crate::local::Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        app.ui()
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        let mut view = app.player_view();
+        view.volume = 0.42;
+        view.muted = true;
+        app.set_player(&view);
+        app.show_page(Page::Player);
+        app.ui().show().expect("显示窗口");
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1200));
+        // 目标登记要跑两轮（同 `interaction_sweep` 的 `scan`）。
+        for _ in 0..2 {
+            app.refresh_targets();
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+        }
+        assert!(
+            app.target("player.mute").is_some(),
+            "前提：扫描真的会点到静音按钮"
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shell = super::Shell::for_test(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+        );
+        let before = PlayerAudio::from_view(&app.player_view());
+
+        let report = shell.sweep(false);
+
+        assert_eq!(report["ok"], serde_json::json!(true), "{report}");
+        assert_eq!(
+            report["audio_restored"],
+            serde_json::json!(true),
+            "扫描改过音量 / 静音，`Shell::sweep` 必须真的恢复（否则用户偏好被体检改掉）：{report}"
+        );
+        assert_eq!(
+            PlayerAudio::from_view(&app.player_view()),
+            before,
+            "扫描后音量与静音都要回到扫描前的值"
         );
     }
 

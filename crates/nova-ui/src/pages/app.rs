@@ -2546,9 +2546,34 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
             Some(Route::Detail { item_id }) => item_id.clone(),
             _ => item_id.to_owned(),
         };
+        // 已经在播的就是这一条：什么都不做。
+        //
+        // 播放页按 Enter 走 `play_current` → `play`，以前会把同一个 `Player{A}`
+        // 弹了再压一次：播放页闪一下、重新取直链、重开 mpv（连进度位置都重算）。
+        if matches!(
+            state.nav.current(),
+            Some(Route::Player { item_id: playing }) if *playing == target
+        ) {
+            return true;
+        }
         // 已经在播放页再播另一条：**替换**栈顶而不是叠加，返回仍然只回一层。
+        //
+        // 返回语义：换片后按返回要回到**新片 B 的详情页**，而不是上一部 A 的——
+        // 栈是 `[.., Detail{A}, Player{B}]` 时把 `Detail{A}` 换成 `Detail{B}`，
+        // 与“从 B 的详情页起播”同义（否则返回看到的是 A 的标题 / 简介 / 播放按钮）。
+        // 其他情形（下层不是详情页，或下层就是 `Detail{B}`）保持原样。
         if matches!(state.nav.current(), Some(Route::Player { .. })) {
             state.nav.pop();
+            let stale_detail = matches!(
+                state.nav.current(),
+                Some(Route::Detail { item_id: below }) if *below != target
+            );
+            if stale_detail {
+                state.nav.pop();
+                state.nav.push(Route::Detail {
+                    item_id: target.clone(),
+                });
+            }
         }
         state.nav.push(Route::Player {
             item_id: target.clone(),

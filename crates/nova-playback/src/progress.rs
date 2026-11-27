@@ -85,6 +85,14 @@ impl ReportError {
 pub trait ProgressSink: Send + Sync {
     /// 上报一条进度。
     async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError>;
+
+    /// 结束会话（[`ProgressTrigger::Exit`] 的那一条上报之后调用一次）。
+    ///
+    /// 服务端（Jellyfin / Emby）只在收到这条时把续播点落盘，它和进度上报是**两个**
+    /// 请求。默认什么都不做：只关心进度的 sink 不必实现它。
+    async fn stop(&self, _progress: &PlaybackProgress) -> Result<(), ReportError> {
+        Ok(())
+    }
 }
 
 /// 一次上报的结果。

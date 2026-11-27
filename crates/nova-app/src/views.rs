@@ -326,7 +326,23 @@ pub fn player_view(
     server_id: &ServerId,
     item_id: &str,
 ) -> Result<Option<PlayerShellView>, nova_storage::StorageError> {
-    player_view_with_preferences(db, server_id, item_id, &preferences_or_default(db))
+    player_view_with_reader(db, server_id, item_id, || db.preferences())
+}
+
+/// [`player_view`] 的实现：偏好怎么读是**可注入**的。
+///
+/// 偏好行损坏（JSON 解析失败）不好在测试里经 `Database` 的公开 API 造出来
+/// （`set_preferences` 只写编码后的值），所以把“读偏好”这一步做成参数：
+/// 测试能让它失败，之后的路径（条目查找 → 标题 / 时长 / 续播位置）与真实
+/// `player_view` 完全相同。
+fn player_view_with_reader(
+    db: &Database,
+    server_id: &ServerId,
+    item_id: &str,
+    read_prefs: impl FnOnce() -> Result<UserPreferences, nova_storage::StorageError>,
+) -> Result<Option<PlayerShellView>, nova_storage::StorageError> {
+    let prefs = preferences_or_default_with(read_prefs);
+    player_view_with_preferences(db, server_id, item_id, &prefs)
 }
 
 /// 用**已经读好**的偏好构建播放外壳。
@@ -1014,9 +1030,9 @@ mod tests {
     /// 偏好行损坏（JSON 解析失败）时，播放页不能整页失败：`player_view` 退回默认偏好，
     /// 标题与时长照常。以前 `db.preferences()?` 会把错误一路抛给上层，播放外壳变成错误页。
     ///
-    /// 损坏的行不好在测试里直接造（`Database` 只暴露编码后的写入），所以这里走与
-    /// `player_view` **同一个**兜底接缝（[`preferences_or_default_with`]），断言兜底之后的
-    /// 外壳仍然拿得到标题与时长。
+    /// 损坏的行不好在测试里直接造（`Database` 只暴露编码后的写入），所以走 `player_view`
+    /// 自己那条实现（[`player_view_with_reader`]）注一个会失败的读函数：之后的路径
+    /// （条目查找 → 标题 / 时长 / 续播位置）与真实调用完全相同。
     #[test]
     fn player_view_still_shows_title_and_duration_when_preferences_fail() {
         let db = Database::open_in_memory().expect("内存库");
@@ -1032,21 +1048,15 @@ mod tests {
         db.upsert_items(&server.info.id, &[movie], 1)
             .expect("写条目");
 
-        let prefs = preferences_or_default_with(|| {
+        let player = player_view_with_reader(&db, &server.info.id, "a", || {
             Err(nova_storage::StorageError::CorruptPayload {
                 table: "preferences",
                 key: "preferences".to_owned(),
                 source: serde_json::from_str::<serde_json::Value>("{").expect_err("坏 JSON"),
             })
-        });
-        assert!(
-            prefs == UserPreferences::default(),
-            "偏好读失败必须退回默认偏好"
-        );
-
-        let player = player_view_with_preferences(&db, &server.info.id, "a", &prefs)
-            .expect("偏好坏了也不能让播放页报错")
-            .expect("条目存在");
+        })
+        .expect("偏好坏了也不能让播放页报错")
+        .expect("条目存在");
         assert_eq!(player.title, "沙丘", "标题照常上屏");
         assert_eq!(
             player.duration,
@@ -1056,7 +1066,7 @@ mod tests {
         assert_eq!(
             player.position,
             Duration::from_secs(754),
-            "默认偏好下按原续播点继续（754s 高于默认阈值 30s）"
+            "退回默认偏好后按原续播点继续（754s 高于默认阈值 30s）"
         );
     }
 

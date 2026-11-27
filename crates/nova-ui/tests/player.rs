@@ -711,3 +711,68 @@ fn play_replaces_the_player_route_instead_of_stacking() {
     );
     assert_eq!(played.borrow().as_slice(), ["a", "b"]);
 }
+
+/// 换片后按返回：回到的是**新片**的详情页，不是上一部的。
+///
+/// 栈是 `[Home, Detail{A}, Player{A}]` 时起播 B，以前只把 `Player{A}` 换成
+/// `Player{B}`，`Detail{A}` 留在下面——返回看到的是 A 的标题 / 简介 / 播放按钮，
+/// 与「从 B 的详情页起播」的语义不符。
+#[test]
+fn switching_items_repoints_the_detail_page_below_the_player() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    assert!(app.play("arrival"));
+    assert_eq!(
+        app.navigator().stack(),
+        &[
+            Route::Home,
+            Route::Detail {
+                item_id: "arrival".to_owned()
+            },
+            Route::Player {
+                item_id: "arrival".to_owned()
+            },
+        ],
+        "换片后栈顶下面是 B 的详情页，且不多叠一层"
+    );
+    assert_eq!(played.borrow().as_slice(), ["arrival"], "换片要起播新片");
+
+    assert!(app.go_back());
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Detail {
+            item_id: "arrival".to_owned()
+        }),
+        "从播放页返回必须回到新片的详情页"
+    );
+    assert_eq!(app.page(), Page::Detail);
+}
+
+/// 播放页再按 Enter（`play_current` → `play`）不能重开同一部片。
+///
+/// 以前会把同一个 `Player{A}` 弹了再压一次：播放页闪一下、重新取直链、重开 mpv。
+#[test]
+fn playing_the_item_already_on_screen_changes_nothing() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+    let before = app.navigator();
+
+    assert!(app.play("dune"), "同一个条目也算处理掉了");
+
+    assert!(
+        played.borrow().is_empty(),
+        "不能回调起播：那会重新取直链、重开 mpv：{:?}",
+        played.borrow()
+    );
+    assert_eq!(
+        app.navigator(),
+        before,
+        "栈不能变（弹了再压会让页面闪一次）"
+    );
+    assert_eq!(app.page(), Page::Player);
+}

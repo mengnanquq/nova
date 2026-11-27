@@ -61,9 +61,7 @@ impl ProgressSink for ProviderSink {
             Err(_) => Err(ReportError::Rejected),
         }
     }
-}
 
-impl ProviderSink {
     /// 结束会话：服务端只在收到这条时持久化续播点。
     async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
         match self.provider.report_stopped(progress).await {
@@ -113,18 +111,34 @@ impl Progress {
                 runtime: runtime.clone(),
             };
         };
+        Self::with_sink(local, runtime, Arc::new(ProviderSink::new(provider)))
+    }
+
+    /// 用测试注入的 sink 起 worker（与 [`Progress::start`] 同一条路径）。
+    ///
+    /// 换片收尾（`Exit` 进度 + `stop`）必须能被观测到，而 `ProviderSink` 要真机上
+    /// 的 provider 才有意义，所以把 sink 变成可注入的。
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        local: &Arc<Local>,
+        runtime: &Handle,
+        sink: Arc<dyn ProgressSink>,
+    ) -> Self {
+        Self::with_sink(local, runtime, sink)
+    }
+
+    fn with_sink(local: &Arc<Local>, runtime: &Handle, sink: Arc<dyn ProgressSink>) -> Self {
         let prefs: UserPreferences = local.preferences.clone();
         let pending_path = local.data_dir.join("pending-progress.json");
         let (commands, mut receiver) = unbounded_channel();
         runtime.spawn(async move {
-            let sink = ProviderSink::new(provider);
             let mut reporter = ProgressReporter::new(&prefs, Arc::new(SystemClock))
                 .with_pending_path(pending_path);
             match reporter.load_pending() {
                 Ok(0) => {}
                 Ok(loaded) => {
                     tracing::info!(loaded, "发现上次没提交的播放进度，尝试补发");
-                    let outcome = reporter.flush(&sink).await;
+                    let outcome = reporter.flush(sink.as_ref()).await;
                     tracing::info!(
                         sent = outcome.sent,
                         failed = outcome.failed,
@@ -137,7 +151,7 @@ impl Progress {
             while let Some(command) = receiver.recv().await {
                 match command {
                     Command::Submit(trigger, progress) => {
-                        let outcome = reporter.submit(&sink, trigger, &progress).await;
+                        let outcome = reporter.submit(sink.as_ref(), trigger, &progress).await;
                         tracing::debug!(?trigger, ?outcome, "播放进度上报");
                         if trigger == ProgressTrigger::Exit {
                             // 结束会话是独立的一步：Jellyfin 靠它落盘续播点。
@@ -148,12 +162,12 @@ impl Progress {
                         }
                     }
                     Command::Flush(reply) => {
-                        let outcome = reporter.flush(&sink).await;
+                        let outcome = reporter.flush(sink.as_ref()).await;
                         // 接收端可能已经不等了（超时），忽略发送失败。
                         let _ = reply.send(outcome);
                     }
                     Command::Shutdown => {
-                        let outcome = reporter.flush(&sink).await;
+                        let outcome = reporter.flush(sink.as_ref()).await;
                         tracing::debug!(?outcome, "退出前补发播放进度");
                         break;
                     }
