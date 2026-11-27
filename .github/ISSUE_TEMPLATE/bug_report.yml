@@ -1,0 +1,100 @@
+name: 问题报告
+description: Nova 出错、崩溃，或者行为和预期不一致
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先看一眼 README 的「已知限制」，再搜一下有没有相同的 issue。
+
+        **注意隐私**：日志和截图里可能有服务器地址、用户名或访问令牌。
+        贴之前请把 `api_key=…`、`X-Emby-Token`、`Authorization` 之类的值删掉或替换成 `<x>`。
+        Nova 自身的日志不会打印令牌，但第三方组件（mpv、GStreamer）的输出不保证。
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 你看到了什么，你原本期望看到什么。
+      placeholder: 例如：在媒体库页按 ↓ 到最后一行后，焦点消失，再按方向键没有反应。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量从启动 Nova 开始写。能稳定复现的话请注明。
+      placeholder: |
+        1. 启动 nova-desktop
+        2. 打开某个媒体库
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Nova 版本
+      description: 目前没有正式版本，请填 commit（`git rev-parse --short HEAD`）。
+      placeholder: 例如 0102fdb
+    validations:
+      required: true
+
+  - type: dropdown
+    id: server
+    attributes:
+      label: 服务端
+      options:
+        - Emby
+        - Jellyfin
+        - 不涉及服务端
+    validations:
+      required: true
+
+  - type: input
+    id: server_version
+    attributes:
+      label: 服务端版本
+      placeholder: 例如 Emby 4.8.10 / Jellyfin 10.10.3
+
+  - type: input
+    id: system
+    attributes:
+      label: 系统与桌面
+      description: 发行版、桌面环境或合成器、显卡。
+      placeholder: 例如 Arch Linux / KDE Plasma 6 (Wayland) / Intel Arc B580
+    validations:
+      required: true
+
+  - type: input
+    id: mpv
+    attributes:
+      label: libmpv 版本
+      description: 与播放相关的问题请填写（`mpv --version` 第一行）。
+      placeholder: 例如 mpv 0.42.0
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        用 `NOVA_LOG=debug nova-desktop 2> nova.log` 重新复现一次，贴出相关片段。
+        播放问题可以用 `NOVA_LOG=warn,nova_playback_mpv=debug`。**贴之前先删掉令牌。**
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 界面问题请附图，并注明窗口大小。
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已经搜过现有的 issue，没有重复
+          required: true
+        - label: 我贴出的日志和截图里不含访问令牌或密码
+          required: true

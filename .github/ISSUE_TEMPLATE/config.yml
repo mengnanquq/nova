@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/mengnanquq/nova/security/advisories/new
+    about: 涉及令牌泄露、证书校验等安全问题，请私下报告，不要公开提 issue。
