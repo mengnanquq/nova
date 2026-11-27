@@ -265,7 +265,7 @@ impl Session {
     /// 文件或同时 seek 到 0，只发 `play` 是原地不动。
     ///
     /// 调用约定（`Ended` 分支）：生产路径到不了这里。`Player` 在播完后按播放键 / 确认键
-    /// 时先把它拦成 [`Player::replay`]（走 `begin`：新会话、重取直链、从头开始），
+    /// 时先把它拦成 `nova_app` 的 `Player::replay`（走 `begin`：新会话、重取直链、从头开始），
     /// [`Session::play`] 的 `Ended` 分支只是状态机自身的**一致性**保障——直接驱动
     /// `Session` 的调用方（用例如 `returning_to_playback_after_end_starts_a_new_session_from_zero`）
     /// 也不能拿到“状态停在 Ended、位置钉在时长”的死局。不要把它当成起播路径改。

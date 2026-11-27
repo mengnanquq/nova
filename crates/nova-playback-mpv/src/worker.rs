@@ -481,11 +481,12 @@ impl Worker {
             MpvEvent::PlaybackRestart => {
                 // 不算“seek 已生效”的证据：`eof-reached` 此刻已经翻成 `false` 才算
                 // （详见 [`EndedGuard::on_playback_restart`]）。
-                let eof_now = self
-                    .handle
-                    .get_string("eof-reached")
-                    .as_deref()
-                    .map(|value| value == "yes");
+                // 三态：读不到或读到未知值都按 `None` 处理（保守：不清旧观察）。
+                let eof_now = match self.handle.get_string("eof-reached").as_deref() {
+                    Some("yes") => Some(true),
+                    Some("no") => Some(false),
+                    _ => None,
+                };
                 self.ended.on_playback_restart(eof_now);
                 self.trace_shared("playback-restart");
                 self.poll_properties();
