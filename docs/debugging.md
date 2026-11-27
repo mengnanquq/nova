@@ -143,6 +143,7 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 
 | 字段 | 含义 |
 |---|---|
+| `status` | 连接状态（`nova_app::status::Status` 的 `Debug` 输出）：`Connected { … }` / `NoServer` / `MissingToken { … }` / `Expired { … }` / `RefreshFailed { … }`。横幅背后真正的状态，离线排查先看它 |
 | `search_focused` | 顶栏搜索框是否真的持有焦点（Ctrl+F / 点击搜索后的交接态） |
 | `focus_layer` | 键盘焦点层：`content` / `hero` / `navbar`（体检 R2-2b）。纯键盘 / 遥控器能不能到顶栏与 hero 按钮看它 |
 | `nav_focus` | 顶栏焦点下标：`0..nav_tabs-1` = 库标签，`nav_tabs` = 搜索按钮，`-1` = 不在顶栏 |
@@ -151,6 +152,7 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 | `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签在标签区视口里的左右沿与标签区滚动量：窄窗口下 `0 ≤ left && right ≤ viewport_w` 就是“焦点标签已经滚入可见区” |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |
 | `dialog.open` / `address` / `user` / `password_len` / `error` | 「添加服务器」对话框的字段与错误文案；**密码只报字符长度**，不回显明文 |
+| `player.playing` / `player.buffering` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。注意 `view.player` **没有** `ended` 字段（播完判定在界面侧是 `PlayerView::ended && !playing`）：要确认“是不是真的播完了”看 `playing: false` + `position_ms` 到底 + `error: null`，或看日志 |
 | `player.audio_track` / `player.subtitle_track` | 当前选中的音轨 / 字幕轨：`{"index": <mpv aid/sid>, "label": "…"}`；`null` = 字幕「关闭」或引擎还没枚举到轨道 |
 
 密码只给长度的原因：回包会进脚本与日志，回显明文等于把凭据写出去。验证“输入框里有东西”
@@ -218,6 +220,17 @@ NOVA_LOG=debug nova-desktop      # 或 info / warn（默认）
 NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 ```
 
+退出 / 换片时的进度日志（`crates/nova-app/src/player/mod.rs` 的 `end_session`）。
+两个字段别读反：
+
+- `submitted`：这次退出**有没有把进度交给上报队列**（`build_progress` + `submit(Exit)` 的结果）；
+- `flushed`：补发队列这个动作发出去了几条（`ProgressReporter::flush` 的 `outcome.sent`）。
+  正常（没有积压）时它是 `0`，**不代表没上报进度**。
+
+两种结束路径的文案不同：离开播放页是 `结束播放会话：补发进度`（有界等待 `FLUSH_TIMEOUT`，
+带 `submitted` / `flushed` / `failed` / `queued`）；换片是
+`结束播放会话：进度已交给上报 worker（换片不等待补发）`（debug 级，只有 `submitted`）。
+
 ## 用 `targets` + `sweep` 找"死按钮"
 
 1. 起一个真实窗口（**必须**真实窗口：无头后端不跑异步刷新，卡片坐标也可能不同）：
@@ -253,7 +266,9 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
    - `changed:false` **不是失败**：有的按钮只改局部状态（悬停态），有的是"点当前项"的空操作；
    - 每条都带 `kind` / `label`，方便人工核对；
    - `restored:false` 表示点击把应用带到了回不去的状态（例如播放页），扫描会提前收尾
-     （`aborted:true`）——这时先手动 `route` 回原页再继续。
+     （`aborted:true`）——这时先手动 `route` 回原页再继续；
+   - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
+     恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
 
 4. 只看"死按钮"，适合 CI / 人工核对：
 

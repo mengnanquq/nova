@@ -96,11 +96,47 @@ TLS：`reqwest` 使用 `rustls-tls-native-roots`，默认校验证书与主机�
 
 ## 在线 / 离线状态模型
 
-- `AuthState` 三态：`NoToken`（本地尚无令牌，离线启动，不联网）、`Unauthorized`（令牌失效，需重新登录）、`Forbidden`（403，凭据/权限问题，不算会话过期）。
-- `Status::RefreshFailed` 视为**离线**：搜索/详情/图片都不再联网。
-- 有令牌时以 `Connected` **乐观启动**，再由刷新结果验证；刷新失败落回 `RefreshFailed`。
-- 横幅上的「重试」走 `refresh_forced`，会**强制刷新**（即使当前不是 `Connected`）。
-- 恢复连接后会清除失败图片的记录，重新尝试。
+"在线"在三层各有一个表示，含义与职责都不同，**不要混用**：
+
+| 层 | 类型 | 取值 | 是否落库 |
+|---|---|---|---|
+| 持久化认证状态 | `nova_core::AuthState`（`ServerInfo::auth`，`crates/nova-core/src/server.rs`） | `Unauthorized` / `Authorized { user_name, credential_key }` / `Expired { user_name }` | 是（SQLite `servers`） |
+| 请求错误 | `nova_provider::ProviderError`（`crates/nova-provider/src/error.rs`） | `NoToken` / `Unauthorized` / `Forbidden` / `NotFound` / `Http { status }` / `Network` / `Decode` / … | 否 |
+| 界面状态 | `nova_app::status::Status`（`crates/nova-app/src/status.rs`） | `Connected { server, base_url }` / `NoServer` / `AmbiguousServer { count }` / `MissingToken { url, note }` / `Expired { url }` / `RefreshFailed { message }` | 否（内存） |
+
+三个容易混的 `ProviderError` 变体（`Unauthorized` 只是 401，不等于"所有认证失败"）：
+
+- `NoToken`：本机凭证存储里没有令牌，请求**根本没发出去**。上层保持原状态，既不 `mark_expired`
+  也不改写成 `RefreshFailed`——否则会把"本地还没登录"误记成"服务器判定会话过期"并写进本地库。
+- `Unauthorized`：HTTP 401。`nova-provider` 的 `error_from_response` 先 `mark_expired()`
+  （把 provider 内存里的 `ServerInfo::auth` 置为 `AuthState::Expired`）再返回错误；
+  上层再 `Local::mark_expired()` 写回 SQLite 并广播 `Status::Expired`。
+  **只有这一种错误会让会话变成过期。**
+- `Forbidden`：HTTP 403，权限不足，**不是**会话过期——重新登录也不会变好。不动 `AuthState`、
+  不 `mark_expired`，按普通失败处理（横幅仍可重试）。
+
+转换关系：
+
+- **启动**：`Local::open` 只要凭证存储里能取到非空令牌就**乐观**置为 `Status::Connected`
+  （库里存着 `AuthState::Expired` 也一样），交给后台刷新去验证；取不到令牌时，库里是
+  `AuthState::Expired` 就给 `Status::Expired`，否则 `Status::MissingToken`；
+  `build_provider` 失败则 `Status::RefreshFailed`。
+- **刷新成功**：`refresh::run` 调 `Local::persist_info(provider)` 把 `AuthState::Authorized`
+  写回本地库（凭令牌恢复的会话 `user_name` 是空串，不会覆盖登录时存下的名字），
+  并把 `Local::status()` 与界面一起置为 `Status::Connected`。
+- **刷新失败**（网络 / 5xx / 响应不合规）：`refresh::failure_status` 把
+  `Status::RefreshFailed` 回写 `Local`。`Status::is_connected()` 只有 `Connected` 为真，
+  所以 `ui::online_provider` 之后不再给搜索 / 详情 / 图片发请求，一律只读缓存
+  （搜索失败页也不会再覆盖本地命中结果）。
+- **回到在线**：横幅上的「重试」调 `refresh::refresh_forced`（`force = true`，当前不是
+  `Connected` 也照发）；下次启动也会重新刷新。
+- **广播**：`Local::set_status` 写完状态就调注册的 `status_listener`（窗口模式在 `ui::run_window`
+  里注册，投一条 `UiMessage::Status`），所以后台任务里的 `mark_expired` 也能立刻更新横幅，
+  不必等下一次刷新或重启。
+- **离线 → 在线**：`Shell::apply_status` 用 `recovered_session(previous, next)`
+  （`!previous.is_connected() && next.is_connected()`）判断，为真时调用
+  `ImageService::clear_failures` 并重排图片预取。反向（在线 → 离线）**不清**，否则一次断网
+  就把真正的坏图（404）记录洗掉，恢复后又去重试它们。
 
 ## 图片
 
