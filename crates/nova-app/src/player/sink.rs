@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nova_core::{PlaybackProgress, UserPreferences};
+use nova_core::{ItemId, PlaybackProgress, SourceId, UserPreferences};
 use nova_playback::{
     FlushOutcome, ProgressReporter, ProgressSink, ProgressTrigger, ReportError, SystemClock,
 };
@@ -31,8 +31,12 @@ const FLUSH_TIMEOUT: Duration = Duration::from_millis(1500);
 /// 把 `MediaProvider::report_progress` 包成 [`ProgressSink`]。
 pub(crate) struct ProviderSink {
     provider: Arc<dyn MediaProvider>,
-    /// 是否已经发过"开始播放"。服务端要它才会把后续进度算进会话。
-    started: AtomicBool,
+    /// 最近一次已发过"开始播放"的会话（条目 + 资源）。
+    ///
+    /// 不能是进程级的 `bool`：换片后是新会话，服务端要重新收到 `Started`
+    /// 才会把接下来的进度算进会话（否则 B 的续播点永远不更新）。`stop`（`Exit`）
+    /// 时清掉，所以同一条目重播也会重新发。
+    started: Mutex<Option<(ItemId, SourceId)>>,
 }
 
 impl ProviderSink {
@@ -40,7 +44,30 @@ impl ProviderSink {
     pub(crate) fn new(provider: Arc<dyn MediaProvider>) -> Self {
         Self {
             provider,
-            started: AtomicBool::new(false),
+            started: Mutex::new(None),
+        }
+    }
+
+    /// 这个会话是否还需要先发 `Started`；需要时顺手记下来（先记再发：
+    /// 请求失败也不会把后面的每次上报都变成一次 `Started`）。
+    fn begin_session(&self, progress: &PlaybackProgress) -> bool {
+        let mut started = self.started_sessions();
+        if started.as_ref() == Some(&(progress.item_id.clone(), progress.source_id.clone())) {
+            return false;
+        }
+        *started = Some((progress.item_id.clone(), progress.source_id.clone()));
+        true
+    }
+
+    /// 当前会话已开始（`Exit` / `stop` 之后复位）。
+    fn end_session(&self) {
+        *self.started_sessions() = None;
+    }
+
+    fn started_sessions(&self) -> MutexGuard<'_, Option<(ItemId, SourceId)>> {
+        match self.started.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 }
@@ -48,7 +75,7 @@ impl ProviderSink {
 #[async_trait]
 impl ProgressSink for ProviderSink {
     async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
-        if !self.started.swap(true, Ordering::Relaxed) {
+        if self.begin_session(progress) {
             // 起播注册失败不阻塞进度：下一次 Progress 仍可能被服务端接受。
             if let Err(error) = self.provider.report_started(progress).await {
                 tracing::debug!(%error, "起播上报失败（不影响后续进度上报）");
@@ -65,7 +92,10 @@ impl ProgressSink for ProviderSink {
     }
 
     /// 结束会话：服务端只在收到这条时持久化续播点。
+    ///
+    /// 顺带复位"已发 Started"：下一次上报（同一部片重播也是）算新会话。
     async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
+        self.end_session();
         match self.provider.report_stopped(progress).await {
             Ok(()) => Ok(()),
             // 同上：本机没有令牌不是服务端拒了这次上报。
@@ -242,6 +272,8 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nova_core::{MediaItem, MediaSource, ServerInfo, ServerKind};
+    use nova_provider::{ImageRequest, ItemQuery, Library, Page, StreamTarget};
 
     #[test]
     fn client_errors_are_not_retried() {
@@ -251,5 +283,177 @@ mod tests {
         assert!(!is_transient(&ProviderError::Http { status: 400 }));
         assert!(!is_transient(&ProviderError::Unauthorized));
         assert!(!is_transient(&ProviderError::NotFound));
+    }
+
+    /// 只记录三个上报端点，其余方法测试用不到。
+    #[derive(Default)]
+    struct FakeProvider {
+        started: Mutex<Vec<String>>,
+        stopped: Mutex<Vec<String>>,
+        progress: Mutex<Vec<String>>,
+    }
+
+    impl FakeProvider {
+        fn calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
+            match calls.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn started(&self) -> Vec<String> {
+            Self::calls(&self.started)
+        }
+
+        fn stopped(&self) -> Vec<String> {
+            Self::calls(&self.stopped)
+        }
+
+        fn recorded(calls: &Mutex<Vec<String>>, progress: &PlaybackProgress) {
+            match calls.lock() {
+                Ok(mut guard) => guard.push(progress.item_id.to_string()),
+                Err(poisoned) => poisoned.into_inner().push(progress.item_id.to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MediaProvider for FakeProvider {
+        fn kind(&self) -> ServerKind {
+            ServerKind::Jellyfin
+        }
+
+        fn base_url(&self) -> &str {
+            "http://127.0.0.1:1"
+        }
+
+        fn server_info(&self) -> ServerInfo {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn public_info_as_server_info(&self) -> Result<ServerInfo, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn public_info(&self) -> Result<nova_provider::PublicServerInfo, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn authenticate(
+            &self,
+            _user: &str,
+            _password: &nova_secrets::SecretString,
+        ) -> Result<ServerInfo, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn libraries(&self) -> Result<Vec<Library>, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn items(&self, _query: ItemQuery) -> Result<Page<MediaItem>, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn item(&self, _id: &ItemId) -> Result<MediaItem, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn children(&self, _id: &ItemId) -> Result<Vec<MediaItem>, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn sources(&self, _id: &ItemId) -> Result<Vec<MediaSource>, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn stream_target(
+            &self,
+            _item: &ItemId,
+            _source: &SourceId,
+        ) -> Result<StreamTarget, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn report_started(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
+            Self::recorded(&self.started, progress);
+            Ok(())
+        }
+
+        async fn report_stopped(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
+            Self::recorded(&self.stopped, progress);
+            Ok(())
+        }
+
+        async fn report_progress(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
+            Self::recorded(&self.progress, progress);
+            Ok(())
+        }
+
+        async fn image(&self, _request: ImageRequest) -> Result<Vec<u8>, ProviderError> {
+            unreachable!("测试只关心上报")
+        }
+
+        async fn logout(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn progress(item: &str, secs: u64) -> PlaybackProgress {
+        PlaybackProgress {
+            item_id: ItemId::new(item),
+            source_id: SourceId::new(format!("source-{item}")),
+            position: Duration::from_secs(secs),
+            duration: Some(Duration::from_secs(600)),
+            played: false,
+            paused: false,
+            method: nova_core::PlayMethod::DirectPlay,
+        }
+    }
+
+    async fn report(sink: &ProviderSink, item: &str, secs: u64) {
+        sink.report(&progress(item, secs))
+            .await
+            .unwrap_or_else(|error| panic!("上报失败：{error:?}"));
+    }
+
+    async fn stop(sink: &ProviderSink, item: &str, secs: u64) {
+        sink.stop(&progress(item, secs))
+            .await
+            .unwrap_or_else(|error| panic!("结束会话失败：{error:?}"));
+    }
+
+    /// 复审 🟡4：`started` 曾经是进程级的 `AtomicBool`，换片后 B 永远不会再发
+    /// `Started`（`Sessions/Playing`），服务端于是不把 B 的进度算进会话。
+    ///
+    /// 现在按会话（条目 + 资源）记录，`stop`（`Exit`）后复位。
+    #[tokio::test]
+    async fn every_new_session_reports_started() {
+        let provider = Arc::new(FakeProvider::default());
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        // A 的会话：第一条上报先发 Started，后续不重复。
+        report(&sink, "a", 10).await;
+        assert_eq!(provider.started(), ["a"], "A 的第一条上报必须是 Started");
+        report(&sink, "a", 20).await;
+        assert_eq!(provider.started(), ["a"], "同一会话不重复发 Started");
+
+        // A 退出：`stop` 之后会话结束。
+        report(&sink, "a", 30).await;
+        stop(&sink, "a", 30).await;
+        assert_eq!(provider.stopped(), ["a"]);
+
+        // 换片 B：第一条上报仍然要是 Started（旧实现这里是空的）。
+        report(&sink, "b", 1).await;
+        assert_eq!(
+            provider.started(),
+            ["a", "b"],
+            "换片后新会话必须重新发 Started"
+        );
+
+        // 同一部片重播（stop 之后）也算新会话。
+        stop(&sink, "b", 1).await;
+        report(&sink, "b", 2).await;
+        assert_eq!(provider.started(), ["a", "b", "b"]);
     }
 }

@@ -164,6 +164,11 @@ pub struct ProgressReporter {
     queue: Vec<PendingEntry>,
     next_retry_at: Option<Instant>,
     last_attempt: Option<Fingerprint>,
+    /// 上一次尝试上报的会话（条目 + 资源）。
+    ///
+    /// 队列与去重都是跨条目共用的，换片后 B 的第一条上报不能因为"位置和状态跟
+    /// A 的最后一模一样"被去重掉，所以按会话记录。
+    last_target: Option<(nova_core::ItemId, nova_core::SourceId)>,
     last_report_at: Option<Instant>,
 }
 
@@ -177,6 +182,7 @@ impl ProgressReporter {
             queue: Vec::new(),
             next_retry_at: None,
             last_attempt: None,
+            last_target: None,
             last_report_at: None,
         }
     }
@@ -214,10 +220,13 @@ impl ProgressReporter {
 
     /// 这一次要不要真的上报。
     ///
-    /// 去重规则：位置与状态都没变就不重复上报（`Exit` 除外）。
-    /// 定时驱动还要额外满足上报间隔。
+    /// 去重规则：位置与状态都没变就不重复上报（`Exit` 除外），且只在**同一个会话**
+    /// 内比较——换片后新条目的第一条上报一定放行。定时驱动还要额外满足上报间隔。
     pub fn should_report(&self, trigger: ProgressTrigger, progress: &PlaybackProgress) -> bool {
         if trigger == ProgressTrigger::Exit {
+            return true;
+        }
+        if !self.same_session(progress) {
             return true;
         }
         if self.last_attempt == Some(Fingerprint::of(progress)) {
@@ -234,9 +243,10 @@ impl ProgressReporter {
 
     /// 按触发时机上报一次（含队列补发）。
     ///
-    /// 队列里还有发不出去的进度时（退避未到期，或刚补发又失败），不会为同一条进度
-    /// 额外打请求，只把队列里的位置更新成最新的；退出（[`ProgressTrigger::Exit`]）
-    /// 例外：它总是尽力再发一次。
+    /// 队列里还有**同一会话**发不出去的进度时（退避未到期，或刚补发又失败），不会为
+    /// 同一条进度额外打请求，只把队列里的位置更新成最新的；退出（[`ProgressTrigger::Exit`]）
+    /// 例外：它总是尽力再发一次。队列是跨条目共用的，别的条目（换片后的新片）不受
+    /// 这个压制影响——否则 A 的 `Exit` 一直失败会把 B 的进度静默吞掉整整一个退避周期。
     pub async fn submit(
         &mut self,
         sink: &dyn ProgressSink,
@@ -256,7 +266,11 @@ impl ProgressReporter {
             None
         };
 
-        if !self.queue.is_empty() && trigger != ProgressTrigger::Exit {
+        let same_pending = self
+            .queue
+            .iter()
+            .any(|entry| same_target(&entry.progress, progress));
+        if same_pending && trigger != ProgressTrigger::Exit {
             self.refresh_pending(progress);
             return match drained {
                 Some(outcome) if outcome.failed > 0 => ReportOutcome::Queued {
@@ -269,7 +283,7 @@ impl ProgressReporter {
         if !self.should_report(trigger, progress) {
             return ReportOutcome::Skipped;
         }
-        self.last_attempt = Some(Fingerprint::of(progress));
+        self.mark_attempt(progress);
         match sink.report(progress).await {
             Ok(()) => {
                 self.record_success(progress);
@@ -382,8 +396,24 @@ impl ProgressReporter {
         }
     }
 
-    fn record_success(&mut self, progress: &PlaybackProgress) {
+    /// 记下"刚为这个会话打过一次请求"（含失败）：去重与"是否换片"都看它。
+    fn mark_attempt(&mut self, progress: &PlaybackProgress) {
         self.last_attempt = Some(Fingerprint::of(progress));
+        if !self.same_session(progress) {
+            self.last_target = Some((progress.item_id.clone(), progress.source_id.clone()));
+        }
+    }
+
+    /// 当前进度是不是 `last_target` 那个会话的。
+    fn same_session(&self, progress: &PlaybackProgress) -> bool {
+        match &self.last_target {
+            Some((item, source)) => item == &progress.item_id && source == &progress.source_id,
+            None => false,
+        }
+    }
+
+    fn record_success(&mut self, progress: &PlaybackProgress) {
+        self.mark_attempt(progress);
         self.last_report_at = Some(self.clock.now());
         // 已经报上去的位置比队列里的旧位置更新，旧的没必要再发。
         self.queue
@@ -490,6 +520,8 @@ mod tests {
         reports: Mutex<Vec<PlaybackProgress>>,
         failures: Mutex<Vec<ReportError>>,
         always_fail: Mutex<Option<ReportError>>,
+        /// 只让这个条目的上报失败（其余照常成功）。
+        fails_for: Mutex<Option<String>>,
     }
 
     impl RecordingSink {
@@ -498,12 +530,20 @@ mod tests {
                 reports: Mutex::new(Vec::new()),
                 failures: Mutex::new(Vec::new()),
                 always_fail: Mutex::new(None),
+                fails_for: Mutex::new(None),
             }
         }
 
         fn always_failing(error: ReportError) -> Self {
             let sink = Self::new();
             *lock(&sink.always_fail) = Some(error);
+            sink
+        }
+
+        /// 只有 `item` 的上报一直失败：用来验"一个条目卡住队列，别的条目照常上报"。
+        fn always_failing_for(item: &str, error: ReportError) -> Self {
+            let sink = Self::always_failing(error);
+            *lock(&sink.fails_for) = Some(item.to_owned());
             sink
         }
 
@@ -519,7 +559,13 @@ mod tests {
     #[async_trait]
     impl ProgressSink for RecordingSink {
         async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
-            if let Some(error) = *lock(&self.always_fail) {
+            let always = *lock(&self.always_fail);
+            let only_for = lock(&self.fails_for).clone();
+            let failing = always.filter(|_| match only_for.as_deref() {
+                Some(item) => item == progress.item_id.as_str(),
+                None => true,
+            });
+            if let Some(error) = failing {
                 return Err(error);
             }
             let mut failures = lock(&self.failures);
@@ -555,6 +601,15 @@ mod tests {
             played: false,
             paused,
             method: PlayMethod::DirectPlay,
+        }
+    }
+
+    /// 另一个条目（另一个会话）的进度。
+    fn other_progress(item: &str, secs: u64, paused: bool) -> PlaybackProgress {
+        PlaybackProgress {
+            item_id: ItemId::new(item),
+            source_id: SourceId::new(format!("source-{item}")),
+            ..progress(secs, paused)
         }
     }
 
@@ -756,6 +811,96 @@ mod tests {
         assert_eq!(reporter.queued(), 0);
         assert!(!ReportError::Unauthorized.is_retryable());
         assert!(ReportError::Transient.is_retryable());
+    }
+
+    /// 复审 🟡3：队列是跨条目共用的。条目 A 的 `Exit` 一直 transient 失败时，
+    /// 换片后 B 的进度不能被静默吞掉直到退避结束（最长 60s）。
+    ///
+    /// 压制只针对**同一个 `(item_id, source_id)`**：A 自己照旧被压住，B 照常上报。
+    #[tokio::test]
+    async fn failing_entry_does_not_swallow_another_items_progress() {
+        let (mut reporter, clock) = reporter();
+        let sink = RecordingSink::always_failing_for("item-1", ReportError::Transient);
+
+        // A：定时上报失败进队列（退避 1s）。
+        assert_eq!(
+            reporter
+                .submit(&sink, ProgressTrigger::Tick, &progress(600, false))
+                .await,
+            ReportOutcome::Queued {
+                retry_in: Duration::from_secs(1)
+            }
+        );
+        // A 退出：补发又失败，队列里还是只剩 A 这条。
+        assert!(matches!(
+            reporter
+                .submit(&sink, ProgressTrigger::Exit, &progress(610, true))
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        assert_eq!(reporter.queued(), 1);
+
+        // 退避还没到期，B 的 Tick 仍然要发出去（旧实现会在这里 Skipped）。
+        let b = other_progress("item-2", 20, false);
+        assert_eq!(
+            reporter.submit(&sink, ProgressTrigger::Tick, &b).await,
+            ReportOutcome::Sent
+        );
+        assert_eq!(
+            sink.reported()
+                .last()
+                .map(|progress| progress.item_id.as_str().to_owned()),
+            Some("item-2".to_owned()),
+            "B 的 Tick 必须真的报到服务端"
+        );
+        assert_eq!(reporter.queued(), 1, "A 的待发项不能被 B 的努力掉");
+
+        // 同一条目（A）的行为不变：退避未到期时仍然不发请求。
+        let before = sink.count();
+        assert_eq!(
+            reporter
+                .submit(&sink, ProgressTrigger::Tick, &progress(620, false))
+                .await,
+            ReportOutcome::Skipped
+        );
+        assert_eq!(sink.count(), before, "A 在退避期内不该再打请求");
+
+        // 退避到期：A 的补发照旧进行（仍然失败 -> 继续留在队列里）。
+        clock.advance(Duration::from_secs(60));
+        assert!(matches!(
+            reporter
+                .submit(&sink, ProgressTrigger::Tick, &progress(630, false))
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        assert_eq!(reporter.queued(), 1);
+    }
+
+    /// 去重只看同一个会话：换片后 B 的第一条上报哪怕位置/状态与 A 的最后一模一样，
+    /// 也必须发出去。
+    #[tokio::test]
+    async fn new_session_is_not_deduplicated_against_the_previous_one() {
+        let (mut reporter, _clock) = reporter();
+        let sink = RecordingSink::new();
+        assert_eq!(
+            reporter
+                .submit(&sink, ProgressTrigger::Tick, &progress(0, false))
+                .await,
+            ReportOutcome::Sent
+        );
+        assert_eq!(
+            reporter
+                .submit(
+                    &sink,
+                    ProgressTrigger::Tick,
+                    &other_progress("item-2", 0, false)
+                )
+                .await,
+            ReportOutcome::Sent,
+            "新会话不得被上个会话的去重状态吞掉"
+        );
+        assert_eq!(sink.count(), 2);
+        assert_eq!(sink.reported()[1].item_id.as_str(), "item-2");
     }
 
     #[tokio::test]
