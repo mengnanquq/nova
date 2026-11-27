@@ -87,6 +87,8 @@ pub enum AddServerErrorKind {
     Tls,
     /// 服务器类型未知 / 响应异常。
     UnknownServer,
+    /// 本地校验：用户名为空。此时**不联网**，直接在错误区给文案（体检 R8-C4）。
+    MissingUser,
 }
 
 impl AddServerErrorKind {
@@ -97,6 +99,7 @@ impl AddServerErrorKind {
             Self::Connect => "连不上服务器：检查地址、端口和网络",
             Self::Tls => "证书校验失败：自签名证书需要导入系统信任，不能跳过校验",
             Self::UnknownServer => "这个地址看起来不像 Emby 或 Jellyfin",
+            Self::MissingUser => "请填写用户名",
         }
     }
 }

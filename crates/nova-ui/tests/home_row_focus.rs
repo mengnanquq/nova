@@ -448,8 +448,8 @@ fn shrinking_the_home_data_resets_the_scroll_and_the_hover() {
     settle(&app);
     assert_eq!(app.ui().get_home_focus(), 5, "悬停应对齐焦点");
     assert!(
-        app.target("home.row.recent.left").is_some(),
-        "前提：悬停让这一行的左右箭头出现（zoom-index >= 0）"
+        app.ui().get_row1_zoom_on(),
+        "前提：悬停让这一行点亮放大（左右箭头随之出现）"
     );
     assert!(
         f64::from(app.ui().get_home_scroll_y()) < 0.0,
@@ -470,9 +470,80 @@ fn shrinking_the_home_data_resets_the_scroll_and_the_hover() {
         "钳位后页面必须滚回顶部（否则 Enter 打开的是屏幕外那张）"
     );
     assert!(
-        app.target("home.row.recent.left").is_none(),
-        "悬停锁存必须清掉：焦点已经不在那一行，箭头不能留下"
+        !app.ui().get_row1_zoom_on(),
+        "悬停锁存必须清掉：焦点已经不在那一行，放大与箭头不能留下"
     );
+}
+
+/// R8-C3：行箭头只在本行还能往那个方向滚时出现（Netflix 口径）。
+///
+/// 修复前箭头只看「行被点亮」（`zoom-index >= 0`）：行在横向起点时左箭头照样画出来，
+/// 点它是空操作（`sweep` 记 dead）；行装得下 / 已到行尾时另一个方向同样死。
+#[test]
+fn row_arrows_only_show_where_the_row_can_scroll() {
+    let app = app_1920x1080();
+    let view = home();
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().set_nav_active(true);
+    // 压缩 billboard，让两行卡片都落在窗口里（目标清单会按中心点裁掉窗口外的项）。
+    app.ui().set_billboard_ratio(0.2);
+    app.ui().set_home_focus(0);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    // 继续观看只有 2 张（327×2 + 间距 + 留白 < 1920）：两个方向都滚不动。
+    assert!(app.ui().get_row0_zoom_on(), "前提：焦点落在继续观看行");
+    assert!(!app.ui().get_row0_arrow_left_on(), "装得下时不该有左箭头");
+    assert!(!app.ui().get_row0_arrow_right_on(), "装得下时不该有右箭头");
+    assert!(app.target("home.row.continue.left").is_none());
+    assert!(app.target("home.row.continue.right").is_none());
+
+    // 最近添加 8 张（可滚）：起点只有右箭头；左箭头不可见，也不登记。
+    app.ui().set_home_focus(2);
+    settle(&app);
+    assert!(
+        app.ui().get_row1_zoom_on(),
+        "前提：焦点落在最近添加行，放大点亮"
+    );
+    assert!(!app.ui().get_row1_arrow_left_on(), "行起点不该有左箭头");
+    assert!(
+        app.ui().get_row1_arrow_right_on(),
+        "右边还有内容，应有右箭头"
+    );
+    assert!(
+        app.target("home.row.recent.left").is_none(),
+        "行起点的左箭头不可见，也不该进目标清单"
+    );
+    assert!(
+        app.target("home.row.recent.right").is_some(),
+        "行起点应有右箭头目标（清单：{:?}）",
+        app.targets()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // 键盘滚到行内末张（局部 7）：左箭头出现，并真的能点。
+    for _ in 0..7 {
+        press(&app, Key::RightArrow);
+    }
+    settle(&app);
+    assert!(
+        f64::from(app.ui().get_home_row_scroll_x()) < 0.0,
+        "前提：行已经横向滚开"
+    );
+    assert!(app.ui().get_row1_arrow_left_on(), "滚开之后左箭头必须出现");
+    assert!(app.target("home.row.recent.left").is_some());
+
+    // 点右箭头滚到行尾：右箭头消失，左箭头仍在。
+    app.click_target("home.row.recent.right").expect("点右箭头");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+    settle(&app);
+    assert!(!app.ui().get_row1_arrow_right_on(), "到行尾右箭头必须消失");
+    assert!(app.ui().get_row1_arrow_left_on(), "行尾仍应能往左滚");
+    assert!(app.target("home.row.recent.right").is_none());
+    assert!(app.target("home.row.recent.left").is_some());
 }
 
 /// A3：首页焦点按**条目 id** 重定位，而不是沿用旧下标。
@@ -610,8 +681,8 @@ fn shrinking_the_data_does_not_leave_the_zoom_on_a_stale_card() {
         "悬停应把焦点对齐到第 6 张"
     );
     assert!(
-        app.target("home.row.recent.left").is_some(),
-        "前提：悬停让这一行出现左右箭头（放大已点亮）"
+        app.ui().get_row1_zoom_on(),
+        "前提：悬停让这一行点亮放大（放大已点亮）"
     );
 
     // 数据变少：清空「继续观看」→ 焦点 7 越界，页面要求重算悬停（`hover-reset`）。
@@ -625,8 +696,8 @@ fn shrinking_the_data_does_not_leave_the_zoom_on_a_stale_card() {
         "前提：行上移后指针 ({x}, {y}) 下面已经没有卡"
     );
     assert!(
-        app.target("home.row.recent.left").is_none(),
-        "指针下面没有卡，放大与左右箭头必须熄掉（不能留在旧下标上）"
+        !app.ui().get_row1_zoom_on(),
+        "指针下面没有卡，放大必须熄掉（不能留在旧下标上）"
     );
 
     // 复位不是"永久熄灭"：指针动一下，同一格立刻重新点亮（R7 的原关注点）。
@@ -637,7 +708,7 @@ fn shrinking_the_data_does_not_leave_the_zoom_on_a_stale_card() {
     app.hover_at(x + 1.0, y).expect("再悬停第 6 张");
     settle(&app);
     assert!(
-        app.target("home.row.recent.left").is_some(),
+        app.ui().get_row1_zoom_on(),
         "指针一动就必须能重新点亮（`has-hover` 不该被永久熄灭）"
     );
     assert_eq!(

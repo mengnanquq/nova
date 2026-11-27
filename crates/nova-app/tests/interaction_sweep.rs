@@ -33,7 +33,7 @@ use nova_core::{
 };
 use nova_provider::Library;
 use nova_storage::Database;
-use nova_ui::{App, AppWindow, Page, SweepReport};
+use nova_ui::{App, AppWindow, Page, Route, SweepReport};
 use slint::ComponentHandle;
 
 /// 一个页面在**本测试环境**里已知"点击后没有任何可观测变化"的目标。
@@ -66,6 +66,10 @@ struct Scan {
     changed: usize,
     ids: Vec<String>,
     dead: Vec<(String, String, String)>,
+    /// 是否因为"页面回不去"提前收尾（恢复器失败）。
+    aborted: bool,
+    /// 点击后没能恢复原状的目标（空 = 每一项都恢复了）。
+    unrestored: Vec<String>,
 }
 
 fn server_info() -> ServerInfo {
@@ -294,6 +298,13 @@ fn scan(app: &Rc<App>) -> Scan {
             .iter()
             .map(|entry| (report.page.clone(), entry.id.clone(), entry.label.clone()))
             .collect(),
+        aborted: report.aborted,
+        unrestored: report
+            .entries
+            .iter()
+            .filter(|entry| !entry.restored)
+            .map(|entry| entry.id.clone())
+            .collect(),
     }
 }
 
@@ -513,4 +524,105 @@ fn sweep_restores_the_player_volume_and_mute() {
         !restore_player_audio(&app, before),
         "已经是快照值时不该再动界面"
     );
+}
+
+/// 体检 R8-C2：顶栏标签把栈顶换成另一个库之后，sweep 必须能回到被扫描的库页。
+///
+/// 修复前恢复器只用 `state.library` 重建路由：那时它已经被点击改成了"剧集"，
+/// 于是 `current_route()` 永远对不上原来的"电影" → `restored=false`、扫描提前收尾，
+/// 标签之后的排序按钮 / 卡片全都没扫到。
+#[test]
+fn sweep_restores_the_library_page_after_switching_tabs() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Home, 0.2);
+    let view = local
+        .library("movies", None, LibrarySort::default())
+        .expect("媒体库");
+    assert!(app.open_library(&view), "打开媒体库");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    let route = app.current_route();
+    assert_eq!(
+        route,
+        Some(Route::Library {
+            id: "movies".to_owned(),
+            title: "电影".to_owned(),
+        }),
+        "前提：扫描前停在「电影」库"
+    );
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    assert!(
+        !scan.aborted,
+        "切库后扫描不应中断（没恢复的项：{:?}）",
+        scan.unrestored
+    );
+    assert!(
+        scan.unrestored.is_empty(),
+        "每个目标点完都要能回到原页：{:?}",
+        scan.unrestored
+    );
+    // 「首页」「剧集」两个标签都会换掉栈顶；它们之后的清单仍然要扫到。
+    for id in ["library.nav.tab.0", "library.nav.tab.2", "library.sort"] {
+        assert!(
+            scan.ids.iter().any(|entry| entry == id),
+            "切换标签后应继续扫描到 {id}（清单：{:?}）",
+            scan.ids
+        );
+    }
+    assert_eq!(app.page(), Page::Library, "扫描结束应回到库页");
+    assert_eq!(app.current_route(), route, "路由应回到扫描前的那个库");
+}
+
+/// 体检 R8-C2：`search.clear` 会清空查询词并回首页，sweep 仍要能回到搜索页。
+///
+/// 修复前恢复器从"已经被清空"的 `state.search` 重建路由，查询词对不上
+/// （`Search { term: "" }` vs 原来的 `"沙丘"`）→ `restored=false`。
+#[test]
+fn sweep_restores_the_search_page_after_clearing_the_query() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Home, 0.2);
+    let view = local.search_view("沙丘", 60).expect("搜索视图");
+    assert!(!view.cards.is_empty(), "前提：「沙丘」有结果");
+    app.open_search(&view);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    let route = app.current_route();
+
+    // 替身按真实 `Shell::clear_search` 的口径：清空视图 + 回首页。
+    {
+        let handler_app = Rc::clone(&app);
+        let local = Rc::clone(&local);
+        app.on_search_clear(move || {
+            let empty = local.search_view("", 60).unwrap_or_default();
+            handler_app.set_search(&empty);
+            handler_app.set_search_text("");
+            handler_app.show_home();
+        });
+    }
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "search");
+    assert!(
+        !scan.aborted,
+        "清空搜索后扫描不应中断（没恢复的项：{:?}）",
+        scan.unrestored
+    );
+    assert!(
+        scan.unrestored.is_empty(),
+        "每个目标点完都要能回到搜索页：{:?}",
+        scan.unrestored
+    );
+    for id in ["search.clear", "search.nav.tab.0", "search.nav.tab.2"] {
+        assert!(
+            scan.ids.iter().any(|entry| entry == id),
+            "清空搜索后应继续扫描到 {id}（清单：{:?}）",
+            scan.ids
+        );
+    }
+    assert_eq!(app.page(), Page::Search, "扫描结束应回到搜索页");
+    assert_eq!(app.current_route(), route, "路由应回到原来的查询词");
+    assert_eq!(app.search_view().term, "沙丘", "搜索视图也要恢复");
+    assert_eq!(app.search_text(), "沙丘", "搜索框文字也要恢复");
 }

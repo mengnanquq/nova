@@ -164,6 +164,24 @@ component CardRow inherits Rectangle {
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
             ? root.latch : (root.nav-active ? root.focused-index : -1));
+
+    // ---- 左右箭头的可见性（体检 R8-C3）----
+    //
+    // 箭头只在**本行还能往那个方向滚**时出现（Netflix 同款：行在起点不显示左箭头，
+    // 到头不显示右箭头）。以前只看 `zoom-index >= 0`：行在起点 / 到头 / 内容根本
+    // 装得下时点箭头是空操作，`sweep` 会把它记成 dead。可见性同时也是登记门控
+    // （见下面的登记回调），所以不可见时它不会进 `targets` 清单。
+    //
+    // 留 1px 容差：滚动位置与内容宽度都是逻辑像素，`scroll-to-card` / 平滑滚动
+    // 停下来时可能差零点几像素，别让箭头在临界点上闪烁。
+    property <length> max-row-scroll: max(0px, flick.content-width - flick.width);
+    property <bool> can-scroll-left: flick.content-x < -1px;
+    property <bool> can-scroll-right: -flick.content-x < root.max-row-scroll - 1px;
+    // 箭头自身的悬停也算“行被点亮”：指针从卡片移到箭头上时放大层不灭。
+    property <bool> show-arrows: root.zoom-index >= 0
+        || arrow-left-area.has-hover || arrow-right-area.has-hover;
+    out property <bool> arrow-left-on: root.show-arrows && root.can-scroll-left;
+    out property <bool> arrow-right-on: root.show-arrows && root.can-scroll-right;
     // 卡间距：官方 12px（`margin-right:.75rem`），且必须 ≥ 放大卡横向溢出（6px）。
     property <length> gap: max(Theme.card-gap, Theme.zoom-allowance-x);
     // 标题下沿到卡顶：官方 12px（`row-title-gap` 已含放大余量下限的校验）。
@@ -513,7 +531,7 @@ component CardRow inherits Rectangle {
         height: Theme.arrow-height;
         border-radius: Theme.radius-pill;
         background: Theme.arrow-bg;
-        visible: root.zoom-index >= 0 || arrow-left-area.has-hover;
+        visible: root.arrow-left-on;
         // 悬停微交互：只降不透明度，图标本体不位移。
         opacity: arrow-left-area.has-hover ? 0.85 : 1;
         animate opacity {
@@ -554,7 +572,7 @@ component CardRow inherits Rectangle {
         height: Theme.arrow-height;
         border-radius: Theme.radius-pill;
         background: Theme.arrow-bg;
-        visible: root.zoom-index >= 0 || arrow-right-area.has-hover;
+        visible: root.arrow-right-on;
         opacity: arrow-right-area.has-hover ? 0.85 : 1;
         animate opacity {
             duration: Theme.motion-fast;
@@ -853,6 +871,11 @@ export component HomePage inherits Rectangle {
     // 最近添加（row1）的放大层是否打开。回归用：焦点之前的行缩量时指针已离开，
     // 第 1 行不能还亮着放大（见 `App::set_home` 的悬停硬清）。
     out property <bool> row1-zoom-on: row1.zoom-on;
+    // 体检 R8-C3：箭头是否真的画在屏幕上（行起点不显示左箭头、行尾不显示右箭头）。
+    out property <bool> row0-arrow-left-on: row0.arrow-left-on;
+    out property <bool> row0-arrow-right-on: row0.arrow-right-on;
+    out property <bool> row1-arrow-left-on: row1.arrow-left-on;
+    out property <bool> row1-arrow-right-on: row1.arrow-right-on;
     out property <length> row0-arrow-y: row0.arrow-y + row0.y - flick.content-y;
     // 测试用：行标题下沿 / 图高 / 卡片总高（验收"放大卡不遮盖行标题"与
     // "卡片总高 = 图高 + 卡下标题"两条）。

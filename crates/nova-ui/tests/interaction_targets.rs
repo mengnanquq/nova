@@ -34,7 +34,7 @@ use nova_ui::{
     TARGET_KINDS, TargetInfo,
 };
 use slint::ComponentHandle;
-use slint::platform::{PointerEventButton, WindowEvent};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 
 const WINDOW_W: f32 = 1280.0;
 const WINDOW_H: f32 = 800.0;
@@ -166,7 +166,8 @@ const TOUCH_AREAS: &[Case] = &[
         file: "home.slint",
         component: "CardRow",
         entry: "arrow-left-area",
-        pages: &["home-hover"],
+        // 行在横向起点时左箭头是不可见的（体检 R8-C3），所以这个场景必须先把行滚开。
+        pages: &["home-scrolled"],
         coverage: Coverage::AnyPrefix(&[
             "home.row.continue.left",
             "home.row.recent.left",
@@ -643,6 +644,7 @@ fn hovering_a_card_reveals_the_row_arrows() {
     app.set_home(&home);
     app.show_home();
     app.ui().set_billboard_ratio(0.2);
+    app.ui().set_nav_active(true);
     app.ui().show().expect("显示窗口");
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
 
@@ -661,11 +663,12 @@ fn hovering_a_card_reveals_the_row_arrows() {
     let targets = settle(&app, 80);
     assert_invariants("home-hover", &targets);
     assert_coverage("home-hover", &targets);
+    // 体检 R8-C3：行在起点时不显示左箭头，也不登记为可交互目标（否则 sweep 点它是空操作）。
     assert!(
-        targets
+        !targets
             .iter()
             .any(|target| target.id == "home.row.continue.left"),
-        "悬停后应出现左箭头目标（清单：{:?}）",
+        "行在起点时左箭头不该出现（清单：{:?}）",
         targets.iter().map(|t| &t.id).collect::<Vec<_>>()
     );
     assert!(
@@ -674,6 +677,27 @@ fn hovering_a_card_reveals_the_row_arrows() {
             .any(|target| target.id == "home.row.continue.right"),
         "悬停后应出现右箭头目标"
     );
+
+    // 键盘把这一行滚开一格：左箭头这才出现（覆盖 `arrow-left-area`）。
+    for _ in 0..3 {
+        let right: slint::SharedString = Key::RightArrow.into();
+        app.press_key(right).expect("按右键");
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(80));
+    }
+    let targets = settle(&app, 80);
+    assert!(
+        app.ui().get_home_row_scroll_x() < 0.0,
+        "前提：行已经横向滚开"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.id == "home.row.continue.left"),
+        "滚动之后左箭头必须出现并进清单（清单：{:?}）",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+    assert_invariants("home-scrolled", &targets);
+    assert_coverage("home-scrolled", &targets);
 }
 
 #[test]

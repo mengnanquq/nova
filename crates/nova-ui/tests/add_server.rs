@@ -204,7 +204,8 @@ fn empty_address_cannot_submit_and_connecting_disables_resubmit() {
         });
     }
 
-    app.open_add_server("", "");
+    // 用户名先填上：空用户名的本地校验见 `empty_user_is_rejected_locally_without_a_request`。
+    app.open_add_server("", "me");
     // 空地址：连接按钮禁用（快照里它是半透明的），点击不应提交。
     click(&app, 702.0, 566.0);
     assert!(submits.borrow().is_empty(), "空地址不可提交");
@@ -259,6 +260,62 @@ fn enter_does_not_submit_an_empty_or_invalid_address() {
         "合法地址应当能用 Enter 提交"
     );
     app.close_add_server();
+}
+
+/// 体检 R8-C4：用户名为空时点「连接」不能联网，错误区给出本地文案。
+///
+/// 修复前空用户名会一路走到 `submit_add_server`：后台真的发一次登录请求，
+/// 服务端回 401，日志里多一条「用户名或密码不对」——用户看到的却只是"没连上"。
+#[test]
+fn empty_user_is_rejected_locally_without_a_request() {
+    let app = setup();
+    let submits = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+    {
+        let submits = submits.clone();
+        app.on_add_server_submit(move |address, user, _password| {
+            submits
+                .borrow_mut()
+                .push((address.to_string(), user.to_string()));
+        });
+    }
+
+    // 「最近使用」只回填了地址、用户名是空的（首次连接/清空过用户名都是这个状态）。
+    app.open_add_server("http://127.0.0.1:8096", "");
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+    let connect = app
+        .target("dialog.connect")
+        .expect("地址合法时「连接」是可点目标");
+    let (x, y) = connect.center();
+    click(&app, x, y);
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(80));
+
+    assert!(
+        submits.borrow().is_empty(),
+        "用户名为空时不能发出任何登录请求"
+    );
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "请填写用户名",
+        "本地校验要在错误区给出文案"
+    );
+    assert_eq!(
+        app.ui().get_add_server_state(),
+        0,
+        "本地校验不应进入「连接中」"
+    );
+
+    // 补上用户名再点：正常提交一次（错误区被 `begin_connecting` 清掉）。
+    app.ui().set_add_server_user("me".into());
+    settle(&app);
+    let connect = app.target("dialog.connect").expect("「连接」仍在");
+    let (x, y) = connect.center();
+    click(&app, x, y);
+    assert_eq!(
+        submits.borrow().as_slice(),
+        [("http://127.0.0.1:8096".to_owned(), "me".to_owned())],
+        "补上用户名后应正常提交一次"
+    );
 }
 
 #[test]

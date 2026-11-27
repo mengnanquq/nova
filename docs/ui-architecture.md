@@ -122,6 +122,24 @@ pub struct Navigator { /* 栈 + back() */ }
 网格几何只有一份：`ui/poster_grid.slint`（媒体库与搜索页共用 6 列 / `content-gutter` /
 `card-gap` / 5:7 卡 / `CardZoom` 覆盖层）。改列数或卡宽只改这一个文件。
 
+## 添加服务器对话框：本地校验先于联网
+
+`AddServerDialog`（`ui/components/add_server.slint`）只负责摆放与焦点，校验在
+`viewmodel/add_server.rs`；提交链路是 `.slint` 回调 → `nova-ui` 的
+`on_add_server_submit`（门控 + 本地校验）→ `nova-app` 的 `Shell::submit_add_server`
+（后台连接）。两层门都必须过：
+
+- **空地址 / 地址不合规**：`AddServerView::can_submit()` 为假，`.slint` 的
+  `submit-disabled` 同时置位——「连接」是禁用态（`enabled: false`），**不进
+  `targets` 清单**（`sweep` 因此不会把点不动的按钮记成 dead），Enter 也会被
+  `can_submit()` 拦下；
+- **用户名为空**（体检 R8-C4）：「连接」仍可点，但 `on_add_server_submit` 在本地
+  就返回，**不发任何网络请求**，错误区给出「请填写用户名」
+  （`AddServerErrorKind::MissingUser`）。以前空用户名会真的发一次登录请求，
+  服务端回 401，用户只看到「用户名或密码不对」。
+- 地址非法时另有一条内联红字（`address-hint`，在地址框下方），与错误区是两种展示：
+  "输入还没填好"走内联提示，"连接失败 / 本地校验"走错误区。
+
 ## 可交互目标清单（`Target`）：可点元素的事实来源
 
 界面上"用户能点的东西"有一份**显式清单**，定义在 `ui/models.slint`：
@@ -265,6 +283,12 @@ model，库行按 `library_id` 匹配，所以行内 `PosterCard` 实例不会�
 焦点重定位按 `item_id`（`rebase_home_focus`）：条目序列不变（同一份视图重贴）就保留原下标；
 序列变了则在所有同 `item_id` 的候选里取离旧下标最近的那个；找不到则退回旧下标并夹进新范围。
 焦点**越界**（数据变少）时钳回第 1 张，并把首页滚回顶部（否则 Enter 打开的是屏幕外那张）。
+
+**行左右箭头**（`CardRow.arrow-left-on` / `arrow-right-on`）只在"本行还能往那个方向滚"
+且"行被点亮"（悬停放大 `zoom-index >= 0`）时可见，与 Netflix 一致：行在横向起点不显示
+左箭头，到行尾不显示右箭头，内容装得下时两个都不显示。可见性同时是登记门控——不可见
+的箭头**不进 `targets`**，`sweep` 也就不会点到"点了没反应"的空箭头。媒体库 / 搜索 / 详情
+是网格（`poster_grid.slint`），没有这一对箭头。
 
 ## 视觉规范
 

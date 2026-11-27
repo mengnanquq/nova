@@ -16,9 +16,9 @@ use slint::{ComponentHandle, Model};
 
 use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library, player, search};
 use crate::viewmodel::{
-    AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
-    Navigator, PlayerView, Route, SearchView, TargetInfo, grid_window, move_focus, rebase_focus,
-    rebase_home_focus,
+    AddServerError, AddServerErrorKind, AddServerView, BannerData, DetailView, HomeView, ImageKey,
+    LibraryView, Navigator, PlayerView, Route, SearchView, TargetInfo, grid_window, move_focus,
+    rebase_focus, rebase_home_focus,
 };
 use crate::{AppWindow, Target, TargetBus};
 
@@ -419,6 +419,18 @@ struct DialogSnapshot {
     password: String,
 }
 
+/// 扫描开始时的页面视图快照（体检 R8-C2）。
+///
+/// 有些点击会改**视图模型**而不只是路由：点顶栏标签会换媒体库（`set_library`），
+/// 点 `search.clear` 会清空查询词（`set_search`）。只恢复路由的话，重建出来的是
+/// 点击后的那份视图，`restore_after_click` 永远对不上原路由（真机表现为
+/// `restored=false` + `aborted=true`，后面的目标根本没扫到）。
+struct ViewSnapshot {
+    library: LibraryView,
+    search: SearchView,
+    search_text: String,
+}
+
 /// 密码在状态摘要里的表示：只有长度。
 ///
 /// 状态摘要会通过 `--debug-socket` 的 `sweep` 输出，所以这里**只放长度**。
@@ -704,6 +716,12 @@ impl App {
             user: self.ui.get_add_server_user().to_string(),
             password: self.add_server_password(),
         });
+        // 视图模型快照：点击可能改媒体库（切标签）/ 清空搜索，恢复时要放回这一份。
+        let views = ViewSnapshot {
+            library: self.state.borrow().library.clone(),
+            search: self.state.borrow().search.clone(),
+            search_text: self.search_text(),
+        };
         let targets = self.targets();
         let mut entries = Vec::new();
         let mut aborted = false;
@@ -725,7 +743,7 @@ impl App {
             }
             let after = self.state_digest();
             let changed = before != after;
-            let restored = self.restore_after_click(page, &route, dialog.as_ref());
+            let restored = self.restore_after_click(page, &route, dialog.as_ref(), &views);
             entries.push(SweepEntry {
                 id: target.id.clone(),
                 kind: target.kind.clone(),
@@ -753,10 +771,12 @@ impl App {
     /// 恢复顺序：
     /// 1. 对话框：扫描前开着就关闭后按快照重新打开（地址 / 用户名 / 密码回填，
     ///    状态机复位到空闲、焦点回到地址框）；扫描前没开就关掉被点开的；
-    /// 2. 先尝试 `go_back`（点卡片进详情、点标签切库、点播放进播放页都是压栈）；
-    /// 3. 栈已经回不去（例如点「返回」直接把详情页弹掉了）就按原路由重建栈顶
-    ///    （详情 / 媒体库 / 搜索 / 首页都能从当前视图模型重建）；
-    /// 4. 最后强制切回原页面。
+    /// 2. 放回扫描前的视图模型（媒体库 / 搜索 / 搜索框文字）——点顶栏标签会换库、
+    ///    点 `search.clear` 会清空查询词，不先放回就会重建出点击后的页面（R8-C2）；
+    /// 3. 先尝试 `go_back`（点卡片进详情、点标签切库、点播放进播放页都是压栈）；
+    /// 4. 栈已经回不去（例如点「返回」直接把详情页弹掉了）就按原路由重建栈顶
+    ///    （详情 / 媒体库 / 搜索 / 首页都能从**扫描前**的视图模型重建）；
+    /// 5. 最后强制切回原页面。
     ///
     /// 播放页是例外：播放会话（mpv）不是视图模型能凭空重建的，所以只要页面回到
     /// 播放页就算恢复成功（路由可能已经变成上一条）；调用方（`nova-app` 的
@@ -766,6 +786,7 @@ impl App {
         page: Page,
         route: &Option<Route>,
         dialog: Option<&DialogSnapshot>,
+        views: &ViewSnapshot,
     ) -> bool {
         match dialog {
             // 扫描前开着：先关（复位状态机 / 清密码）再按快照重开，保证每个目标
@@ -784,6 +805,11 @@ impl App {
                 }
             }
         }
+        // 先放回扫描前的视图模型：点标签会换库、点「清除搜索」会清空查询词，
+        // 这些点击改的是视图本身，只恢复路由会重建出点击后的页面（R8-C2）。
+        self.set_library(&views.library);
+        self.set_search(&views.search);
+        self.set_search_text(&views.search_text);
         for _ in 0..4 {
             if &self.current_route() == route {
                 break;
@@ -798,12 +824,10 @@ impl App {
                     let _ = self.open_detail(item_id);
                 }
                 Some(Route::Library { .. }) => {
-                    let view = self.state.borrow().library.clone();
-                    let _ = self.open_library(&view);
+                    let _ = self.open_library(&views.library);
                 }
                 Some(Route::Search { .. }) => {
-                    let view = self.state.borrow().search.clone();
-                    let _ = self.open_search(&view);
+                    let _ = self.open_search(&views.search);
                 }
                 Some(Route::Home) => self.show_home(),
                 // 播放会话无法重建，交给下面的页面检查。
@@ -1740,10 +1764,22 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             if !open || !can_submit {
                 return;
             }
+            let address = ui.get_add_server_address().to_string();
+            let user = ui.get_add_server_user().to_string();
+            // 本地校验（体检 R8-C4）：用户名为空时不联网，直接在错误区给出文案。
+            // 以前空表单点「连接」会真的发一次登录请求（服务端回 401，日志里一条
+            // “用户名或密码不对”），看起来像按钮有反应，实际上什么也没帮到用户。
+            // 地址为空 / 不合规已经由 `can_submit()` 与 `.slint` 的禁用态拦住。
+            if user.trim().is_empty() {
+                let mut view = state.borrow().add_server.clone();
+                view.user = user;
+                view.error = Some(AddServerError::new(AddServerErrorKind::MissingUser));
+                state.borrow_mut().add_server = view.clone();
+                add_server::apply_derived(&ui, &view);
+                return;
+            }
             let handler = state.borrow().callbacks.add_server_submit.clone();
             if let Some(handler) = handler {
-                let address = ui.get_add_server_address().to_string();
-                let user = ui.get_add_server_user().to_string();
                 let password = ui.get_add_server_password().to_string();
                 handler(&address, &user, &password);
             }

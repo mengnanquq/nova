@@ -266,8 +266,12 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 
    - `changed:false` **不是失败**：有的按钮只改局部状态（悬停态），有的是"点当前项"的空操作；
    - 每条都带 `kind` / `label`，方便人工核对；
-   - `restored:false` 表示点击把应用带到了回不去的状态（例如播放页），扫描会提前收尾
-     （`aborted:true`）——这时先手动 `route` 回原页再继续；
+   - `restored:false` 表示点击把应用带到了回不去的状态（例如播放会话，mpv 没法凭空
+     重建），扫描会提前收尾（`aborted:true`）——这时先手动 `route` 回原页再继续；
+   - 恢复器除了路由 / 页面 / 对话框，还会把**视图模型**放回扫描前的那一份：点顶栏标签
+     会换库（栈顶被替换）、点 `search.clear` 会清空查询词并回首页，这两类点击现在都能
+     回到被扫描的页面（R8-C2；以前 `library.nav.tab.*` / `search.clear` 之后
+     `restored:false`，后半清单根本没扫到）；
    - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
      恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
 
@@ -283,6 +287,10 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
    printf '{"cmd":"click","target":"library.sort"}\n' | socat - UNIX-CONNECT:/tmp/t.sock
    printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/t.sock   # library.sort 变了没有
    ```
+
+**空表单不会真的联网**：用户名为空时 `sweep` 点 `dialog.connect` 只会在错误区留下
+「请填写用户名」（本地校验，R8-C4）；地址为空 / 不合规时按钮本身是禁用态、不在
+`targets` 里，也就不会被点到。
 
 **sweep 会真的点所有东西**，所以它也会点「播放」「全屏」「连接」这类有副作用的按钮：
 播放会被收掉、对话框会被关掉、全屏会被恢复，但**连接的服务器/写盘操作不会被撤销**。
