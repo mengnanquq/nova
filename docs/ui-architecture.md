@@ -373,7 +373,8 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    `ProgressTrigger::Seek` 上报一次进度。引擎这时还停在 EOF（mpv `keep-open`），
    所以宿主在 seek 之后要补一次 `play`，否则进度条动了、画面仍是最后一帧；
 3. 同一个 session 继续播到片尾会**再报一次** `Ended`，不会卡在「播放中」：worker 的
-   `Command::Seek` 分支**无条件**清掉「已报过 Ended」的标记（`worker::EndedGuard::after_seek`），
+   `Command::Seek` 分支**无条件**清掉「已报过 Ended」的标记，同时**置位**旧观察标记
+   `stale_eof`（`worker::EndedGuard::after_seek`：`stale_eof |= reported`，**累积**而不是覆盖），
    不依赖 mpv 的具体时序（实测 mpv 0.42 + `keep-open=yes`：片尾**只有** `eof-reached=true`
    属性、没有 `end-file` 事件；seek 之后才送 `eof-reached=false` + `playback-restart`）。
    旧实现只靠 `eof-reached` 回到 `false` 来清，第二次播完就可能不再产生 `Ended`。
@@ -382,9 +383,19 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    立刻误报第二次 `Ended`——界面把状态钉成 `Ended`、位置钉到时长（显示「已看完」），
    引擎其实还在播，这时按 `Enter` 会从 0 重播，位置就丢了。旧观察在 `playback-restart` /
    `eof-reached=false` / 新的 `end-file` 处失效（即“seek 已生效”或“这是一次新片尾”）。
+   用**累积**是因为片尾后可能连着拖两次：第二次拖时 `reported` 已经是 `false`，覆盖赋值会把
+   第一次设下的“吞掉旧观察”清掉，队列里更早的 `eof-reached=true` 又被当成新片尾误报。
    已经停在 `Ended` 时重复收到的 `Ended` 也不再补报一条 `Pause` 进度（`Player::pump_events`）。
-   三条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
-   `player::tests::duplicate_ended_does_not_report_again`）。
+   这几条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
+   `two_seeks_after_end_*` / `player::tests::duplicate_ended_does_not_report_again`）。
+
+**已知限制（推测，未验证）**：播完后**直接拖到 100%（`duration`）** 时，`Session::seek`
+把位置 clamp 到时长、状态转回 `Playing`，界面靠引擎再报一次 `Ended` 才会回到「已看完」。
+但 mpv 这时可能只送 `playback-restart`，`eof-reached` 本来就是 `true`、seek 到时长也不会
+变成 `false`，于是没有新的 `eof-reached` 变化，也就没有第二次 `Ended`——界面停在
+「播放中」，位置在片尾。按上面的状态机推演是这个结果，但**没有证据**：没取过真机上
+mpv 的 `eof-reached` 属性日志，也没在真机复现过。要确认（或否证）需要一份
+`NOVA_MPV_LOG`/属性观察日志。
 
 ## 控制层
 

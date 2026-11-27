@@ -248,7 +248,12 @@ impl EndedGuard {
     fn after_seek(&mut self) {
         // 只有“片尾之后”的拖动才有旧观察要防：普通拖动时 `reported` 本来就是 false，
         // 无需额外拦任何东西（不要无故拉长 `stale_eof` 的寿命）。
-        self.stale_eof = self.reported;
+        //
+        // **累积**（复审 🔴）：片尾后连着拖两次时，第二次的 `reported` 已经是 false，
+        // 直接赋值会把第一次设下的“旧观察要吞掉”清掉——队列里更早的
+        // `eof-reached=true` 于是又被当成新片尾，误报第二次 `Ended`（界面把位置钉到
+        // 时长、显示“已看完”，引擎其实还在播）。
+        self.stale_eof |= self.reported;
         self.reported = false;
     }
 
@@ -929,6 +934,31 @@ mod tests {
         // seek 生效：旧观察的“丢弃”结束，第二次播到片尾要正常报。
         ended.on_playback_restart();
         assert!(ended.on_eof_observed(true), "第二次到片尾必须报 Ended");
+    }
+
+    /// 回归（复审 🔴）：片尾后**连着**拖两次，中间那次 seek 不能把“丢旧观察”清掉。
+    ///
+    /// `after_seek` 以前是 `stale_eof = self.reported`：第一次拖完 `reported` 已清零，
+    /// 紧接着的第二次拖就会把 `stale_eof` 覆盖成 `false`。队列里更早的
+    /// `eof-reached=true` 于是被当成新片尾，误报第二次 `Ended`（对话：片尾后立刻拖动）。
+    #[test]
+    fn two_seeks_after_end_still_swallow_the_stale_eof() {
+        let mut ended = EndedGuard::default();
+        assert!(ended.on_eof_observed(true), "第一次到片尾报 Ended");
+
+        // 片尾后连着拖两次（第二次时 `reported` 已经是 false）。
+        ended.after_seek();
+        ended.after_seek();
+
+        assert!(
+            !ended.on_eof_observed(true),
+            "两次 seek 之后，seek 之前产生的 eof-reached=true 仍不能再报 Ended"
+        );
+
+        // 两次 seek 都生效之后，真的播到片尾仍然要报。
+        ended.on_playback_restart();
+        assert!(ended.on_eof_observed(true), "之后真的到片尾必须报 Ended");
+        assert!(!ended.on_eof_observed(true), "同一次片尾只报一次");
     }
 
     /// `eof-reached=false` 这条补充路径保留：不看 seek / `playback-restart` 也能重新上报。
