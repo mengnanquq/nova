@@ -73,7 +73,14 @@ fn hover_card(app: &App, id: &str) {
 }
 
 fn card_x(app: &App, id: &str) -> f32 {
-    app.target(id).expect("卡片目标").x
+    app.target(id)
+        .unwrap_or_else(|| {
+            panic!(
+                "清单里没有 {id}：{:?}",
+                app.targets().iter().map(|t| &t.id).collect::<Vec<_>>()
+            )
+        })
+        .x
 }
 
 /// 快照与当前值一致时，恢复器不该重写媒体库 / 搜索视图。
@@ -106,20 +113,43 @@ fn sweep_does_not_rewrite_unchanged_views() {
 /// 扫描会真的点 `home.row.*.right` / `*.left`：这一行被滚走之后不写回，页面就
 /// 停在另一个位置——同一轮里后面按旧坐标点的卡片会落到邻卡上（R8 审查）。
 ///
-/// 起点故意弄成**非整屏**的偏移（键盘把焦点移到第 5 张卡），这样左 / 右箭头各
+/// 起点故意弄成**非整屏**的偏移（键盘把焦点移出可视区），这样左 / 右箭头各
 /// 按一次不能碰巧回到原位：只有恢复器真写回了快照值，前后坐标才会相等。
+/// 同时把「最近添加」行也预先滚开：写回是**整份数组**一次写的，没被扫描点过的
+/// 行不能被默认值 0 拖回行首。
 #[test]
 fn sweep_restores_row_scroll_to_the_snapshot() {
     let (app, _home) = home_with_library();
     let origin = card_x(&app, "home.row.continue.card.2");
+    let recent_origin = card_x(&app, "home.row.recent.card.2");
 
     app.ui().set_nav_active(true);
     settle(&app, 120);
+    let down: slint::SharedString = slint::platform::Key::DownArrow.into();
+    let up: slint::SharedString = slint::platform::Key::UpArrow.into();
     let right: slint::SharedString = slint::platform::Key::RightArrow.into();
-    for _ in 0..4 {
+    // 先滚开「最近添加」（下移进这一行，再行内右移到 1280 宽装不下的地方），
+    // 留一份非零快照。
+    app.press_key(down).expect("按↓键");
+    settle(&app, 120);
+    for _ in 0..6 {
         app.press_key(right.clone()).expect("按右键");
         settle(&app, 120);
     }
+    let recent_before = card_x(&app, "home.row.recent.card.2");
+    assert!(
+        recent_before < recent_origin - 1.0,
+        "前提：最近添加行已经横向滚开（{recent_origin} → {recent_before}）"
+    );
+    // 回到「继续观看」并沿行内退到局部 2：扫描开始时焦点在这一行，左右箭头才在
+    // 目标清单里（箭头只在行被点亮时登记），扫描才会真的把它再滚走；退到局部 2
+    // 既能保持非零偏移，又让第 3 张卡留在窗口里，恢复后才能量它的坐标。
+    app.press_key(up).expect("按↑键");
+    let left: slint::SharedString = slint::platform::Key::LeftArrow.into();
+    for _ in 0..4 {
+        app.press_key(left.clone()).expect("按左键");
+    }
+    settle(&app, 120);
 
     let before = card_x(&app, "home.row.continue.card.2");
     assert!(
@@ -147,6 +177,14 @@ fn sweep_restores_row_scroll_to_the_snapshot() {
     assert!(
         (after - before).abs() < 1.0,
         "扫描结束必须把行内横向滚动写回扫描开始的位置（{before} → {after}）"
+    );
+    let recent_after = app
+        .target("home.row.recent.card.2")
+        .expect("写回后最近添加第 3 张卡仍应存在")
+        .x;
+    assert!(
+        (recent_after - recent_before).abs() < 1.0,
+        "没被扫描点过的最近添加行也必须保持快照位置（{recent_before} → {recent_after}）"
     );
     assert_eq!(app.page(), Page::Home, "扫描结束仍停在首页");
 }
@@ -179,9 +217,12 @@ fn stale_coordinates_still_hit_the_same_card_after_restore() {
         scrolled.x
     );
 
-    // 恢复器做的事：让各行报一次位置，再把这一行写回原处（`sweep` 每轮都走一遍）。
-    // 这里直接用同一条 Slint 公开入口，坐标用的是扫描开始时的那一份。
-    app.ui().invoke_reset_home_row_scroll(0, 0.0);
+    // 恢复器做的事：让各行报一次位置，再整份数组写回原处（`sweep` 每轮都走一遍）。
+    // 这里直接用同一条 Slint 公开通道，坐标用的是扫描开始时的那一份。
+    app.ui()
+        .set_home_row_scroll_targets(slint::ModelRc::new(slint::VecModel::from(vec![0.0f32])));
+    app.ui()
+        .set_home_row_scroll_gen(app.ui().get_home_row_scroll_gen() + 1);
     app.refresh_targets();
     assert!(
         (card_x(&app, "home.row.continue.card.1") - snapshot.x).abs() < 1.0,

@@ -320,7 +320,7 @@ struct State {
     // 首页各行当前的**行内横向滚动**偏移（`CardRow.flick.content-x`，行号 → 偏移）。
     //
     // 它完全是 Slint 的局部状态：Rust 只能让各行主动上报（`home-row-scroll` 回调），
-    // `sweep` 开扫前呼一次把它们快照下来，每点完一项再写回去。
+    // `sweep` 开扫前呼一次把它们快照下来，每点完一项再整份写回去（数组属性）。
     home_row_scrolls: BTreeMap<i32, f32>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
@@ -904,17 +904,31 @@ impl App {
     /// **不能"值没变就跳过"**：点箭头走的是平滑滚动，动画还没走到下一帧时各行报上
     /// 来的仍是旧值，跳过就等于放任它继续滚走（真机表现为扫描结束后行停在滚开的
     /// 位置）。写回用的是 `ScrollBehavior.instant`，它会先停掉进行中的动画再定位。
+    ///
+    /// 整份数组一次写好（下标 = 行号）再推一档代次：每行按 `row-key` 取自己那一格，
+    /// 在 `changed` 里执行 `scroll-to(instant)`。不再逐行调用、也不再依赖 `changed`
+    /// 的合并语义——旧实现每写一行都得 flush 一次，否则只有最后一行生效。
     fn restore_home_row_scrolls(&self, snapshot: &[(i32, f32)]) {
         if snapshot.is_empty() {
             return;
         }
+        let rows = snapshot.iter().map(|(row, _)| *row).max().unwrap_or(-1) + 1;
+        let mut targets = vec![0.0f32; rows.max(0) as usize];
         for (row, x) in snapshot {
-            self.ui.invoke_reset_home_row_scroll(*row, *x);
-            // 每行都得跟一次 flush：`changed scroll-reset-seq` 是**合并**执行的
-            // （同一轮属性事务里只跑一次，看到的是最后一组值），连着写多行只会
-            // 让最后一行生效。
-            self.instantiate_items();
+            if let Some(slot) = usize::try_from(*row)
+                .ok()
+                .and_then(|row| targets.get_mut(row))
+            {
+                *slot = *x;
+            }
         }
+        self.ui
+            .set_home_row_scroll_targets(slint::ModelRc::new(slint::VecModel::from(targets)));
+        self.ui
+            .set_home_row_scroll_gen(self.ui.get_home_row_scroll_gen().wrapping_add(1));
+        // 属性事务要到下一次实例化 / 出帧才落地；这里 flush 一次，保证后续目标按
+        // 旧坐标点击前各行已经归位（整轮恢复只 flush 这一处，不再逐行 flush）。
+        self.instantiate_items();
     }
 
     fn pointer_at(&self, x: f32, y: f32, click: bool) -> Result<(), String> {
@@ -1895,10 +1909,13 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             };
             let mut view = state.borrow().add_server.clone();
             view.user = text.to_string();
-            if view
-                .error
-                .as_ref()
-                .is_some_and(|error| error.kind == AddServerErrorKind::MissingUser)
+            // 删空 / 只剩空格不算“补上了用户名”：仍然没有有效输入时提示必须留着，
+            // 否则用户删掉名字后错误区凭空消失，点「连接」又才重新出现。
+            if !text.trim().is_empty()
+                && view
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.kind == AddServerErrorKind::MissingUser)
             {
                 view.error = None;
             }

@@ -275,9 +275,12 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      否则每个目标都会重建一次网格、清掉图片窗口、换库时还会把滚动归零；
    - 首页各行的**行内横向滚动**（`CardRow.flick.content-x`）也是每轮写回的：它是
      Slint 的局部状态，`sweep` 点 `home.row.*.left` / `*.right` 会把它滚走，不滚回原位
-     后面按扫描开始时的坐标点同一行的卡片就会点到**别的卡**。通道是
-     `AppWindow.report-home-row-scrolls()`（行主动上报）+ `reset-home-row-scroll(row, x)`
-     （写回，用 `ScrollBehavior.instant` 顺带停掉进行中的平滑滚动）；
+     后面按扫描开始时的坐标点同一行的卡片就会点到**别的卡**。上行是
+     `AppWindow.report-home-row-scrolls()`（各行主动上报）；下行改由
+     `home-row-scroll-targets` 数组属性一次写整份快照、再推一档 `home-row-scroll-gen`
+     代次，每行按 `row-key` 取自己那一格执行 `ScrollBehavior.instant`（顺带停掉进行中
+     的平滑滚动）。代次让“目标值与当前值相同、但动画还没走完”的情况也能写回；整轮
+     恢复最多 flush 一次，不再逐行 flush（也不再依赖 `changed` 的合并语义）；
    - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
      恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
 
@@ -289,7 +292,8 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 - **不恢复**的项目：键盘焦点与焦点层（`focus` / `focus_layer`）、首页纵向滚动
   （`flick.content-y`）、播放页的会话与播放进度、悬停 / 放大态、媒体库与搜索页网格的
   纵向滚动位置。`sweep` 自己不会动它们（不走滚轮、不按键、不拖拽），但**点击**会：
-  点卡片会把键盘焦点挪过去，点箭头会改行内横向滚动（这一项已经恢复，见上）。
+  点卡片会把键盘焦点挪过去，点箭头会改行内横向滚动（这一项已经恢复，见上）；
+  点库标签会换库，`set_library` 会把媒体库网格的纵向滚动归零（换库本来就要回到顶部）。
 - 播放页只要求“回到播放页”：播放会话（mpv）不是视图模型能重建的，误开的播放器由
   上层（`nova-app`）在扫描结束后收掉；音量 / 静音另由 `audio_restored` 报告。
 
@@ -308,8 +312,9 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 
 **空表单不会真的联网**：用户名为空时 `sweep` 点 `dialog.connect` 只会在错误区留下
 「请填写用户名」（本地校验，R8-C4）；地址为空 / 不合规时按钮本身是禁用态、不在
-`targets` 里，也就不会被点到。这条提示会在**用户名一变时立刻消失**（用户编辑回调清掉
-`MissingUser`），不用再点一次「连接」；密码留空是合法输入（Emby / Jellyfin 允许空密码账号）。
+`targets` 里，也就不会被点到。这条提示会在**用户名改成有效值后立刻消失**（用户编辑回调清掉
+`MissingUser`），不用再点一次「连接」；把名字删空 / 只剩空格时提示会**留着**；密码留空是
+合法输入（Emby / Jellyfin 允许空密码账号）。
 
 **sweep 会真的点所有东西**，所以它也会点「播放」「全屏」「连接」这类有副作用的按钮：
 播放会被收掉、对话框会被关掉、全屏会被恢复，但**连接的服务器/写盘操作不会被撤销**。

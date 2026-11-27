@@ -357,6 +357,59 @@ fn typing_a_user_name_clears_the_missing_user_error() {
     );
 }
 
+/// 用户名被删空 / 只剩空格时，「请填写用户名」不能消失。
+///
+/// 修复前编辑回调无条件清 `MissingUser`：用户把名字删掉（或只敲了空格）后错误区
+/// 就空了，看起来像“本地校验已经通过”，再点「连接」提示才重新出现。
+#[test]
+fn clearing_the_user_name_keeps_the_missing_user_error() {
+    let app = setup();
+    app.open_add_server("http://127.0.0.1:8096", "");
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    let connect = app.target("dialog.connect").expect("「连接」是可点目标");
+    let (x, y) = connect.center();
+    click(&app, x, y);
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "请填写用户名",
+        "前提：空用户名点「连接」应出现本地提示"
+    );
+
+    // 只敲空格：仍然不是有效用户名，提示不能消失（修复前第一下空格就会清掉）。
+    settle(&app);
+    let user = app.target("dialog.user").expect("用户名输入框");
+    let (x, y) = user.center();
+    click(&app, x, y);
+    settle(&app);
+    type_text(&app, "   ");
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "请填写用户名",
+        "用户名只剩空格时「请填写用户名」必须留着"
+    );
+
+    // 再把空格删空：同样不能清掉提示。
+    let backspace: slint::SharedString = Key::Backspace.into();
+    let window = app.ui().window();
+    for _ in 0..3 {
+        window.dispatch_event(WindowEvent::KeyPressed {
+            text: backspace.clone(),
+        });
+        window.dispatch_event(WindowEvent::KeyReleased {
+            text: backspace.clone(),
+        });
+    }
+    settle(&app);
+    assert_eq!(app.ui().get_add_server_user(), "", "前提：用户名已删空");
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "请填写用户名",
+        "删空用户名后「请填写用户名」必须留着"
+    );
+}
+
 /// Emby / Jellyfin 允许空密码账号：密码留空也必须能提交。
 ///
 /// 回归：曾经担心“空密码 = 没填完”而想加门控；实际服务端允许空密码登录，

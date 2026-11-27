@@ -19,7 +19,7 @@
 |---|---|
 | `crates/nova-ui/tests/interaction_targets.rs` | 目标清单本身：每页非空、id 唯一、`kind` 合法、矩形非零且在窗口内；**`TouchArea` 覆盖率**（见下）；点击后确实能产出新目标（排序/版本下拉） |
 | `crates/nova-app/tests/interaction_sweep.rs` | 行为：用真实 SQLite 缓存 + 无头后端，对每个目标"悬停 → 点击"，断言有足够多的目标产生状态变化，且"没反应"的目标必须出现在 `KNOWN_DEAD` 里 |
-| `crates/nova-ui/tests/sweep_restore.rs` | 恢复器：快照与当前值一致时**不**重写视图模型（不重建网格 / 不清图片窗口）；首页每行的行内横向滚动在扫描后写回快照位置（否则旧坐标会点到邻卡） |
+| `crates/nova-ui/tests/sweep_restore.rs` | 恢复器：快照与当前值一致时**不**重写视图模型（不重建网格 / 不清图片窗口）；首页每行的行内横向滚动在扫描后写回快照位置（否则旧坐标会点到邻卡），没被扫描点过的行也不能被整份数组写回拖回行首 |
 
 运行：
 

@@ -219,6 +219,11 @@ export component AppWindow inherits Window {
     // 首页悬停硬清序号：数据变少、焦点被钳回 0 时 Rust 推一档，只清不重算
     // （数据变少会挪行，指针不动的 `has-hover` 是旧位置的悬停）。
     in-out property <int> home-hover-clear: 0;
+    // 首页各行行内横向滚动的写回目标（下标 = 行号，`flick.content-x` 同口径）与代次。
+    // `sweep` 恢复时 Rust 一次写整份数组再推一档代次，行自己按 `row-key` 取那一格并定位
+    // （见 home.slint / docs/debugging.md）。
+    in-out property <[length]> home-row-scroll-targets: [];
+    in-out property <int> home-row-scroll-gen: 0;
 
     // 回调只把事件送出去，业务判断留在 Rust。
     callback open-item(string);
@@ -461,6 +466,8 @@ export component AppWindow inherits Window {
                 image-gen: root.home-image-gen;
                 hover-reset: root.home-hover-reset;
                 hover-clear: root.home-hover-clear;
+                row-scroll-targets: root.home-row-scroll-targets;
+                row-scroll-gen: root.home-row-scroll-gen;
                 image-window(row, first, count) => {
                     root.home-image-window(row, first, count);
                 }
@@ -803,14 +810,6 @@ export component AppWindow inherits Window {
     /// 让首页各行报一次行内横向滚动偏移（`sweep` 的恢复快照用，见 `docs/debugging.md`）。
     public function report-home-row-scrolls() {
         home-page.report-row-scrolls();
-    }
-
-    /// 把首页第 `row` 行的行内横向滚动写回 `x`（内容坐标，与 `flick.content-x` 同口径）。
-    ///
-    /// `sweep` 点过 `*.right` / `*.left` 之后用它把行滚回原位：`content-x` 是
-    /// Slint 的局部状态，Rust 没有其他通道。
-    public function reset-home-row-scroll(row: int, x: length) {
-        home-page.reset-row-scroll(row, x);
     }
 
     /// 同上，搜索页。
