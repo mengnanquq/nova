@@ -791,10 +791,24 @@ impl Player {
             return;
         };
 
-        let resume_at = resume_position_for_item(&item, &self.prefs);
+        // 续播阈值 / 轨道偏好以**数据库里的当前值**为准，而不是启动时的快照：
+        // 详情页（`views::detail_view`）每次读 `db.preferences()`，起播若用启动快照，
+        // 运行中改过偏好就会出现“详情说从头播、起播却续在那里”。
+        // 读失败才退回启动快照（离线优先：不因偏好读失败拦住起播）。
+        let prefs = match self.local.db.preferences() {
+            Ok(prefs) => {
+                self.prefs = prefs.clone();
+                prefs
+            }
+            Err(error) => {
+                tracing::warn!(%error, "读取用户偏好失败，沿用启动快照");
+                self.prefs.clone()
+            }
+        };
+        let resume_at = resume_position_for_item(&item, &prefs);
         let duration = source.runtime.or(item.runtime);
         self.tracks = TrackSet::from_source(&source);
-        let plan = self.selector.reapply(&self.tracks, &self.prefs);
+        let plan = self.selector.reapply(&self.tracks, &prefs);
         self.apply_plan_locally(&plan);
         self.session.begin(resume_at, duration);
 
@@ -1035,7 +1049,7 @@ impl Player {
         }
         if let Some(outcome) = self.progress.flush() {
             tracing::info!(
-                sent = outcome.sent,
+                flushed = outcome.sent,
                 failed = outcome.failed,
                 "捕获结束：进度已提交"
             );
@@ -1763,15 +1777,17 @@ mod tests {
         assert_eq!(view.subtitle_delay, 0.0, "字幕延迟随会话复位");
     }
 
-    /// 体检 R7-D2：`played` 且有中段续播点时，`begin()` 交给引擎的
-    /// `OpenRequest.resume_at` 不能是 0。
-    ///
-    /// 走真实 `begin()` 路径（本地缓存 → 起播前刷新 → `stream_target` → 投递
-    /// `OpenReady`）。令牌只为了让 `stream_target` 拼出直链（它不发请求）；
-    /// `base_url` 指向 `127.0.0.1:1`，起播前刷新会立刻失败并回退到缓存——这正是
-    /// “起播不被网络卡住”的设计。
-    #[test]
-    fn begin_resumes_a_played_item_with_a_mid_resume_point() {
+    type ResumeFixture = (
+        tempfile::TempDir,
+        Arc<Local>,
+        Player,
+        tokio::runtime::Runtime,
+        Arc<std::sync::Mutex<Vec<Message>>>,
+    );
+
+    /// 起播前的本地准备：一个 `Played = true`、带 45:47 续播点的条目，
+    /// `Local` 已打开（启动快照是默认偏好），返回可直接调用 `begin()` 的播放器。
+    fn resume_fixture() -> ResumeFixture {
         init_test_backend();
         let dir = tempfile::tempdir().expect("临时目录");
         let server = nova_core::ServerInfo {
@@ -1844,48 +1860,104 @@ mod tests {
             .build()
             .expect("tokio runtime");
         let host = Rc::new(RefCell::new(Host::new(true)));
-        let mut player = Player::new(
-            Rc::clone(&app),
+        let player = Player::new(
+            app,
             Arc::clone(&local),
             runtime.handle().clone(),
             host,
             None,
             Rc::new(RefCell::new(None)),
         );
-
         let posted: Arc<std::sync::Mutex<Vec<Message>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = Arc::clone(&posted);
-        let post: Post = Arc::new(move |message| match sink.lock() {
+        (dir, local, player, runtime, posted)
+    }
+
+    fn post_to(posted: &Arc<std::sync::Mutex<Vec<Message>>>) -> Post {
+        let sink = Arc::clone(posted);
+        Arc::new(move |message| match sink.lock() {
             Ok(mut queue) => queue.push(message),
             Err(poisoned) => poisoned.into_inner().push(message),
-        });
-        player.begin("item-1", None, &post);
-        // `stream_target` 只拼 URL（不发请求），但它在 tokio 上跑：驱动一拍让它投递结果。
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
+        })
+    }
 
-        let resume_at = {
-            let queue = match posted.lock() {
-                Ok(queue) => queue,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            queue.iter().find_map(|message| match message {
-                Message::OpenReady {
-                    request: Ok(request),
-                    ..
-                } => Some(request.resume_at),
-                _ => None,
-            })
-        };
+    /// 轮询等待 `begin()` 投递 `OpenReady`（上限 2s）。
+    ///
+    /// 固定 sleep 50ms 在慢 CI 上不稳定：机器一忙，tokio 任务还没跑完就断言，
+    /// 测试会偶发红灯。轮询有结果就立刻返回，超时才失败。
+    fn wait_for_resume_at(posted: &Arc<std::sync::Mutex<Vec<Message>>>) -> Duration {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            {
+                let queue = match posted.lock() {
+                    Ok(queue) => queue,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(resume_at) = queue.iter().find_map(|message| match message {
+                    Message::OpenReady {
+                        request: Ok(request),
+                        ..
+                    } => Some(request.resume_at),
+                    _ => None,
+                }) {
+                    return resume_at;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "2 秒内没有等到 OpenReady：begin() 没有把请求交给引擎"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// 体检 R7-D2：`played` 且有中段续播点时，`begin()` 交给引擎的
+    /// `OpenRequest.resume_at` 不能是 0。
+    ///
+    /// 走真实 `begin()` 路径（本地缓存 → 起播前刷新 → `stream_target` → 投递
+    /// `OpenReady`）。令牌只为了让 `stream_target` 拼出直链（它不发请求）；
+    /// `base_url` 指向 `127.0.0.1:1`，起播前刷新会立刻失败并回退到缓存——这正是
+    /// “起播不被网络卡住”的设计。
+    #[test]
+    fn begin_resumes_a_played_item_with_a_mid_resume_point() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture();
+        let post = post_to(&posted);
+        player.begin("item-1", None, &post);
+        let resume_at = wait_for_resume_at(&posted);
         assert_eq!(
             resume_at,
-            Some(Duration::from_secs(2747)),
+            Duration::from_secs(2747),
             "played 不代表从头播：交给引擎的 OpenRequest 必须续在 45:47"
         );
         assert_eq!(
             player.session.position(),
             Duration::from_secs(2747),
             "会话也不能把续播位置夹成 0（版本时长会参与 clamp）"
+        );
+    }
+
+    /// 起播与详情页必须读同一个偏好来源：详情每次读 `db.preferences()`，
+    /// 起播以前用的是 `Local::open` 时的启动快照。运行中把 `resume_min_position`
+    /// 调高后，旧实现会出现“详情写播放、起播却续在 45:47”。
+    #[test]
+    fn begin_reads_preferences_from_the_database_not_the_startup_snapshot() {
+        let (_dir, local, mut player, _runtime, posted) = resume_fixture();
+        // 启动快照是默认 30s；改成“续播点至少 3000s 才算”后，2747s 不该再续播。
+        let mut prefs = local.preferences.clone();
+        prefs.resume_min_position = Duration::from_secs(3000);
+        local.db.set_preferences(&prefs).expect("写偏好");
+
+        // 详情页读 DB：同一份偏好下文案必须是「播放」。
+        let detail = local.detail("item-1").expect("读详情").expect("条目存在");
+        assert_eq!(detail.play_label, "播放");
+
+        let post = post_to(&posted);
+        player.begin("item-1", None, &post);
+        let resume_at = wait_for_resume_at(&posted);
+        assert_eq!(
+            resume_at,
+            Duration::ZERO,
+            "起播必须按数据库里的当前偏好判定（2747s < 3000s 不续播）"
         );
     }
 

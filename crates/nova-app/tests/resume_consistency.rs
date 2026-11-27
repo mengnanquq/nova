@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use nova_app::views::detail_from_item;
+use nova_app::views::{detail_from_item, player_from_item};
 use nova_core::{ImageSet, ItemId, MediaItem, MediaKind, UserData, UserPreferences};
 use nova_playback::{resume_label, resume_position_for_item};
 
@@ -82,4 +82,29 @@ fn played_item_with_a_mid_resume_point_keeps_the_label_and_the_position() {
         Duration::from_secs(2747),
         "文案说从 45:47 继续，起播就必须是 45:47（`played` 不能一票否决）"
     );
+}
+
+/// 播放页的初始位置也要与起播同源：以前 `player_from_item` 直接用原始
+/// `resume_position`，已看完 / 太靠前的续播点会在播放页显示成“从 45:47 继续”。
+#[test]
+fn player_shell_position_matches_the_resume_position() {
+    let prefs = UserPreferences::default();
+    for (played, resume_secs, runtime_secs) in [
+        (true, 2747, 5483),
+        (false, 754, 7200),
+        (true, 5440, 5483),
+        (false, 10, 7200),
+        (true, 0, 7200),
+    ] {
+        let item = item(played, resume_secs, runtime_secs);
+        let at = resume_position_for_item(&item, &prefs);
+        let view = player_from_item(&item, &prefs);
+        assert_eq!(
+            view.position,
+            at,
+            "played={played} resume={resume_secs}s runtime={runtime_secs}s：\
+             播放页初始位置必须与起播同源（{}s）",
+            at.as_secs()
+        );
+    }
 }

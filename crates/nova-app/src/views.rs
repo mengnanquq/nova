@@ -329,7 +329,8 @@ pub fn player_view(
     let Some(item) = db.item(server_id, &ItemId::new(item_id))? else {
         return Ok(None);
     };
-    Ok(Some(player_from_item(&item)))
+    let prefs = db.preferences()?;
+    Ok(Some(player_from_item(&item, &prefs)))
 }
 
 /// 把一条媒体条目压成卡片。
@@ -388,9 +389,13 @@ pub fn detail_from_item(
 }
 
 /// 把条目压成播放页视图模型。
-pub fn player_from_item(item: &MediaItem) -> PlayerShellView {
+///
+/// 初始位置与详情页的播放文案同源（[`resume_position_for_item`]）：以前这里直接
+/// 用原始 `resume_position`，已看完 / 太靠前的续播点会显示成“从 45:47 继续”，
+/// 而真正起播是 0（体检 R7-D2）。
+pub fn player_from_item(item: &MediaItem, prefs: &UserPreferences) -> PlayerShellView {
     let mut view = PlayerShellView::new(item.title.clone())
-        .with_position(item.user_data.resume_position)
+        .with_position(resume_position_for_item(item, prefs))
         .with_playing(false)
         .with_engine_line(PLAYER_STATUS);
     if let Some(runtime) = item.runtime {
@@ -931,6 +936,45 @@ mod tests {
         assert_eq!(player.engine_line.as_deref(), Some(PLAYER_STATUS));
         assert_eq!(player.position, Duration::from_secs(754));
         assert_eq!(player.duration, Some(Duration::from_secs(8280)));
+    }
+
+    /// 播放页初始位置与详情页文案必须读同一份偏好（都是 `db.preferences()`）：
+    /// 以前详情读 DB、播放页直接用原始 `resume_position`，改高
+    /// `resume_min_position` 后会出现“详情写播放、播放页却停在 12:34”。
+    #[test]
+    fn player_position_uses_the_same_preferences_as_the_detail_label() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-prefs");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let movie = item(
+            "a",
+            "沙丘",
+            MediaKind::Movie,
+            Duration::from_secs(754),
+            Some(8280),
+        );
+        db.upsert_items(&server.info.id, &[movie], 1)
+            .expect("写条目");
+
+        // 运行中改高续播阈值：754s 不再算有效进度。
+        let prefs = UserPreferences {
+            resume_min_position: Duration::from_secs(800),
+            ..UserPreferences::default()
+        };
+        db.set_preferences(&prefs).expect("写偏好");
+
+        let detail = detail_view(&db, &server.info.id, "a")
+            .expect("读详情")
+            .expect("条目存在");
+        assert_eq!(detail.play_label, "播放");
+        let player = player_view(&db, &server.info.id, "a")
+            .expect("读播放页")
+            .expect("条目存在");
+        assert_eq!(
+            player.position,
+            Duration::ZERO,
+            "播放页初始位置必须与详情文案同源（同一份数据库偏好）"
+        );
     }
 
     #[test]

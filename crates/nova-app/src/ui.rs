@@ -1169,18 +1169,16 @@ impl Shell {
     /// - 扫描前记下窗口是否全屏（点 `player.fullscreen` 会真的切换窗口全屏），
     ///   扫描后恢复，避免调试把窗口留在全屏；
     /// - 扫描前记下音量 / 静音（点 `player.volume` / `player.mute` 是真实副作用），
-    ///   扫描后恢复（见 [`restore_player_audio`]），否则体检一次就改了用户的偏好；
+    ///   扫描后恢复（见 [`sweep_preserving_audio`]），否则体检一次就改了用户的偏好；
     /// - 扫描前没有播放器、扫描后有了（点到了 hero 的播放 / 详情页的播放），
     ///   收掉 mpv 会话，避免后台继续解码。
     fn sweep(&self, dead_only: bool) -> serde_json::Value {
         let was_fullscreen = self.app.player_fullscreen();
-        let was_audio = PlayerAudio::from_view(&self.app.player_view());
         let had_player = self.player.borrow().is_some();
-        let report = self.app.sweep();
+        let (_, report) = sweep_preserving_audio(&self.app, || self.app.sweep());
         if self.app.player_fullscreen() != was_fullscreen {
             self.app.ui().window().set_fullscreen(was_fullscreen);
         }
-        restore_player_audio(&self.app, was_audio);
         if !had_player && self.player.borrow().is_some() {
             self.stop_playback();
         }
@@ -2611,6 +2609,18 @@ pub fn restore_player_audio(app: &App, snapshot: PlayerAudio) -> bool {
     restored
 }
 
+/// 扫描的保护包装：先给音量 / 静音拍快照，跑扫描，再把快照恢复回去。
+///
+/// 抽成接受回调的接缝，测试才能验证「`Shell::sweep` 的包装确实调用了恢复」；
+/// 只单独测 [`restore_player_audio`] 的话，把这里的恢复调用删掉测试照样过，
+/// 等于没有覆盖。
+pub(crate) fn sweep_preserving_audio<R>(app: &App, sweep: impl FnOnce() -> R) -> (bool, R) {
+    let snapshot = PlayerAudio::from_view(&app.player_view());
+    let result = sweep();
+    let restored = restore_player_audio(app, snapshot);
+    (restored, result)
+}
+
 /// 一条搜索结果是否应当上屏。
 ///
 /// “代次 / 路由 / 查询词”三重判定只在这里实现一份：调用方只负责把当前值读出来。
@@ -2659,10 +2669,15 @@ pub(crate) fn accept_detail(
 ///
 /// 界面传上来的是渲染出来的 `detail.item-id`。路由与渲染数据分叉时（迟到的详情
 /// 结果刚被丢弃、界面还没重贴），按渲染数据起播就会播错片（体检 R7-D3）。
-/// 只有停在详情页时才用路由：`--play` 直达时路由可能还是首页。
+///
+/// 第一道防线是 [`accept_detail`]：迟到的详情结果在写回模型之前就被丢掉；
+/// 第二道防线在 nova-ui 的 `play()`：它按当前路由取条目 id，并且先把
+/// `Route::Player { item_id }` 压栈、再回调这里。所以回调到达时当前路由已经是
+/// 播放页，这里读 `Route::Player` 作为最后一道校验；只有不在播放页时
+/// （`--play` 直达时路由可能还是首页）才用调用方传进来的条目。
 pub(crate) fn play_target_item(route: Option<&Route>, requested: &str) -> String {
     match route {
-        Some(Route::Detail { item_id }) => item_id.clone(),
+        Some(Route::Player { item_id }) => item_id.clone(),
         _ => requested.to_owned(),
     }
 }
@@ -2737,10 +2752,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{LibraryView, Route, Status, online_provider, recovered_session};
+    use super::{
+        PlayerAudio, accept_search_result, debounce_still_current, refresh_library_target,
+        sweep_preserving_audio,
+    };
     use super::{accept_detail, play_target_item};
-    use super::{accept_search_result, debounce_still_current, refresh_library_target};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+
+    use nova_ui::{App, AppWindow};
 
     use nova_core::{
         AuthState, ItemId, Language, MediaItem, MediaKind, ServerId, ServerInfo, ServerKind,
@@ -2829,17 +2849,59 @@ mod tests {
         assert!(!accept_detail(1, 1, player.as_ref(), "a"));
     }
 
-    /// 体检 R7-D3：详情数据还是 A（界面还没来得及重贴）时点「播放」，起播的必须是路由里的 B。
+    /// 体检 R7-D3：起播回调到达时 nova-ui 已经把 `Route::Player` 压栈，
+    /// 即使 `app.slint` 传上来的 detail.item-id 还是 A，起播也必须是路由里的 B。
     #[test]
-    fn play_uses_the_route_item_when_the_detail_view_lags_behind() {
-        let route = Some(Route::Detail {
+    fn play_uses_the_player_route_item_when_the_detail_view_lags_behind() {
+        let route = Some(Route::Player {
             item_id: "b".to_owned(),
         });
         // `app.slint` 传上来的是渲染出来的 detail.item-id（此时还是 A）。
         assert_eq!(play_target_item(route.as_ref(), "a"), "b");
-        // 不在详情页（`--play` 直达时路由可能还是首页）：用传进来的条目。
+        // 不在播放页（`--play` 直达时路由可能还是首页）：用传进来的条目。
         assert_eq!(play_target_item(Some(&Route::Home), "a"), "a");
         assert_eq!(play_target_item(None, "a"), "a");
+    }
+
+    /// 体检 R7-D4：`Shell::sweep` 的保护包装必须真的调用恢复。
+    ///
+    /// 这里直接走包装（与 `Shell::sweep` 同一条实现），模拟扫描点到音量滑杆 /
+    /// 静音按钮的副作用，再断言包装在返回扫描结果前把两者都放回去了。
+    /// 删掉包装里的 `restore_player_audio` 调用，这条用例会失败。
+    #[test]
+    fn sweep_wrapper_restores_the_player_audio() {
+        init_test_backend();
+        let app = App::new_with(AppWindow::new().expect("窗口"));
+        let mut view = app.player_view();
+        view.volume = 0.42;
+        view.muted = true;
+        app.set_player(&view);
+        let before = PlayerAudio::from_view(&app.player_view());
+
+        let (restored, sweep_result) = sweep_preserving_audio(&app, || {
+            app.ui().invoke_player_volume_set(0.93);
+            app.ui().invoke_player_mute_toggle();
+            7
+        });
+
+        assert_eq!(sweep_result, 7, "包装要原样返回扫描结果");
+        assert!(restored, "扫描改了音量 / 静音，包装必须调用恢复");
+        assert_eq!(
+            PlayerAudio::from_view(&app.player_view()),
+            before,
+            "扫描结束后音量与静音都要回到扫描前的值"
+        );
+    }
+
+    fn init_test_backend() {
+        let backend = i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                threading: false,
+                renderer_name: Some("software".into()),
+            },
+        );
+        let _ = slint::platform::set_platform(Box::new(backend));
     }
 
     fn dummy_provider() -> Arc<dyn nova_provider::MediaProvider> {
