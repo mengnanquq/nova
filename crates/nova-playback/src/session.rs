@@ -376,7 +376,13 @@ impl Session {
             EngineEvent::FirstFrame => {
                 // 本次打开真的出过画面了：从这一刻起引擎给的位置才属于本次会话。
                 self.started = true;
-                if matches!(self.state, SessionState::Opening | SessionState::Buffering) {
+                // 只在 `Opening` 里因出画而收转圈。已经在 `Buffering`（引擎的 `core-idle`
+                // 仍为真 = WAN 上深续播点还在 seek / 预滚）时**不许**提升成 `Playing`：
+                // 那会让界面提前收掉转圈，露出一帧静止的预滚画面、位置 2.5–3 秒不动，
+                // 看上去像卡死（体检 R8-C1）。状态保持到引擎发 `Buffering(false)` 为止，
+                // 由 `buffering_returns_to` 决定回到 `Playing` 还是 `Paused`；引擎假如一直
+                // 不发它，就由 [`Session::tick`] 的 15 秒卡死判定兜底。
+                if self.state == SessionState::Opening {
                     self.state = SessionState::Playing;
                 }
                 // 离开 Opening 之后就不再需要转圈计时。
@@ -615,6 +621,45 @@ mod tests {
         assert_eq!(session.state(), SessionState::Playing);
         session.advance_position(Duration::from_secs(5));
         assert_eq!(session.position(), Duration::from_secs(15));
+    }
+
+    /// 体检 R8-C1：起播缓冲期（`Opening` 已经报过 `Buffering(true)`）先到 `FirstFrame`，
+    /// 之后的几秒里引擎仍在预滚（WAN 上深续播点要先 seek 再填缓存，`core-idle` 仍为真）。
+    ///
+    /// `FirstFrame` 只允许从 `Opening` 提升成 `Playing`；`Buffering` 下只置 `started`，
+    /// 状态必须保持到引擎自己发 `Buffering(false)`。否则转圈提前消失，露出一帧静止的
+    /// 预滚画面、位置 2.5–3 秒不动，看起来像卡死。
+    #[test]
+    fn first_frame_during_buffering_keeps_the_spinner_until_the_engine_is_ready() {
+        let (mut session, _clock) = session();
+        session.begin(Duration::from_secs(555), Some(Duration::from_secs(7000)));
+        session.handle(EngineEvent::Buffering(true));
+        assert_eq!(session.state(), SessionState::Buffering);
+
+        session.handle(EngineEvent::FirstFrame);
+        assert!(session.started(), "首帧之后位置才可信");
+        assert_eq!(
+            session.state(),
+            SessionState::Buffering,
+            "引擎还在预滚（core-idle）时不许把转圈收掉"
+        );
+        assert!(session.state().needs_spinner());
+
+        // 预滚期间引擎给的位置不算推进：界面停在续播点上继续转圈。
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(600)));
+        assert_eq!(session.position(), Duration::from_secs(555));
+        assert_eq!(
+            session.reportable_position(),
+            Some(Duration::from_secs(555)),
+            "出画之后才可上报，但位置是本次打开的位置，不是预滚的目标"
+        );
+
+        // 引擎真的开始推进了：收转圈，位置恢复接受读数。
+        session.handle(EngineEvent::Buffering(false));
+        assert_eq!(session.state(), SessionState::Playing);
+        assert!(!session.state().needs_spinner());
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(600)));
+        assert_eq!(session.position(), Duration::from_secs(600));
     }
 
     #[test]
