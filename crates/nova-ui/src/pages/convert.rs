@@ -12,6 +12,7 @@ use crate::{
     CardData, DetailData, HomeData, LibraryData, PlayerData, RowData, SearchData, SourceData,
     TabData, TrackData,
 };
+use slint::Model as _;
 
 fn image_or_empty(images: &ImageStore, key: &crate::viewmodel::ImageKey) -> slint::Image {
     images.get(key)
@@ -19,6 +20,47 @@ fn image_or_empty(images: &ImageStore, key: &crate::viewmodel::ImageKey) -> slin
 
 fn model<T: Clone + 'static>(items: Vec<T>) -> slint::ModelRc<T> {
     slint::ModelRc::new(slint::VecModel::from(items))
+}
+
+/// 把 `items` 写进 Slint 侧**已有**的 model，并返回可以继续挂在属性上的 model。
+///
+/// **不能每次新建 `VecModel`**：Slint 的重复元素按 model 指针判断有没有换数据源
+/// （`ModelRc` 的 `PartialEq` 比的是内层 model 的地址），新建 model 会把整行
+/// `PosterCard` 实例全部重建——实例上的 `TouchArea.has-hover` 随之清零，而它是
+/// **边沿事件**，指针不动就不会再重报。首页每批海报到达都会重贴同一份视图，
+/// 于是指针底下的放大效果会莫名其妙熄灭，`CardRow.hover-gen`（让仍有 `has-hover`
+/// 的卡重新点亮）也永远没有机会生效。
+///
+/// 也不能用 `VecModel::set_vec`：它走 `ModelNotify::reset()`，实例同样全销毁。
+/// 所以这里逐行写 + 尾部增删：`row_changed` 只让 Slint 原地 `update` 那一行的实例，
+/// 实例身份、悬停状态、行内局部状态全都保留。
+fn reuse_model<T: Clone + PartialEq + 'static>(
+    existing: Option<&slint::ModelRc<T>>,
+    items: Vec<T>,
+) -> slint::ModelRc<T> {
+    let Some(vec_model) =
+        existing.and_then(|existing| existing.as_any().downcast_ref::<slint::VecModel<T>>())
+    else {
+        // 首次（或 model 不是我们建的 `VecModel`）：只能新建。
+        return model(items);
+    };
+    // 多的从尾部删（保留下标稳定的那些实例），少的补在尾部。
+    while vec_model.row_count() > items.len() {
+        vec_model.remove(vec_model.row_count() - 1);
+    }
+    for (index, item) in items.into_iter().enumerate() {
+        // 没变的行不写：每批海报只有少数几张卡的 `image` 变化，其余行连
+        // `row_changed` 都不发，重贴一次的代价就只是比较一遍结构体。
+        if vec_model.row_data(index).as_ref() == Some(&item) {
+            continue;
+        }
+        if index < vec_model.row_count() {
+            vec_model.set_row_data(index, item);
+        } else {
+            vec_model.push(item);
+        }
+    }
+    existing.cloned().unwrap_or_default()
 }
 
 fn hero_image(card: &CardView, images: &ImageStore) -> slint::Image {
@@ -62,19 +104,34 @@ fn tab_data(tab: &LibraryTab) -> TabData {
 }
 
 /// 首页数据。
-pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
+///
+/// `previous` 是 Slint 侧当前挂着的同一份 `HomeData`：传进来就复用里面的 model
+/// （见 [`reuse_model`]），传 `None` 则全部新建（首次填充）。
+pub fn home_data(view: &HomeView, images: &ImageStore, previous: Option<&HomeData>) -> HomeData {
     let hero = view.hero.as_ref().map(|hero| CardData {
         image: hero_image(hero, images),
         ..card_data(hero, images)
     });
     let has_hero = hero.is_some();
+    // 库行自己的 `cards` model 也要复用：`RowData` 是外层重复元素的数据，`cards`
+    // 换成新 model 会让该行的卡片实例整体重建。按行号对应上一轮的模型（行的
+    // 身份由 `library_id` / `title` 表达，model 只是个容器）。
+    let previous_rows: Vec<RowData> = previous
+        .map(|previous| {
+            (0..previous.library_rows.row_count())
+                .filter_map(|index| previous.library_rows.row_data(index))
+                .collect()
+        })
+        .unwrap_or_default();
     let library_rows: Vec<RowData> = view
         .library_rows
         .iter()
-        .map(|row| RowData {
+        .enumerate()
+        .map(|(index, row)| RowData {
             library_id: row.library_id.clone().into(),
             title: row.title.clone().into(),
-            cards: model(
+            cards: reuse_model(
+                previous_rows.get(index).map(|previous| &previous.cards),
                 row.items
                     .iter()
                     .map(|card| card_data(card, images))
@@ -92,21 +149,32 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
     HomeData {
         hero: hero.unwrap_or_default(),
         has_hero,
-        continue_watching: model(
+        continue_watching: reuse_model(
+            previous.map(|previous| &previous.continue_watching),
             view.continue_watching
                 .iter()
                 .map(|card| card_data(card, images))
                 .collect(),
         ),
-        recently_added: model(
+        recently_added: reuse_model(
+            previous.map(|previous| &previous.recently_added),
             view.recently_added
                 .iter()
                 .map(|card| card_data(card, images))
                 .collect(),
         ),
-        library_rows: model(library_rows),
-        library_row_starts: model(library_row_starts),
-        tabs: model(view.library_tabs.iter().map(tab_data).collect()),
+        library_rows: reuse_model(
+            previous.map(|previous| &previous.library_rows),
+            library_rows,
+        ),
+        library_row_starts: reuse_model(
+            previous.map(|previous| &previous.library_row_starts),
+            library_row_starts,
+        ),
+        tabs: reuse_model(
+            previous.map(|previous| &previous.tabs),
+            view.library_tabs.iter().map(tab_data).collect(),
+        ),
         // 首页顶栏常驻高亮第一个标签（「首页」）；搜索页不属于任何库，
         // `search_data` 的 `current_tab` 固定传 `-1`（无高亮）。
         current_tab: 0,

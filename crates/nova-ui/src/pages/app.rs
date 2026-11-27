@@ -928,7 +928,7 @@ impl App {
         // 不一定改几何，所以数据真变了时推一行代次，让每行重新上报自己的区间。
         // （`apply_image` 每次到图都会重贴**同一份**视图，那不该触发一整轮上报。）
         let changed = state.home != *view;
-        // 越界（数据变少）：钳到第 1 张，并把页面滚回顶部、清掉悬停锁存（A2）。
+        // 越界（数据变少）：钳到第 1 张，并把页面滚回顶部（A2）。
         // 否则焦点虽然写在 0，屏幕还停在底部——Enter 打开的是屏幕外那张。
         let out_of_range = current >= view.card_count();
         let focus = if out_of_range {
@@ -942,8 +942,22 @@ impl App {
         if self.ui.get_home_focus() != focus as i32 {
             self.ui.set_home_focus(focus as i32);
         }
+        // 数据变少、焦点被钳回 0：把那两行的悬停锁存**硬清**（不重算）。
+        //
+        // 行整体会因此上下挪位，而 `has-hover` 只在指针事件里更新——指针停着不动时
+        // 它还是**旧位置**的悬停，拿它重算会把放大画到指针已经不在的卡上。
         if out_of_range {
             self.ui.invoke_scroll_home_to(0.0);
+            let next = self.ui.get_home_hover_clear().wrapping_add(1);
+            self.ui.set_home_hover_clear(next);
+        }
+        // 内容真变了就要求各行按每张卡**当前**的 `has-hover` 重算悬停（`hover-reset`）。
+        //
+        // 只按长度判断太窄：条数不变、内容整体替换时，同一个下标已经不是指针下面
+        // 那张卡了（以前这里只在越界钳位时推，实测和「重贴同一份视图」对不上）。
+        // 同一份视图重贴（每批海报到达时 `apply_images` 走的就是这条路）不推，
+        // 否则会把指针底下好好的悬停白白清掉再点亮一遍。
+        if changed && !out_of_range {
             let next = self.ui.get_home_hover_reset().wrapping_add(1);
             self.ui.set_home_hover_reset(next);
         }

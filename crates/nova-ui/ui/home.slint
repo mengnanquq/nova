@@ -81,9 +81,16 @@ component CardRow inherits Rectangle {
     // 这些场景里请求的 row/local 与上次完全相同，值没变就永远不重新滚动，焦点卡
     // 就留在视口外（A1）。所以真正触发滚动的是这个序号。
     in property <int> keyboard-scroll-seq: 0;
-    // 悬停锁存复位序号（页面在数据变少、焦点被钳回 0 时推一档）：清掉 `hot` /
-    // `latch`，不让放大层留在已经被替换掉的那张卡上（A2）。
+    // 悬停锁存复位序号（页面在**内容变化**时推一档，见 `App::set_home`）：清掉
+    // `hot` / `latch`，再由仍有 `has-hover` 的卡重新点亮（卡片实例已复用，不会重建）。
     in property <int> hover-reset: 0;
+    // 悬停**硬清**序号（页面在焦点被钳回 0 = 数据变少时推一档）。
+    //
+    // 与 `hover-reset` 的区别：那个会让仍有 `has-hover` 的卡重新点亮自己，这里不。
+    // 数据变少会把行整体上下挪动，而 Slint 的 `has-hover` 只在指针事件里更新——
+    // 指针停着不动时它就是**旧位置**的悬停，拿它重新点亮会把放大画到指针已经没有
+    // 停留的那张卡上（行上移 274px 的真机场景）。
+    in property <int> hover-clear: 0;
 
     // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
     // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
@@ -117,6 +124,10 @@ component CardRow inherits Rectangle {
             root.latch = root.hot;
         }
     }
+    changed hover-clear => {
+        root.hot = -1;
+        root.latch = -1;
+    }
     // 悬停复算请求序号（`hover-reset` 时本行推一档，见下）。
     //
     // `has-hover` 是**边沿事件**：`hot` 被清掉之后，指针仍停在同一张卡上也不会
@@ -124,12 +135,12 @@ component CardRow inherits Rectangle {
     // 属性），改成把序号推下去、由**每张卡自己**按当前的 `has-hover` 决定要不要
     // 重新点亮自己。
     property <int> hover-gen: 0;
-    // 页面要求重算悬停（数据变了 / 焦点被钳回 0）：不复用旧下标。
+    // 页面要求重算悬停（**内容变化**时，Rust 推一档）：不复用旧下标。
     //
     // 只按长度判断太窄了——数据条数没变、但卡片被替换或整体前移时，同一个下标
-    // 指向的已经不是指针下面那张卡，放大效果会停在指针没停留的卡上。所以这里
-    // **全部清掉**，再让仍有 `has-hover` 的卡自己把 `hot` / `latch` 点亮回来
-    // （以前无条件清零也留不住“指针没动”的悬停，`has-hover` 的边沿事件不会重发）。
+    // 指向的已经不是指针下面那张卡。所以这里**全部清掉**，再让仍有 `has-hover`
+    // 的卡自己把 `hot` / `latch` 点亮回来（以前无条件清零也留不住“指针没动”的
+    // 悬停，`has-hover` 的边沿事件不会重发；而卡片实例现在是复用的，不再重建）。
     changed hover-reset => {
         // 指针停在放大覆盖层或左右箭头上时不动：那两种情况放大层本来就是指针下的
         // 对象（`zoom-index` 回退到 `latch`），清掉只会让指针底下的放大层自己消失。
@@ -137,6 +148,17 @@ component CardRow inherits Rectangle {
             root.hot = -1;
             root.latch = -1;
             root.hover-gen += 1;
+        } else {
+            // 跳过时也要把**越界**的那一项清掉：数据变少后 `hot` / `latch` 可能指着
+            // 已经不存在的卡，而 `zoom-index` 会照着它算 ⇒ 放大层和左右箭头留在
+            // 屏幕上再也下不去（箭头的可见条件是 `zoom-index >= 0`）。指针还在
+            // 覆盖层 / 箭头上，所以只清越界的，别把指针底下的放大效果一起打掉。
+            if (root.hot >= root.cards.length) {
+                root.hot = -1;
+            }
+            if (root.latch >= root.cards.length) {
+                root.latch = -1;
+            }
         }
     }
     property <int> zoom-index: root.hot >= 0 ? root.hot
@@ -319,6 +341,12 @@ component CardRow inherits Rectangle {
                 hover-changed(has) => {
                     if (has) {
                         root.hot = i;
+                        // 锁存也在这里写：`hover-reset` 是「清掉 `hot` / `latch` → 再让
+                        // 仍有 `has-hover` 的卡重新点亮」两步，而 `hot` 在同一次属性
+                        // 事务里先被清成 -1 又被写回 i，`changed hot` 会被合并掉（最终值没变），
+                        // 指望它去恢复 `latch` 是保不住的（实测：重贴数据后指针一动，
+                        // 覆盖层接管悬停时 `latch` 还是 -1，放大直接灭）。
+                        root.latch = i;
                         // 悬停也是"当前焦点"：方向键必须从这张卡继续。
                         root.focus-hover(i);
                     } else if (root.hot == i) {
@@ -564,8 +592,11 @@ export component HomePage inherits Rectangle {
     // 滚动请求序号（单调递增，每次请求 +1）：行只认它，因为「同一个 row/local」
     // 也要重新滚（滚轮把行滚走后 ↑ 到 hero、↓ 回来，或者行首 ← / 末行 ↓，A1）。
     property <int> keyboard-scroll-seq: 0;
-    // 悬停锁存复位序号（Rust 在焦点被钳回 0 时推一档）：清掉各行的 `hot` / `latch`（A2）。
+    // 悬停锁存复位序号（Rust 在**内容变化**时推一档）：让各行的 `hot` / `latch`
+    // 失效，再由仍有 `has-hover` 的卡重新点亮。
     in property <int> hover-reset: 0;
+    // 悬停硬清序号（Rust 在焦点被钳回 0、数据变少时推一档）：只清不重算（见 `CardRow`）。
+    in property <int> hover-clear: 0;
     // 用户是否已开始导航；未激活时行不放大任何卡（首屏保持"干净"，与 Netflix 一致）。
     in property <bool> nav-active: false;
     in property <bool> search-focused: false;
@@ -1180,6 +1211,7 @@ export component HomePage inherits Rectangle {
                     ? root.keyboard-scroll-local : -1;
                 keyboard-scroll-seq: root.keyboard-scroll-seq;
                 hover-reset: root.hover-reset;
+                hover-clear: root.hover-clear;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 0;
                 image-gen: root.image-gen;
@@ -1212,6 +1244,7 @@ export component HomePage inherits Rectangle {
                     ? root.keyboard-scroll-local : -1;
                 keyboard-scroll-seq: root.keyboard-scroll-seq;
                 hover-reset: root.hover-reset;
+                hover-clear: root.hover-clear;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 1;
                 image-gen: root.image-gen;
@@ -1258,6 +1291,7 @@ export component HomePage inherits Rectangle {
                         ? root.keyboard-scroll-local : -1;
                     keyboard-scroll-seq: root.keyboard-scroll-seq;
                     hover-reset: root.hover-reset;
+                    hover-clear: root.hover-clear;
                     nav-active: root.nav-active && root.content-focused;
                     focus-hover(index) => {
                         root.focus-index = root.data.library-row-starts[ri] + index;

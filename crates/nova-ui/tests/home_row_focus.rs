@@ -647,15 +647,17 @@ fn shrinking_the_data_does_not_leave_the_zoom_on_a_stale_card() {
     );
 }
 
-/// R7-悬停（本轮复审第 2 项）：数据条数**不变**、但本行的卡片被整体替换后，指针
-/// 没动也不能把放大效果留在旧下标那张卡上。
+/// R7-悬停（本轮复审第 1 项）：数据条数**不变**、但本行的卡片被整体替换后，指针
+/// 没动也不能把放大效果熄灭。
 ///
-/// `hover-reset` 以前只看长度：5 → 5 的替换它一律放行，`hot` 还是 2，放大就停在
-/// 下标 2 上。现在改成"清掉 + 由仍有 `has-hover` 的卡重新点亮"：Slint 的 `for`
-/// 重复元素在数组换成新实例时会把卡片实例全部重建（`has-hover` 随之清空，指针不动
-/// 也不会有新事件），重算的结果就是熄灭——指针一动立刻能重新点亮。
+/// 修复前 `convert::model` 每次 `set_home` 都新建一个 `VecModel`：Slint 的重复元素
+/// 按 model 指针判断有没换数据源，于是整行 `PosterCard` 实例全被重建，卡片上的
+/// `has-hover` 随之清空（指针不动就不会有新事件），上一轮新增的 `hover-gen`
+/// （让仍有 `has-hover` 的卡重新点亮）在线上永远没机会生效。现在模型原地写
+/// （`reuse_model`）+ `set_home` 内容变了就推 `hover-reset`：实例、悬停状态都保留，
+/// 序号一推，指针下那张卡自己把放大重新点亮（同一格，数据已换新）。
 #[test]
-fn replacing_the_cards_under_a_parked_pointer_clears_the_zoom() {
+fn replacing_the_cards_under_a_parked_pointer_keeps_the_zoom_on_that_card() {
     let app = app_1920x1080();
     let mut view = home();
     view.hero = None;
@@ -683,32 +685,103 @@ fn replacing_the_cards_under_a_parked_pointer_clears_the_zoom() {
     );
     let zoom_x = app.ui().get_zoom_rect_x();
 
-    // 条数不变（5 → 5）、内容整体替换：卡片实例全部重建，指针没动。
+    // 条数不变（5 → 5）、内容整体替换，指针没动：**只走生产路径**（只调 `set_home`，
+    // 不手动推任何复位序号）。模型是原地改的，卡片实例没重建。
     let mut replaced = view.clone();
     replaced.continue_watching = (10..15)
         .map(|index| CardView::new(format!("d{index}"), format!("D{index}")))
         .collect();
     app.set_home(&replaced);
     settle(&app);
-    // 页面在数据变化后要求重算悬停（`set_home` 只在焦点越界时自己推一档，
-    // 这里条数没变，所以按页面同一套接口手动推一档）。
-    let reset = app.ui().get_home_hover_reset().wrapping_add(1);
-    app.ui().set_home_hover_reset(reset);
-    settle(&app);
     assert!(
-        !app.ui().get_row0_zoom_on(),
-        "卡片被替换后没有任何卡还带着 `has-hover`，放大不能留在旧下标（{zoom_x}）"
+        app.ui().get_row0_zoom_on(),
+        "卡片实例被复用时指针仍停在同一格（{zoom_x}），放大不能熄灭"
     );
-
-    // 指针再动一下：同一格重新点亮。
+    assert_eq!(
+        app.ui().get_home_focus(),
+        2,
+        "焦点仍在指针下那一格（不是掉回 0，也没熄掉）"
+    );
+    assert_eq!(
+        app.ui().get_zoom_rect_x(),
+        zoom_x,
+        "放大层还在同一格上（下标 2 的几何不变）"
+    );
+    // 同一格里已经是新数据：模型原地更新，实例没重建。
     let card = app
         .target("home.row.continue.card.2")
         .expect("替换后第 3 张仍应在窗口里");
+    assert_eq!(card.label, "D12", "下标 2 的卡片数据已换成新视图的");
+
+    // 指针再动一下：同一格仍然是亮的（不能因为复位而“永久熄灭”）。
     let (x, y) = card.center();
     app.hover_at(x + 1.0, y).expect("再悬停第 3 张");
     settle(&app);
-    assert!(app.ui().get_row0_zoom_on(), "指针一动就必须能重新点亮");
-    assert_eq!(app.ui().get_home_focus(), 2, "重新点亮后焦点回到第 3 张");
+    assert!(app.ui().get_row0_zoom_on(), "指针一动仍然点亮同一张");
+    assert_eq!(app.ui().get_home_focus(), 2, "焦点还是第 3 张");
+}
+
+/// 悬停锁存不能留在越界下标上：指针停在行的左右箭头上时，`hover-reset` 会跳过
+/// “清掉 + 重新点亮”那一段（放大层本来就是指针底下的对象），但**越界**的
+/// `hot` / `latch` 必须清掉——否则 `zoom-index` 还照着一个不存在的卡算，
+/// 整行左右箭头会一直亮着（`arrow.visible: zoom-index >= 0`）再也下不去。
+///
+/// 修前：条数 5 → 4 后 `latch` 还是 4（`>= cards.length`），另一个箭头在指针不在它
+/// 上面时也还登记在目标清单里。
+#[test]
+fn shrinking_a_row_while_the_pointer_is_on_its_arrow_drops_the_stale_zoom() {
+    let app = app_1920x1080();
+    let mut view = home();
+    view.hero = None;
+    view.continue_watching = (0..5)
+        .map(|index| CardView::new(format!("c{index}"), format!("C{index}")))
+        .collect();
+    // 「最近添加」留着：缩行后总卡数仍大于焦点下标，`set_home` 就不会走“越界钳回 0”
+    // 的硬清那条路，正好把行内锁存自己的越界夹住逻辑暴露出来。
+    view.recently_added = (0..3)
+        .map(|index| CardView::new(format!("r{index}"), format!("R{index}")))
+        .collect();
+    view.library_rows.clear();
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    // 悬停最后一张：锁存落在下标 4 上。
+    let card = app
+        .target("home.row.continue.card.4")
+        .expect("「继续观看」第 5 张应在窗口里");
+    let (x, y) = card.center();
+    app.hover_at(x, y).expect("悬停第 5 张");
+    settle(&app);
+    assert!(app.ui().get_row0_zoom_on(), "前提：悬停点亮放大");
+
+    // 指针移到本行右箭头上：`hot` 清掉，锁存留在 4（`zoom-index` 靠它维持箭头）。
+    let arrow = app
+        .target("home.row.continue.right")
+        .expect("放大时有右箭头");
+    let (ax, ay) = arrow.center();
+    app.hover_at(ax, ay).expect("悬停右箭头");
+    settle(&app);
+
+    // 数据变少（5 → 4），但焦点 4 仍在总卡数（4 + 3）以内：只推 `hover-reset`。
+    let mut shrunk = view.clone();
+    shrunk.continue_watching.truncate(4);
+    let total_before = app.ui().get_home_focus();
+    app.set_home(&shrunk);
+    settle(&app);
+    assert!(
+        total_before < 7,
+        "前提：焦点 {total_before} 在缩小后仍在总卡数内（不走越界硬清）"
+    );
+
+    // 锁存里的 4 已经越界：不能再把箭头点亮。
+    app.refresh_targets();
+    assert!(
+        app.target("home.row.continue.left").is_none(),
+        "下标越界后左箭头不能还亮着（指针只停在右箭头上）"
+    );
+    assert!(!app.ui().get_row0_zoom_on(), "越界下标上不能还画着放大层");
 }
 
 /// 指针 (x, y) 下面是否压着某张首页卡片（`home.row.*.card.*` 目标矩形）。

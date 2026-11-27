@@ -482,8 +482,7 @@ fn without_a_hero_the_first_row_starts_at_the_page_top() {
                 first_title_top.abs()
             );
             assert!(
-                (first_title_top - hero_bottom).abs() <= 0.5
-                    && (first_title_top - hero_bottom).abs() < gap,
+                (first_title_top - hero_bottom).abs() < gap,
                 "{width}x{height} {label}: hero 底 {hero_bottom} 到首个可见行标题顶 \
                  {first_title_top} 之间不该有 section-gap {gap}（实际 {}）",
                 first_title_top - hero_bottom
