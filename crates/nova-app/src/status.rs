@@ -52,7 +52,12 @@ pub enum Status {
 }
 
 impl Status {
-    /// 是否可以发请求（`Connected` 或"刷新失败但会话还在"）。
+    /// 是否可以发请求。
+    ///
+    /// **只有 [`Connected`](Self::Connected) 算在线**。刷新失败（[`RefreshFailed`]
+    /// (Self::RefreshFailed)）按离线处理：它意味着上一次联网就失败了，继续发
+    /// 搜索 / 详情 / 图片请求只会得到一批注定失败的结果（搜索失败页还会覆盖
+    /// 本地命中）。回到在线靠用户点横幅上的「重试」（`refresh_forced`）或下次启动。
     pub fn is_connected(&self) -> bool {
         matches!(self, Self::Connected { .. })
     }
@@ -228,5 +233,24 @@ mod tests {
         .expect("刷新失败应有横幅");
         assert_eq!(failed.level, BannerLevel::Warning);
         assert_eq!(failed.action_label.as_deref(), Some("重试"));
+    }
+
+    /// 刷新失败视为离线：搜索 / 详情 / 图片不去发注定失败的请求（见 `is_connected`
+    /// 的文档）。回到在线只能靠「重试」或下次启动。
+    #[test]
+    fn refresh_failure_counts_as_offline() {
+        assert!(
+            !Status::RefreshFailed {
+                message: "网络错误".to_owned(),
+            }
+            .is_connected()
+        );
+        assert!(
+            Status::Connected {
+                server: "家里".to_owned(),
+                base_url: "http://host:8096".to_owned(),
+            }
+            .is_connected()
+        );
     }
 }

@@ -198,13 +198,7 @@ impl UiChannel {
     /// 闭包只捕获 `Arc` 与 `slint::Weak`（都是 `Send`），不捕获 `Rc<Shell>`；
     /// 真正的应用发生在主线程的 [`apply_message`] 里。
     fn post(self: &Arc<Self>, message: UiMessage) {
-        {
-            let mut queue = lock(&self.queue);
-            if queue.len() >= MAX_QUEUED_MESSAGES {
-                queue.pop_front();
-            }
-            queue.push_back(message);
-        }
+        enqueue(&self.queue, message);
         let weak = self.weak.clone();
         let queue = Arc::clone(&self.queue);
         if let Err(error) = slint::invoke_from_event_loop(move || {
@@ -257,6 +251,10 @@ pub fn run_window(
     {
         // 状态一变就投一条消息：横幅与 `state.status` 立刻跟上（`mark_expired`
         // 发生在后台任务里，不能等下一次启动或下一次刷新）。
+        //
+        // 注意：回调在 `Local::set_status` 里被调用，**禁止**在回调里再调
+        // `set_status`：那会在 `set_status` 已经持过状态锁之后再次改状态并递归
+        // 通知监听器（无限递归 / 卡死）。这里只投一条消息，不碰 `Local`。
         let status_channel = Arc::clone(&channel);
         local.set_status_listener(Arc::new(move |status: &Status| {
             status_channel.post(UiMessage::Status(status.clone()));
@@ -306,9 +304,11 @@ pub fn run_window(
 
     install_callbacks(&shell);
     shell.prefetch_images(home.image_keys());
-    if start.is_none() {
-        shell.spawn_refresh();
-    }
+    // 无论是不是 `--play` / `--capture`，都在后台刷一次：有令牌时状态是按
+    // `Connected` 乐观启动的（见 `Local::open`），不验证的话「Expired + 有令牌」
+    // 永远发现不了，要等到播放失败才看到一句模糊的错误。刷新只写缓存与状态，
+    // 不切路由，也不改变播放页内容。
+    shell.spawn_refresh(false);
     // `--search <term>`：启动后直接进搜索页（本地缓存立即出结果，同时打一次服务端）。
     if let Some(term) = initial_search.as_deref().map(str::trim) {
         if !term.is_empty() {
@@ -1268,7 +1268,10 @@ impl Shell {
     /// 库视图按**发起刷新时**打开的库与排序在后台建好（用于图片预取）；真正
     /// 替换页面时 `apply_refresh` 会按**落地时**的库与排序再建一次，因为两者之间
     /// 用户可能切了库或换了排序。
-    fn spawn_refresh(self: &Rc<Self>) {
+    ///
+    /// `force` 只给横幅上的「重试」用：此时状态是 `RefreshFailed`，普通刷新会
+    /// 直接早退（一次请求都不发），强制模式会真的重试一次。
+    fn spawn_refresh(self: &Rc<Self>, force: bool) {
         let local = Arc::clone(&self.local);
         let channel = Arc::clone(&self.channel);
         let images = Arc::clone(&self.images);
@@ -1280,7 +1283,11 @@ impl Shell {
         };
         let sort = *self.library_sort.borrow();
         self.runtime.spawn(async move {
-            let report = refresh::refresh(Arc::clone(&local), status).await;
+            let report = if force {
+                refresh::refresh_forced(Arc::clone(&local), status).await
+            } else {
+                refresh::refresh(Arc::clone(&local), status).await
+            };
             tracing::info!(
                 items = report.item_count,
                 status = report.status.headline(),
@@ -1615,7 +1622,7 @@ impl Shell {
                 }
                 // 图片下载器跟着 `Local` 的即时状态取 provider，不必在这里切换；
                 // 直接后台刷新。
-                self.spawn_refresh();
+                self.spawn_refresh(false);
             }
             Err(error) => {
                 self.app.set_add_server_error(error);
@@ -1655,8 +1662,21 @@ impl Shell {
     /// 令牌过期是后台任务里发现的（`Local::mark_expired`），不经过刷新也会到达这里
     /// （见 `run_window` 注册的状态监听器）——横幅不必等下一次启动。
     fn apply_status(&self, status: Status) {
+        // 会话恢复在线（重新登录 / 刷新成功）：之前失败的海报不再是“坏图”，
+        // 清掉失败记录并重新排一次预取（只前 `MAX_PREFETCH` 张，其余在用户滚到
+        // 它们时由可见窗口重新上报），否则它们会永远是首字母占位。
+        if recovered_session(&self.state.borrow().status, &status) {
+            self.images.clear_failures();
+            self.prefetch_images(self.current_image_keys());
+        }
         self.app.set_banner(status.banner_data());
         self.state.borrow_mut().status = status;
+    }
+
+    /// 当前界面持有的视图里的全部图片键（首页 + 库页 + 详情页）。
+    fn current_image_keys(&self) -> Vec<ImageKey> {
+        let state = self.state.borrow();
+        image_keys(&state.home, state.library.as_ref(), state.detail.as_ref())
     }
 
     /// 刷新落地时重建当前媒体库视图（按当前排序）并写进界面。
@@ -2137,7 +2157,8 @@ fn install_callbacks(shell: &Rc<Shell>) {
                     .unwrap_or_default();
                 if action == "重试" {
                     tracing::info!("横幅动作：重新刷新");
-                    shell.spawn_refresh();
+                    // 状态就在 `RefreshFailed`，普通刷新会早退，必须强制重试。
+                    shell.spawn_refresh(true);
                 } else {
                     tracing::info!(action, "横幅动作：打开添加服务器对话框");
                     shell.open_add_server();
@@ -2447,6 +2468,23 @@ fn drain(queue: &Arc<Mutex<VecDeque<UiMessage>>>) {
     }
 }
 
+/// 把一条消息放进队列（满了丢队首）。
+///
+/// 队列是有损的（`MAX_QUEUED_MESSAGES` 满了就丢最旧的一条），所以**状态消息不能
+/// 跟图片抢队尾**：一次刷新落地时可能有几千张图在队列里，状态一旦被挤掉，横幅就
+/// 永远停在上一个状态。这里对状态做一次合并：入队前把旧的 `Status` 全删掉，
+/// 保证队列里最多一条，且一定是最新的那条。
+fn enqueue(queue: &Arc<Mutex<VecDeque<UiMessage>>>, message: UiMessage) {
+    let mut queue = lock(queue);
+    if matches!(message, UiMessage::Status(_)) {
+        queue.retain(|queued| !matches!(queued, UiMessage::Status(_)));
+    }
+    if queue.len() >= MAX_QUEUED_MESSAGES {
+        queue.pop_front();
+    }
+    queue.push_back(message);
+}
+
 /// 把队列拆成"图片批次"与"其余消息"：一批图只重贴一次界面。
 fn partition_queue(
     mut queue: VecDeque<UiMessage>,
@@ -2522,6 +2560,15 @@ pub(crate) fn online_provider(
     }
 }
 
+/// 这次状态变化是不是“从离线恢复成在线”（重新登录 / 刷新成功）。
+///
+/// 只有这个方向才作废图片的永久失败记录（见 [`ImageService::clear_failures`]）：
+/// 反过来（在线 → 离线）不动，否则断网时一次状态广播就把失败记录全洗掉，
+/// 恢复在线后又去重试那些真的是坏图（404）的键。
+pub(crate) fn recovered_session(previous: &Status, next: &Status) -> bool {
+    !previous.is_connected() && next.is_connected()
+}
+
 /// 播放时用哪个版本：显式 `--play --source` > 详情页里用户选中的版本。
 ///
 /// `selected` 只在用户**停留在详情/播放页**时才算数：用户离开详情页后，
@@ -2562,7 +2609,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibraryView, Route, Status, online_provider};
+    use super::{LibraryView, Route, Status, online_provider, recovered_session};
     use super::{accept_search_result, debounce_still_current, refresh_library_target};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -2947,6 +2994,82 @@ mod tests {
         // 多字符不是单键；未知命名键也不行（`key_event_text` 返回 None）。
         assert_eq!(super::key_event_text("沙丘"), None);
         assert_eq!(super::key_event_text("F13"), None);
+    }
+
+    /// 只有“离线 → 在线”才需要作废图片失败记录（重新登录 / 刷新成功）。
+    #[test]
+    fn only_an_offline_to_online_transition_counts_as_recovery() {
+        let offline = Status::RefreshFailed {
+            message: "网络错误".to_owned(),
+        };
+        let expired = Status::Expired {
+            url: "http://127.0.0.1:8096".to_owned(),
+        };
+        let connected = Status::Connected {
+            server: "测试".to_owned(),
+            base_url: "http://127.0.0.1:8096".to_owned(),
+        };
+        assert!(recovered_session(&offline, &connected));
+        assert!(recovered_session(&expired, &connected));
+        assert!(recovered_session(&Status::NoServer, &connected));
+        assert!(
+            !recovered_session(&connected, &offline),
+            "在线 → 离线不作废失败记录，否则断网一次就把真坏图（404）也洗掉了"
+        );
+        assert!(!recovered_session(&connected, &connected), "状态没变不用清");
+    }
+
+    /// 状态消息走的是有损队列：多次 `post` 之后只能留下最后一条（否则横幅会停在
+    /// 旧状态）。
+    #[test]
+    fn status_messages_are_coalesced_in_the_queue() {
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        use nova_images::DecodedImage;
+        use nova_ui::ImageKey;
+
+        use super::{MAX_QUEUED_MESSAGES, UiMessage, enqueue, lock};
+
+        // 队列塞满（模拟刷新落地时几千张海报晚到）：状态仍然要能落到最终队列里。
+        let queue: Arc<Mutex<VecDeque<UiMessage>>> = Arc::new(Mutex::new(VecDeque::new()));
+        for index in 0..MAX_QUEUED_MESSAGES {
+            enqueue(
+                &queue,
+                UiMessage::Image {
+                    key: ImageKey::poster(format!("p{index}")),
+                    decoded: DecodedImage {
+                        width: 1,
+                        height: 1,
+                        rgba: vec![0, 0, 0, 255],
+                    },
+                },
+            );
+        }
+        enqueue(
+            &queue,
+            UiMessage::Status(Status::RefreshFailed {
+                message: "第一次".to_owned(),
+            }),
+        );
+        enqueue(
+            &queue,
+            UiMessage::Status(Status::Expired {
+                url: "http://127.0.0.1:8096".to_owned(),
+            }),
+        );
+
+        let queued = lock(&queue);
+        let statuses: Vec<&UiMessage> = queued
+            .iter()
+            .filter(|message| matches!(message, UiMessage::Status(_)))
+            .collect();
+        assert_eq!(statuses.len(), 1, "状态只保留最后一条");
+        assert!(
+            matches!(statuses[0], UiMessage::Status(Status::Expired { .. })),
+            "留下的必须是最新状态（旧的晚到会把横幅覆盖回旧值）"
+        );
+        assert_eq!(queued.len(), MAX_QUEUED_MESSAGES, "仍然受队列上限约束");
     }
 
     /// 💡1：一批 N 张图只触发 **1 次**视图重建。

@@ -554,8 +554,14 @@ async fn playback_info_forbidden_still_fails() {
         .sources(&ItemId::new(ITEM_ID))
         .await
         .expect_err("403 必须报错");
+    // 403 是「没有权限」，不是「令牌失效」：上层拿到 `Unauthorized` 会 `mark_expired`，
+    // 把用户无故登出（且写进本地库）。
     assert!(
-        matches!(error, nova_provider::ProviderError::Unauthorized),
+        !matches!(error, nova_provider::ProviderError::Unauthorized),
+        "403 不能报成 Unauthorized（会把会话标成过期）：{error:?}"
+    );
+    assert!(
+        matches!(error, nova_provider::ProviderError::Forbidden),
         "实际错误：{error:?}"
     );
 }

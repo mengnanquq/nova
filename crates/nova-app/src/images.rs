@@ -29,8 +29,11 @@
 //! # 并发与失败
 //!
 //! - 同时最多 [`MAX_CONCURRENT_DOWNLOADS`] 张图在下载（`tokio::sync::Semaphore`）；
-//! - 每个 `ImageKey` 只发起一次；失败的图记进 `failed` 集合，之后不再重试，
-//!   避免"坏图 → 重试 → 依然坏"的死循环，界面保留首字母占位；
+//! - 每个 `ImageKey` 只发起一次；**永久**失败（404、解码错、空体）记进 `failed`
+//!   集合，之后不再重试，避免“坏图 → 重试 → 依然坏”的死循环，界面保留首字母占位；
+//!   临时失败（没有会话 / 网络 / 超时 / 5xx / 429）只 `forget` 本次请求，下次
+//!   进入视口（或会话恢复在线）时再试（见 [`is_retryable`]）；会话恢复在线时
+//!   [`ImageService::clear_failures`] 会把永久失败记录也清掉（重新登录后海报要能回来）；
 //! - **按可见窗口请求**：界面把"当前视口内（± 缓冲行）的卡片"作为一批上报
 //!   （[`ImageScope`]），滚动时补发新进入视口的键；还没开始下载就滚出视口的
 //!   请求会被丢弃（[`RequestState::cancel_if_unwanted`]），所以快速滚动不会在
@@ -236,13 +239,22 @@ impl ProviderFetcher {
                     status: 401,
                     endpoint,
                 }),
+                // 403 是“没权限”，不是“令牌过期”：只保留真实状态码，不谎报成 401。
+                ProviderError::Forbidden => Err(FetchError::Http {
+                    status: 403,
+                    endpoint,
+                }),
                 ProviderError::NotFound => Err(FetchError::Http {
                     status: 404,
                     endpoint,
                 }),
                 ProviderError::Http { status } => Err(FetchError::Http { status, endpoint }),
+                // 网络 / 超时：本次跳过，下次视口（或会话恢复）再试。
+                // （以前这里走 `Ok(Vec::new())` → `EmptyBody` → 永久记进 `failed`，
+                // 断网一次之后整屏海报就再也不请求了。）
+                ProviderError::Network(_) => Err(FetchError::Transient { endpoint }),
                 other => {
-                    // provider 的 Network / Decode / Server 等无法构造进 FetchError
+                    // provider 的 Decode / Server 等无法构造进 FetchError
                     // （`FetchError::Transport` 需要 `reqwest::Error`，它不可构造）。
                     // 记一条 warn 后返回空体，缓存层按 EmptyBody 处理，界面保留占位。
                     tracing::warn!(endpoint, error = %other, "图片请求失败");
@@ -509,12 +521,13 @@ impl ImageService {
         drop(permit);
         match outcome {
             Ok(image) => Some((spec.key.clone(), image)),
-            // 离线 / 未登录：只是这次没联网，不是“这张图坏了”。解除已请求标记，
-            // 下次进入视口（或登录之后）还会重新尝试。
-            Err(ImageError::Fetch(FetchError::Unavailable)) => {
+            // 临时失败（没有会话 / 网络 / 超时 / 5xx）：只是这次没联网，不是“这张图
+            // 坏了”。解除已请求标记，下次进入视口（或会话恢复在线）还会重新尝试。
+            Err(error) if is_retryable(&error) => {
                 tracing::debug!(
                     endpoint = nova_images::endpoint_of(&spec.url),
-                    "没有可用的会话：图片本次跳过，联网后再试"
+                    %error,
+                    "图片本次跳过，恢复后重试"
                 );
                 self.state().forget(&spec.key);
                 None
@@ -524,6 +537,25 @@ impl ImageService {
                 self.state().failed.insert(spec.key.clone());
                 None
             }
+        }
+    }
+
+    /// 清空永久失败记录，让之前失败的图重新可请求。
+    ///
+    /// 只在会话恢复在线时调用（`ui::Shell::apply_status`）：`failed` 的本意是
+    /// “这张图坏了、不重试”，但它记不出“当时没有网络 / 没有权限”。不清理的话，
+    /// 断网一次或重新登录之后，那些海报永远停在首字母占位。
+    pub fn clear_failures(&self) {
+        let mut state = self.state();
+        let failed: Vec<ImageKey> = state.failed.drain().collect();
+        for key in &failed {
+            // 连“已请求”标记一起解除：否则重新上报可见窗口时 `begin_window` 看到
+            // `started` 已有标记，不会真的重发下载。
+            state.started.remove(key);
+            state.prefetched.remove(key);
+        }
+        if !failed.is_empty() {
+            tracing::debug!(keys = failed.len(), "会话恢复在线，清空图片失败记录");
         }
     }
 
@@ -756,6 +788,19 @@ fn kind_from_segment(segment: &str) -> Option<(ImageKind, ProviderImageKind)> {
         "poster" => Some((ImageKind::Poster, ProviderImageKind::Poster)),
         "backdrop" => Some((ImageKind::Backdrop, ProviderImageKind::Backdrop)),
         _ => None,
+    }
+}
+
+/// 这次失败是否只是“暂时的”（可以重试），而不是“这张图坏了”。
+///
+/// 判据落在错误本身而不是下载器实现上：`ProviderFetcher` 与 `HttpFetcher` 都
+/// 可能产生网络 / 5xx，把判据放在这里就不必让每个下载器各写一遍。
+fn is_retryable(error: &ImageError) -> bool {
+    match error {
+        ImageError::Fetch(FetchError::Unavailable | FetchError::Transient { .. }) => true,
+        ImageError::Fetch(FetchError::Transport { .. }) => true,
+        ImageError::Fetch(FetchError::Http { status, .. }) => *status >= 500 || *status == 429,
+        _ => false,
     }
 }
 
@@ -1157,6 +1202,166 @@ mod tests {
             assert!(service.load(&spec).await.is_none());
             assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "失败后不应重试");
             assert!(service.was_requested(&spec.key));
+        });
+    }
+
+    /// 可切换成功 / 失败的下载器（会话恢复前后对比用）。
+    struct SwitchableFetcher {
+        calls: AtomicUsize,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl SwitchableFetcher {
+        fn new(fail: bool) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail: std::sync::atomic::AtomicBool::new(fail),
+            }
+        }
+
+        fn set_failing(&self, failing: bool) {
+            self.fail.store(failing, Ordering::SeqCst);
+        }
+    }
+
+    impl Fetcher for SwitchableFetcher {
+        fn fetch<'a>(&'a self, url: &'a str) -> FetchFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(FetchError::Http {
+                        status: 404,
+                        endpoint: nova_images::endpoint_of(url),
+                    });
+                }
+                Ok(PNG_1X1.to_vec())
+            })
+        }
+    }
+
+    /// 会话恢复在线（重新登录 / 刷新成功）后，之前失败的图要能重新请求。
+    ///
+    /// 修复前 `failed` 永远不清理：断网一次、重新登录也不会把那屏海报拿回来。
+    #[test]
+    fn clear_failures_lets_a_recovered_session_reload_the_same_key() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let db = Arc::new(Database::open_in_memory().expect("内存库"));
+            let cache = Arc::new(
+                ImageCache::new(dir.path().join("images"), db, IMAGE_CACHE_BUDGET).expect("缓存"),
+            );
+            let fetcher = Arc::new(SwitchableFetcher::new(true));
+            let service =
+                ImageService::new(Arc::clone(&cache), Arc::clone(&fetcher) as Arc<dyn Fetcher>);
+            let spec = ImageSpec::new("abc", ImageKind::Poster, POSTER_WIDTH, None).expect("请求");
+
+            assert!(service.load(&spec).await.is_none());
+            assert!(service.was_requested(&spec.key), "404 属于永久失败");
+
+            // 会话恢复在线（`ui::Shell::apply_status` 在这里调 `clear_failures`）。
+            fetcher.set_failing(false);
+            service.clear_failures();
+
+            let loaded = service
+                .load(&spec)
+                .await
+                .expect("恢复在线后同一个键要能重新请求");
+            assert_eq!(loaded.0, spec.key);
+            assert_eq!(
+                fetcher.calls.load(Ordering::SeqCst),
+                2,
+                "恢复后要真的再发一次下载"
+            );
+        });
+    }
+
+    /// 网络错误 / 超时 / 5xx 只是“这次没拿到”，不能记成“这张图坏了”
+    /// （以前它们返回空体 → `EmptyBody` → 永久 `failed`，断网一次海报就再也
+    /// 不会重试）。
+    #[test]
+    fn a_network_error_does_not_blacklist_the_image() {
+        use nova_provider::{Flavor, Provider, ProviderConfig, RetryPolicy};
+        use nova_secrets::{CredentialStore, MemoryStore, SecretString};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let db = Arc::new(Database::open_in_memory().expect("内存库"));
+            let cache = Arc::new(
+                ImageCache::new(dir.path().join("images"), db, IMAGE_CACHE_BUDGET).expect("缓存"),
+            );
+            // 端口 1 上没有监听者：连接会被立即拒绝（确定性的网络错误，不依赖外网）。
+            let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+            store
+                .set("jellyfin/srv-dead/token", &SecretString::new("token-dead"))
+                .expect("写令牌");
+            let provider = Provider::new(
+                Flavor::Jellyfin,
+                ProviderConfig::new(ServerId::new("srv-dead"), "http://127.0.0.1:1"),
+                Arc::clone(&store),
+            )
+            .expect("地址合法")
+            .with_retry_policy(RetryPolicy::none());
+            let provider: Arc<dyn MediaProvider> = Arc::new(provider);
+            let service = ImageService::new(cache, Arc::new(ProviderFetcher::new(Some(provider))));
+            let spec = ImageSpec::new("abc", ImageKind::Poster, POSTER_WIDTH, None).expect("请求");
+
+            assert!(service.load(&spec).await.is_none());
+            assert!(
+                !service.was_requested(&spec.key),
+                "网络错误只是本次跳过：记成 failed 的话恢复后也不会重试"
+            );
+        });
+    }
+
+    /// 403 不能被谎报成 401（401 会让上层把会话标成过期）。
+    #[test]
+    fn a_forbidden_image_keeps_its_real_status_code() {
+        use nova_provider::{Flavor, Provider, ProviderConfig};
+        use nova_secrets::{CredentialStore, MemoryStore, SecretString};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/Items/abc/Images/Primary"))
+                .respond_with(ResponseTemplate::new(403))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+            store
+                .set("jellyfin/srv-403/token", &SecretString::new("token-403"))
+                .expect("写令牌");
+            let provider = Provider::new(
+                Flavor::Jellyfin,
+                ProviderConfig::new(ServerId::new("srv-403"), server.uri()),
+                Arc::clone(&store),
+            )
+            .expect("wiremock 地址合法");
+            let provider: Arc<dyn MediaProvider> = Arc::new(provider);
+            let fetcher = ProviderFetcher::new(Some(provider));
+            let spec = ImageSpec::new("abc", ImageKind::Poster, POSTER_WIDTH, None).expect("请求");
+
+            match fetcher.fetch(&spec.url).await {
+                Err(FetchError::Http { status, .. }) => {
+                    assert_eq!(status, 403, "403 要保留真实状态码（不是 401）");
+                }
+                other => panic!("应当是一次 403：{other:?}"),
+            }
+            server.verify().await;
         });
     }
 

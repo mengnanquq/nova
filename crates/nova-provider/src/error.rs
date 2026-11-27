@@ -21,7 +21,8 @@ pub const MAX_SERVER_MESSAGE: usize = 200;
 /// | 变体 | 调用方应对 |
 /// |---|---|
 /// | [`NoToken`](Self::NoToken) | 本机没有令牌；与“服务器拒绝令牌”区分，不要标成会话过期 |
-/// | [`Unauthorized`](Self::Unauthorized) | 重新登录，不要重试 |
+/// | [`Unauthorized`](Self::Unauthorized) | 401：令牌失效，重新登录，不要重试 |
+/// | [`Forbidden`](Self::Forbidden) | 403：权限不足，**不是**登录过期，不要标成会话过期 |
 /// | [`NotFound`](Self::NotFound) | 该条目已从服务端消失，可从本地缓存剔除 |
 /// | [`Http`](Self::Http) | 服务端拒绝；4xx 不要重试，5xx 可延后重试 |
 /// | [`Network`](Self::Network) | 网络/超时；幂等 GET 已在本层重试过 |
@@ -42,9 +43,18 @@ pub enum ProviderError {
     #[error("本机没有访问令牌")]
     NoToken,
 
-    /// 未认证，或令牌已失效。
+    /// 未认证，或令牌已失效（HTTP 401）。
     #[error("未认证或令牌已失效")]
     Unauthorized,
+
+    /// 服务端拒绝了这次请求（HTTP 403）：权限不足，**不是**登录过期。
+    ///
+    /// 与 [`Unauthorized`](Self::Unauthorized) 分开是因为两者的用户提示与重试
+    /// 策略不同：401 要重新登录，403 重新登录也不会变好（该账号对这个资源就是
+    /// 没有权限）。上层收到它应当按普通失败处理——不要 `mark_expired`，也不要
+    /// 把它谎报成 401。
+    #[error("服务端拒绝访问（权限不足）")]
+    Forbidden,
 
     /// 服务端没有该资源。
     #[error("服务端没有该资源")]
@@ -98,6 +108,8 @@ impl ProviderError {
     /// “上层再试一次还有没有意义”：认证失败、404、解码失败都不值得。
     pub fn is_transient(&self) -> bool {
         match self {
+            // 403 是权限问题：重试同一个令牌不会变好。
+            Self::Forbidden => false,
             Self::Network(_) => true,
             Self::Http { status } => *status >= 500 || *status == 429,
             _ => false,
@@ -105,9 +117,13 @@ impl ProviderError {
     }
 
     /// 由 HTTP 状态码构造错误。
+    ///
+    /// 只有 401 是「令牌失效」；403 单独成 [`Forbidden`](Self::Forbidden)，
+    /// 以免上层把「没有权限」写成「登录已过期」。
     pub fn from_status(status: u16) -> Self {
         match status {
-            401 | 403 => Self::Unauthorized,
+            401 => Self::Unauthorized,
+            403 => Self::Forbidden,
             404 => Self::NotFound,
             other => Self::Http { status: other },
         }
@@ -142,9 +158,13 @@ mod tests {
             ProviderError::from_status(401),
             ProviderError::Unauthorized
         ));
+        assert!(
+            !matches!(ProviderError::from_status(403), ProviderError::Unauthorized),
+            "403 是权限不足，不是令牌失效：上层收到 Unauthorized 会 mark_expired"
+        );
         assert!(matches!(
             ProviderError::from_status(403),
-            ProviderError::Unauthorized
+            ProviderError::Forbidden
         ));
         assert!(matches!(
             ProviderError::from_status(404),
@@ -159,6 +179,7 @@ mod tests {
     #[test]
     fn transience_rules() {
         assert!(!ProviderError::Unauthorized.is_transient());
+        assert!(!ProviderError::Forbidden.is_transient());
         assert!(!ProviderError::NoToken.is_transient());
         assert!(!ProviderError::NotFound.is_transient());
         assert!(!ProviderError::from_status(400).is_transient());

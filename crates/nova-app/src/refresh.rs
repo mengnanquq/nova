@@ -86,8 +86,24 @@ pub struct RefreshReport {
 /// 执行一次刷新。
 ///
 /// 前提是 `status` 已连接；否则原样返回（离线启动不应该发任何请求）。
+/// 用户主动点横幅上的「重试」走 [`refresh_forced`]。
 pub async fn refresh(local: Arc<Local>, status: Status) -> RefreshReport {
-    if !status.is_connected() {
+    run(local, status, false).await
+}
+
+/// 用户主动点「重试」：即使当前状态不是 `Connected` 也真的发一次请求。
+///
+/// 首次刷新失败后状态是 [`Status::RefreshFailed`]（它被当作离线，搜索 / 详情 /
+/// 图片都不再联网），而 [`refresh`] 对非已连接状态直接早退——所以「重试」按钮
+/// 以前一次请求都不会发，状态永远停在刷新失败上。这里只放开“状态门”：
+/// 没有 provider 时下方直接返回，没有令牌时 provider 在发请求**之前**就报
+/// [`ProviderError::NoToken`]，因此离线启动“无令牌不联网”的语义不变。
+pub async fn refresh_forced(local: Arc<Local>, status: Status) -> RefreshReport {
+    run(local, status, true).await
+}
+
+async fn run(local: Arc<Local>, status: Status, force: bool) -> RefreshReport {
+    if !force && !status.is_connected() {
         return RefreshReport {
             status,
             libraries: local.libraries(),
@@ -435,9 +451,22 @@ fn failure_status(local: &Local, error: &ProviderError) -> Status {
         local.mark_expired();
         return local.status();
     }
-    Status::RefreshFailed {
-        message: error.to_string(),
+    // 本机没有令牌（请求根本没发出去）：保持原来的状态语义，不要把它改写成
+    // 「无法刷新服务器数据」让人以为是网络问题。
+    if matches!(error, ProviderError::NoToken) {
+        let status = local.status();
+        tracing::debug!(status = status.headline(), "本机没有令牌，刷新未发出请求");
+        return status;
     }
+    let status = Status::RefreshFailed {
+        message: error.to_string(),
+    };
+    // 必须回写到 `Local`，而不只是交给界面：`Local::status()` 是搜索 / 详情 /
+    // 图片下载的联网门（`ui::online_provider`）。以前只返回 `RefreshFailed`，
+    // `Local` 里仍是 `Connected`，于是断网后每次搜索、每个详情页、每张海报都
+    // 照旧发一次注定失败的请求，搜索失败页还会把本地命中整页覆盖掉。
+    local.set_status(status.clone());
+    status
 }
 
 /// 写一页条目（调用方已用 [`nova_storage::library_items`] 纠正过库归属）。
@@ -789,6 +818,11 @@ mod paging_tests {
     /// 三个完整分页的 mock（0 / 200 / 400）。
     async fn mount_full_library(server: &MockServer) {
         mount_views(server).await;
+        mount_library_pages(server).await;
+    }
+
+    /// 只装三个分页的 mock（0 / 200 / 400），`/Views` 由调用方自己决定。
+    async fn mount_library_pages(server: &MockServer) {
         mount_page(server, 0, &plain_page(0, PAGE), TOTAL).await;
         mount_page(server, PAGE, &plain_page(PAGE, PAGE), TOTAL).await;
         mount_page(server, 400, &plain_page(400, TOTAL - 400), TOTAL).await;
@@ -1062,6 +1096,139 @@ mod paging_tests {
             stored.info.auth
         );
         drop(dir);
+    }
+
+    /// `/Views` 的响应随开关变化：先 500（模拟断网 / 服务端故障），再 200。
+    ///
+    /// 用开关而不是再 mount 一个 mock：wiremock 的 mock 按安装顺序匹配，旧的
+    /// （失败的）那个会继续接走请求，测不出“重试真的又发了一次”。
+    struct FlakyViews {
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl wiremock::Respond for FlakyViews {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return ResponseTemplate::new(500);
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "Items": [{
+                    "Id": LIBRARY_ID,
+                    "Name": "动画电影",
+                    "Type": "CollectionFolder",
+                    "CollectionType": "movies",
+                }],
+                "TotalRecordCount": 1,
+            }))
+        }
+    }
+
+    async fn mount_flaky_views(
+        server: &MockServer,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        Mock::given(method("GET"))
+            .and(path(format!("/Users/{USER_ID}/Views")))
+            .respond_with(FlakyViews { fail })
+            // 第一次刷新失败 + 用户点「重试」成功：两次都必须真的发出去。
+            .expect(2)
+            .mount(server)
+            .await;
+    }
+
+    /// 断网 → 刷新失败 → 点「重试」→ 真的重发请求 → 恢复在线（图片、详情重新联网）。
+    ///
+    /// 修复前两个问题叠在一起：
+    /// 1. `failure_status` 只返回 `RefreshFailed`、 不回写 `Local`，`Local::status()`
+    ///    仍是 `Connected`——搜索 / 详情 / 图片照旧发注定失败的请求；
+    /// 2. 横幅上的「重试」把 `self.state.status`（已经是 `RefreshFailed`）交给
+    ///    `refresh()`，而它对非已连接状态直接早退：一次请求都不发。
+    #[tokio::test]
+    async fn a_retry_after_a_failed_refresh_really_requests_again() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use nova_images::Fetcher;
+
+        let harness = Harness::new().await;
+        let fail = Arc::new(AtomicBool::new(true));
+        mount_flaky_views(&harness.server, Arc::clone(&fail)).await;
+        mount_library_pages(&harness.server).await;
+
+        let report = harness.refresh().await;
+        assert!(
+            matches!(report.status, Status::RefreshFailed { .. }),
+            "500 应当是一次刷新失败：{:?}",
+            report.status
+        );
+        assert!(
+            matches!(harness.local.status(), Status::RefreshFailed { .. }),
+            "失败必须回写到 Local，否则联网门永远开着：{:?}",
+            harness.local.status()
+        );
+        assert!(
+            crate::ui::online_provider(&harness.local.status(), harness.local.provider_dyn())
+                .is_none(),
+            "刷新失败后搜索 / 详情 / 图片不该再发请求"
+        );
+
+        // 图片：失败期间只跳过（不记为永久失败），恢复后真的下载。
+        Mock::given(method("GET"))
+            .and(path("/Items/m1/Images/Primary"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3]))
+            .expect(1)
+            .mount(&harness.server)
+            .await;
+        let fetcher = crate::images::ProviderFetcher::from_local(Arc::clone(&harness.local));
+        let spec = crate::images::ImageSpec::new(
+            "m1",
+            nova_ui::ImageKind::Poster,
+            crate::images::POSTER_WIDTH,
+            None,
+        )
+        .expect("海报请求");
+        assert!(
+            matches!(
+                fetcher.fetch(&spec.url).await,
+                Err(nova_images::FetchError::Unavailable)
+            ),
+            "失败状态下图片下载器不应发请求"
+        );
+
+        // 网络恢复，用户点横幅上的「重试」。
+        fail.store(false, Ordering::SeqCst);
+        let report = refresh_forced(Arc::clone(&harness.local), harness.local.status()).await;
+
+        assert!(
+            report.status.is_connected(),
+            "重试应当恢复在线：{:?}",
+            report.status
+        );
+        assert!(harness.local.status().is_connected());
+        // 图片：同一个 fetcher 现在真的能下载。
+        assert_eq!(
+            fetcher.fetch(&spec.url).await.expect("恢复在线后应当下载"),
+            vec![1, 2, 3]
+        );
+
+        // 详情：门开了 + 真的能取回条目。
+        Mock::given(method("GET"))
+            .and(path(format!("/Users/{USER_ID}/Items/m1")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(movie_json("m1")))
+            .expect(1)
+            .mount(&harness.server)
+            .await;
+        let provider =
+            crate::ui::online_provider(&harness.local.status(), harness.local.provider_dyn())
+                .expect("恢复在线后详情页应当能联网");
+        provider
+            .item(&ItemId::new("m1"))
+            .await
+            .expect("详情应当能取回");
+
+        // 重试真的把库拉全了（不是只把状态改回 Connected）。
+        assert_eq!(report.synced.len(), 1);
+        assert_eq!(report.synced[0].cached, u64::from(TOTAL));
+        harness.verify().await;
     }
 
     /// 一台「库里写着过期 + 凭证存储里有令牌」的服务器，地址指向 wiremock。

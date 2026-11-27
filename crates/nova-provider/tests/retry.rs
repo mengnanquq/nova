@@ -154,7 +154,7 @@ async fn unauthorized_is_not_retried_and_marks_state_expired() {
 }
 
 #[tokio::test]
-async fn forbidden_is_treated_as_unauthorized_without_retry() {
+async fn forbidden_is_not_retried_and_does_not_expire() {
     let server = MockServer::start().await;
     let provider = authorized(&server, fast_retry(3)).await;
 
@@ -165,8 +165,13 @@ async fn forbidden_is_treated_as_unauthorized_without_retry() {
         .mount(&server)
         .await;
 
-    let error = provider.libraries().await.expect_err("应当报未授权");
-    assert!(matches!(error, ProviderError::Unauthorized));
+    let error = provider.libraries().await.expect_err("应当报拒绝访问");
+    assert!(
+        !matches!(error, ProviderError::Unauthorized),
+        "403 不是 401：上层收到 Unauthorized 会标成「登录已过期」：{error:?}"
+    );
+    assert!(matches!(error, ProviderError::Forbidden), "{error:?}");
+    assert!(!error.is_transient(), "权限不足不该延迟重试");
     assert_eq!(count_requests(&server, "/Views").await, 1);
     // 权限不足不等于令牌过期：状态不能被改成 Expired。
     assert!(

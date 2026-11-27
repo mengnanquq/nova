@@ -145,7 +145,14 @@ fn classify_probe(error: &ProviderError) -> AddServerError {
 fn classify_auth(error: &ProviderError) -> AddServerError {
     match error {
         ProviderError::Unauthorized => AddServerError::new(AddServerErrorKind::Auth),
+        ProviderError::Forbidden => AddServerError::new(AddServerErrorKind::Auth),
         ProviderError::Http { status: 401 | 403 } => AddServerError::new(AddServerErrorKind::Auth),
+        // 本机没有令牌：这不是“服务器类型不对”（从前落到 `_` 分支会被说成
+        // “这个地址看起来不像 Emby 或 Jellyfin”），可行动作是重新输入密码 /
+        // 重建本地会话，与 `Unauthorized` 同一个归属。
+        ProviderError::NoToken => {
+            AddServerError::with_detail(AddServerErrorKind::Auth, error.to_string())
+        }
         ProviderError::Network(_) | ProviderError::Unsupported(_) => {
             AddServerError::with_detail(AddServerErrorKind::Connect, error.to_string())
         }
@@ -201,6 +208,24 @@ mod tests {
             classify_auth(&ProviderError::Http { status: 403 }).kind,
             AddServerErrorKind::Auth
         );
+        // 403 的新形态（provider 不再把它折成 `Unauthorized`）也要落在「凭据」类，
+        // 而不是被说成“这个地址不像 Emby / Jellyfin”。
+        assert_eq!(
+            classify_auth(&ProviderError::Forbidden).kind,
+            AddServerErrorKind::Auth
+        );
+    }
+
+    /// 本机没有令牌（不是服务端拒绝）：属于凭据问题，不能报成“服务器类型未知”。
+    #[test]
+    fn a_missing_local_token_is_not_an_unknown_server() {
+        let error = classify_auth(&ProviderError::NoToken);
+        assert_eq!(
+            error.kind,
+            AddServerErrorKind::Auth,
+            "本机没有令牌时唯一可做的是重新登录"
+        );
+        assert_eq!(error.detail.as_deref(), Some("本机没有访问令牌"));
     }
 
     #[test]

@@ -506,8 +506,8 @@ impl Provider {
 
     /// 把失败响应翻译成错误。
     ///
-    /// - 401 额外把状态标成“需要重新登录”；403 只报未授权，不动状态
-    ///   （权限不足不等于令牌过期，误标会让用户被无故登出）。
+    /// - 401 额外把状态标成“需要重新登录”；403 单独报 [`ProviderError::Forbidden`]，
+    ///   不动状态（权限不足不等于令牌过期，误标会让用户被无故登出）；
     /// - 5xx 与 429 一律保留状态码，让 [`ProviderError::is_transient`] 能正确回答
     ///   “上层还要不要再试”；服务端给的可读原因**完全不入日志**（它可能回显
     ///   请求地址与令牌），只记状态码与长度。
@@ -518,7 +518,8 @@ impl Provider {
             return ProviderError::Unauthorized;
         }
         if status == StatusCode::FORBIDDEN {
-            return ProviderError::Unauthorized;
+            // 只报「没有权限」：上层据此按普通失败处理，不会写成「登录已过期」。
+            return ProviderError::Forbidden;
         }
         if status == StatusCode::NOT_FOUND {
             return ProviderError::NotFound;
