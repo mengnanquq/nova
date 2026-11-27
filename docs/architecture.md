@@ -94,6 +94,19 @@ TLS：`reqwest` 使用 `rustls-tls-native-roots`，默认校验证书与主机�
 
 产品默认不发送任何行为数据。未来若增加，必须满足：显式告知、默认关闭、可随时关闭且不影响功能。
 
+## 在线 / 离线状态模型
+
+- `AuthState` 三态：`NoToken`（本地尚无令牌，离线启动，不联网）、`Unauthorized`（令牌失效，需重新登录）、`Forbidden`（403，凭据/权限问题，不算会话过期）。
+- `Status::RefreshFailed` 视为**离线**：搜索/详情/图片都不再联网。
+- 有令牌时以 `Connected` **乐观启动**，再由刷新结果验证；刷新失败落回 `RefreshFailed`。
+- 横幅上的「重试」走 `refresh_forced`，会**强制刷新**（即使当前不是 `Connected`）。
+- 恢复连接后会清除失败图片的记录，重新尝试。
+
+## 图片
+
+- 按**可见窗口**请求（只拉当前视口需要的图）。
+- `FetchError::Unavailable` / `FetchError::Transient` **不**进入失败名单（不把短暂/不可用记成永久失败）。
+
 ## 本地数据
 
 | 数据 | 位置 | 说明 |
