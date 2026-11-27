@@ -317,6 +317,11 @@ struct State {
     // 上一次上报给图片层的可见窗口键：窗口没变就不重复上报（滚动事件很密）。
     last_library_images: Vec<ImageKey>,
     last_search_images: Vec<ImageKey>,
+    // 首页各行当前的**行内横向滚动**偏移（`CardRow.flick.content-x`，行号 → 偏移）。
+    //
+    // 它完全是 Slint 的局部状态：Rust 只能让各行主动上报（`home-row-scroll` 回调），
+    // `sweep` 开扫前呼一次把它们快照下来，每点完一项再写回去。
+    home_row_scrolls: BTreeMap<i32, f32>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
     add_server: AddServerView,
@@ -341,6 +346,7 @@ impl Default for State {
             subtitle_margin: None,
             last_library_images: Vec::new(),
             last_search_images: Vec::new(),
+            home_row_scrolls: BTreeMap::new(),
             images: Rc::new(RefCell::new(ImageStore::new())),
             add_server: AddServerView::new(),
             callbacks: Callbacks::default(),
@@ -722,6 +728,14 @@ impl App {
             search: self.state.borrow().search.clone(),
             search_text: self.search_text(),
         };
+        // 首页行内横向滚动是 Slint 的局部状态（`CardRow.flick.content-x`）：先让
+        // 各行把当前值报上来。点过 `*.right` / `*.left` 之后按旧坐标点同一行的卡片
+        // 会点到别的卡，所以每轮恢复都要把它写回去（见 `restore_after_click`）。
+        let row_scrolls = if page == Page::Home {
+            self.snapshot_home_row_scrolls()
+        } else {
+            Vec::new()
+        };
         let targets = self.targets();
         let mut entries = Vec::new();
         let mut aborted = false;
@@ -743,7 +757,8 @@ impl App {
             }
             let after = self.state_digest();
             let changed = before != after;
-            let restored = self.restore_after_click(page, &route, dialog.as_ref(), &views);
+            let restored =
+                self.restore_after_click(page, &route, dialog.as_ref(), &views, &row_scrolls);
             entries.push(SweepEntry {
                 id: target.id.clone(),
                 kind: target.kind.clone(),
@@ -773,10 +788,16 @@ impl App {
     ///    状态机复位到空闲、焦点回到地址框）；扫描前没开就关掉被点开的；
     /// 2. 放回扫描前的视图模型（媒体库 / 搜索 / 搜索框文字）——点顶栏标签会换库、
     ///    点 `search.clear` 会清空查询词，不先放回就会重建出点击后的页面（R8-C2）；
+    ///    **只在真的变了时才写**：`set_library` / `set_search` 会重建页面、
+    ///    清图片窗口缓存、换库时还会 `reset_library_scroll`，Home / Detail / Player 页
+    ///    上每个目标都无条件重写一遍就是白白的重建 + 上报；
     /// 3. 先尝试 `go_back`（点卡片进详情、点标签切库、点播放进播放页都是压栈）；
     /// 4. 栈已经回不去（例如点「返回」直接把详情页弹掉了）就按原路由重建栈顶
     ///    （详情 / 媒体库 / 搜索 / 首页都能从**扫描前**的视图模型重建）；
-    /// 5. 最后强制切回原页面。
+    /// 5. 强制切回原页面；
+    /// 6. 首页的各行行内横向滚动写回快照（`CardRow.flick.content-x` 是 Slint
+    ///    局部状态，点过 `*.right` / `*.left` 会把它滚走；滚不回去，同一轮里
+    ///    后面按旧坐标点这一行的卡片就会点到别的卡）。
     ///
     /// 播放页是例外：播放会话（mpv）不是视图模型能凭空重建的，所以只要页面回到
     /// 播放页就算恢复成功（路由可能已经变成上一条）；调用方（`nova-app` 的
@@ -787,6 +808,7 @@ impl App {
         route: &Option<Route>,
         dialog: Option<&DialogSnapshot>,
         views: &ViewSnapshot,
+        row_scrolls: &[(i32, f32)],
     ) -> bool {
         match dialog {
             // 扫描前开着：先关（复位状态机 / 清密码）再按快照重开，保证每个目标
@@ -807,9 +829,24 @@ impl App {
         }
         // 先放回扫描前的视图模型：点标签会换库、点「清除搜索」会清空查询词，
         // 这些点击改的是视图本身，只恢复路由会重建出点击后的页面（R8-C2）。
-        self.set_library(&views.library);
-        self.set_search(&views.search);
-        self.set_search_text(&views.search_text);
+        // 值没变就不写：这些 setter 都会重建界面（图片窗口重建 / 换库时归零滚动）。
+        let (library_changed, search_changed, search_text_changed) = {
+            let state = self.state.borrow();
+            (
+                state.library != views.library,
+                state.search != views.search,
+                self.search_text() != views.search_text,
+            )
+        };
+        if library_changed {
+            self.set_library(&views.library);
+        }
+        if search_changed {
+            self.set_search(&views.search);
+        }
+        if search_text_changed {
+            self.set_search_text(&views.search_text);
+        }
         for _ in 0..4 {
             if &self.current_route() == route {
                 break;
@@ -837,10 +874,47 @@ impl App {
         if self.page() != page {
             self.show_page(page);
         }
+        // 行内横向滚动写回（只对首页有意义；其他页行没被点过）。
+        self.restore_home_row_scrolls(row_scrolls);
         if self.page() != page {
             return false;
         }
         &self.current_route() == route || page == Page::Player
+    }
+
+    /// 读一次首页各行的行内横向滚动偏移（行号, `flick.content-x`）。
+    ///
+    /// 行是 `for` 重复元素，Rust 拿不到它们的 `flick`：让各行自己报上来
+    /// （`home-row-scroll` 回调 → `State::home_row_scrolls`），`ensure_tree_instantiated`
+    /// 负责把这次属性写入触发的 `changed` 处理器当场跑完（与 `refresh_targets` 同一机制）。
+    fn snapshot_home_row_scrolls(&self) -> Vec<(i32, f32)> {
+        self.state.borrow_mut().home_row_scrolls.clear();
+        self.ui.invoke_report_home_row_scrolls();
+        self.instantiate_items();
+        self.state
+            .borrow()
+            .home_row_scrolls
+            .iter()
+            .map(|(row, x)| (*row, *x))
+            .collect()
+    }
+
+    /// 把首页各行滚回快照位置。
+    ///
+    /// **不能"值没变就跳过"**：点箭头走的是平滑滚动，动画还没走到下一帧时各行报上
+    /// 来的仍是旧值，跳过就等于放任它继续滚走（真机表现为扫描结束后行停在滚开的
+    /// 位置）。写回用的是 `ScrollBehavior.instant`，它会先停掉进行中的动画再定位。
+    fn restore_home_row_scrolls(&self, snapshot: &[(i32, f32)]) {
+        if snapshot.is_empty() {
+            return;
+        }
+        for (row, x) in snapshot {
+            self.ui.invoke_reset_home_row_scroll(*row, *x);
+            // 每行都得跟一次 flush：`changed scroll-reset-seq` 是**合并**执行的
+            // （同一轮属性事务里只跑一次，看到的是最后一组值），连着写多行只会
+            // 让最后一行生效。
+            self.instantiate_items();
+        }
     }
 
     fn pointer_at(&self, x: f32, y: f32, click: bool) -> Result<(), String> {
@@ -1552,6 +1626,14 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         });
     }
     {
+        // 首页各行的行内横向滚动（`CardRow.flick.content-x`）：只有 `sweep` 会
+        // 要求上报（`App::snapshot_home_row_scrolls`），存下来供写回用。
+        let state = state.clone();
+        ui.on_home_row_scroll(move |row, x| {
+            state.borrow_mut().home_row_scrolls.insert(row, x);
+        });
+    }
+    {
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_key_intent(move |code| {
@@ -1795,6 +1877,31 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             };
             let mut view = state.borrow().add_server.clone();
             view.address = text.to_string();
+            state.borrow_mut().add_server = view.clone();
+            add_server::apply_derived(&ui, &view);
+        });
+    }
+    {
+        // 用户名实时校验：本地的「请填写用户名」是提交时留下的，补上用户名就必须消失。
+        //
+        // 以前只有提交路径会改这条错误：用户补填名字后提示一直挂着，看起来像“还是填错了”。
+        // 只清自己那条本地错误（`MissingUser`）：认证 / 网络错误描述的是上一次连接的结果，
+        // 不随输入消失（与地址输入同一口径）。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_add_server_user_edited(move |text| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut view = state.borrow().add_server.clone();
+            view.user = text.to_string();
+            if view
+                .error
+                .as_ref()
+                .is_some_and(|error| error.kind == AddServerErrorKind::MissingUser)
+            {
+                view.error = None;
+            }
             state.borrow_mut().add_server = view.clone();
             add_server::apply_derived(&ui, &view);
         });

@@ -318,6 +318,84 @@ fn empty_user_is_rejected_locally_without_a_request() {
     );
 }
 
+/// 用户名一变就清掉本地拦截的「请填写用户名」。
+///
+/// 修复前这条错误只在**下一次提交**时被覆盖：用户明明补上了名字，提示还挂着，
+/// 看起来像“还是填错了”。只清自己那条本地错误，认证 / 网络错误不随输入消失。
+#[test]
+fn typing_a_user_name_clears_the_missing_user_error() {
+    let app = setup();
+    app.open_add_server("http://127.0.0.1:8096", "");
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    let connect = app
+        .target("dialog.connect")
+        .expect("地址合法时「连接」是可点目标");
+    let (x, y) = connect.center();
+    click(&app, x, y);
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "请填写用户名",
+        "空用户名点「连接」应出现本地提示"
+    );
+
+    // 点用户名输入框再真敲字（走 `edited` 回调，而不是直接改视图模型）。
+    // 错误区出现时对话框会长高，先让目标清单落下新坐标再点。
+    settle(&app);
+    let user = app.target("dialog.user").expect("用户名输入框");
+    let (x, y) = user.center();
+    click(&app, x, y);
+    settle(&app);
+    type_text(&app, "me");
+
+    assert_eq!(app.ui().get_add_server_user(), "me", "用户名已填上");
+    assert_eq!(
+        app.ui().get_add_server_error(),
+        "",
+        "补上用户名后「请填写用户名」必须立刻消失"
+    );
+}
+
+/// Emby / Jellyfin 允许空密码账号：密码留空也必须能提交。
+///
+/// 回归：曾经担心“空密码 = 没填完”而想加门控；实际服务端允许空密码登录，
+/// 本地拦下只会让这类账号永远连不上。
+#[test]
+fn empty_password_still_submits() {
+    let app = setup();
+    let submits = Rc::new(RefCell::new(Vec::<(String, String, String)>::new()));
+    {
+        let submits = submits.clone();
+        app.on_add_server_submit(move |address, user, password| {
+            submits.borrow_mut().push((
+                address.to_string(),
+                user.to_string(),
+                password.to_string(),
+            ));
+        });
+    }
+
+    app.open_add_server("http://127.0.0.1:8096", "me");
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+    assert_eq!(app.add_server_password(), "", "前提：密码框是空的");
+
+    let connect = app.target("dialog.connect").expect("「连接」可点");
+    let (x, y) = connect.center();
+    click(&app, x, y);
+
+    assert_eq!(
+        submits.borrow().as_slice(),
+        [(
+            "http://127.0.0.1:8096".to_owned(),
+            "me".to_owned(),
+            String::new()
+        )],
+        "空密码也要发出连接请求（服务端允许空密码账号）"
+    );
+}
+
 #[test]
 fn every_error_kind_lands_in_the_error_area() {
     let app = setup();

@@ -110,6 +110,20 @@ component CardRow inherits Rectangle {
         },
     ];
 
+    // ---- 调试扫描：行内横向滚动的读出 / 写回（`sweep`，见 docs/debugging.md）----
+    //
+    // `flick.content-x` 是 Slint 的**局部滚动状态**，Rust 侧没有任何通道能读到
+    // 或写回它。而 `sweep` 会点左右箭头把行滚走：不滚回原位，同一轮里后面按
+    // 旧坐标点这一行的卡片就会点到别的卡。所以这里开一条上行（报告当前值）+
+    // 下行（写回快照值）的窄通道，只在扫描时用。
+    // `row-key` 与页面 / Rust 的行号一致：0 = 继续观看、1 = 最近添加、2 + n = 第 n 个库行。
+    in property <int> row-key: -1;
+    in property <int> scroll-report-seq: 0;
+    in property <int> scroll-reset-seq: 0;
+    in property <int> scroll-reset-row: -1;
+    in property <length> scroll-reset-x: 0px;
+    callback scroll-reported(int, length);
+
     // 图区宽 / 图区高（"图高"）：**不含**卡下标题。
     property <length> poster-width: root.portrait ? Theme.card-portrait-w : Theme.card-landscape-w;
     property <length> poster-height: root.portrait ? Theme.card-portrait-h : Theme.card-landscape-h;
@@ -323,6 +337,23 @@ component CardRow inherits Rectangle {
     changed keyboard-scroll-seq => {
         if (root.nav-active && root.keyboard-scroll >= 0) {
             root.scroll-to-card(root.keyboard-scroll);
+        }
+    }
+
+    // 调试扫描的上行报告：页面推一档序号，本行把自己当前的 `content-x` 报上去。
+    changed scroll-report-seq => {
+        root.scroll-reported(root.row-key, flick.content-x);
+    }
+
+    // 调试扫描的下行写回：只有被点名的那一行动作。
+    //
+    // 用 `scroll-to(..., ScrollBehavior.instant)` 而不是直接写 `flick.content-x`：
+    // 点箭头走的是平滑滚动（`running_animation` 还在跑），直接写属性会被下一帧的
+    // 动画覆盖回去；`instant` 这条路会先**停掉动画**再定位（Slint 的
+    // `FlickableDataInner::scroll_to` 里 `running_animation = None`），顺带做了越界钳制。
+    changed scroll-reset-seq => {
+        if (root.scroll-reset-row == root.row-key) {
+            flick.scroll-to({ x: -root.scroll-reset-x, y: -flick.content-y }, ScrollBehavior.instant);
         }
     }
 
@@ -647,6 +678,29 @@ export component HomePage inherits Rectangle {
     callback image-window(int, int, int);
     // 首页图片窗口代次（数据真变了时 Rust 推一档，让行重新上报区间）。
     in property <int> image-gen: 0;
+
+    // ---- 调试扫描（`sweep`）：各行行内横向滚动的读出 / 写回 ----
+    // 行是 `for` 重复元素，页面拿不到它们的 `flick`：只能让各行把当前 `content-x`
+    // 报上来（`row-scroll`），再由页面把快照值下发回被点名的那一行。
+    // 用在 `sweep` 里：点过 `*.right` / `*.left` 之后把行滚回原位，
+    // 否则同一轮里后面按旧坐标点卡片会点到别的卡（见 docs/debugging.md）。
+    callback row-scroll(int, length);
+    property <int> row-scroll-report-seq: 0;
+    property <int> row-scroll-reset-seq: 0;
+    property <int> row-scroll-reset-row: -1;
+    property <length> row-scroll-reset-x: 0px;
+
+    /// 让各行报一次当前的横向滚动偏移（推一档报告序号）。
+    public function report-row-scrolls() {
+        root.row-scroll-report-seq = root.row-scroll-report-seq + 1;
+    }
+
+    /// 把第 `row` 行的行内横向滚动写回 `x`（内容坐标，与 `flick.content-x` 同口径）。
+    public function reset-row-scroll(row: int, x: length) {
+        root.row-scroll-reset-row = row;
+        root.row-scroll-reset-x = x;
+        root.row-scroll-reset-seq = root.row-scroll-reset-seq + 1;
+    }
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 首页自己直接摆放的控件全在条件子树里（hero 按钮）或是子组件（顶栏 / 卡片行 /
@@ -1229,6 +1283,14 @@ export component HomePage inherits Rectangle {
                 visible: root.continue-count > 0;
                 gap-above: root.gap-above-row0;
                 target-prefix: "home.row.continue.";
+                row-key: 0;
+                scroll-report-seq: root.row-scroll-report-seq;
+                scroll-reset-seq: root.row-scroll-reset-seq;
+                scroll-reset-row: root.row-scroll-reset-row;
+                scroll-reset-x: root.row-scroll-reset-x;
+                scroll-reported(row, x) => {
+                    root.row-scroll(row, x);
+                }
                 targets-visible: root.visible;
                 title: "继续观看";
                 cards: root.data.continue-watching;
@@ -1261,6 +1323,14 @@ export component HomePage inherits Rectangle {
                 visible: root.recent-count > 0;
                 gap-above: root.gap-above-row1;
                 target-prefix: "home.row.recent.";
+                row-key: 1;
+                scroll-report-seq: root.row-scroll-report-seq;
+                scroll-reset-seq: root.row-scroll-reset-seq;
+                scroll-reset-row: root.row-scroll-reset-row;
+                scroll-reset-x: root.row-scroll-reset-x;
+                scroll-reported(row, x) => {
+                    root.row-scroll(row, x);
+                }
                 targets-visible: root.visible;
                 title: "最近添加";
                 portrait: true;
@@ -1302,6 +1372,14 @@ export component HomePage inherits Rectangle {
                     visible: row-data.cards.length > 0;
                     gap-above: root.library-gap;
                     target-prefix: "home.row.lib." + ri + ".";
+                    row-key: 2 + ri;
+                    scroll-report-seq: root.row-scroll-report-seq;
+                    scroll-reset-seq: root.row-scroll-reset-seq;
+                    scroll-reset-row: root.row-scroll-reset-row;
+                    scroll-reset-x: root.row-scroll-reset-x;
+                    scroll-reported(row, x) => {
+                        root.row-scroll(row, x);
+                    }
                     targets-visible: root.visible;
                     title: row-data.title;
                     library-id: row-data.library-id;

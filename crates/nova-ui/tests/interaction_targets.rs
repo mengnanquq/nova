@@ -700,6 +700,58 @@ fn hovering_a_card_reveals_the_row_arrows() {
     assert_coverage("home-scrolled", &targets);
 }
 
+/// 纯悬停（`nav-active = false`）也要显示行箭头。
+///
+/// 首屏没按过方向键时 `nav-active` 还是 false，键盘焦点不点亮任何卡；但鼠标悬停
+/// 仍然应该给出可滚动的入口（行被点亮 = `zoom-index >= 0`，悬停也走这条路）。
+/// 这里锁住“箭头不对 `nav-active` 敏感”这条规则，防止以后把显隐条件越收越紧。
+#[test]
+fn hovering_a_card_reveals_the_row_arrows_without_keyboard_nav() {
+    let app = window();
+    app.set_home(&home_filled());
+    app.show_home();
+    app.ui().set_billboard_ratio(0.2);
+    app.ui().set_nav_active(false);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+
+    // 没悬停时行没被点亮：箭头不在清单里。
+    let targets = settle(&app, 80);
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target.id.starts_with("home.row.continue.right")),
+        "未悬停且未启用键盘导航时不该显示箭头（清单：{:?}）",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+
+    // 纯悬停一张卡（不按方向键、不进键盘层）。
+    let card = app
+        .target("home.row.continue.card.1")
+        .expect("继续观看第 2 张卡");
+    let (x, y) = card.center();
+    app.ui().window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(x, y),
+    });
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(400));
+
+    let targets = settle(&app, 80);
+    assert!(!app.ui().get_nav_active(), "前提：键盘导航仍未启用");
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.id == "home.row.continue.right"),
+        "悬停也要点亮行并给出右箭头（清单：{:?}）",
+        targets.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target.id == "home.row.continue.left"),
+        "行在起点时左箭头仍不该出现"
+    );
+}
+
 #[test]
 fn navbar_search_targets_switch_with_focus_and_text() {
     let app = window();

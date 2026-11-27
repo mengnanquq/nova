@@ -243,6 +243,8 @@ export component AppWindow inherits Window {
     callback add-server-close();
     callback add-server-submit();
     callback add-server-address-edited(string);
+    // 用户名变一变就清掉本地的「请填写用户名」（与地址的实时校验同一口径）。
+    callback add-server-user-edited(string);
     callback sort();
     // 网格实例化窗口（大库窗口化）：页面报视口变化，Rust 据此重算实例化区间。
     callback library-grid-viewport-changed();
@@ -250,6 +252,9 @@ export component AppWindow inherits Window {
     // 首页某一行（或 hero，`row = -1`）当前可见的图片区间：`(row, first, count)`。
     // 只在区间变化 / 行重新进入视口 / 首页数据更新时发，Rust 据此按可见窗口请求海报。
     callback home-image-window(int, int, int);
+    // 首页某一行当前的**行内横向滚动**偏移（`CardRow.flick.content-x`）。
+    // 只在 `sweep` 要快照 / 写回时被要求上报（行内滚动是 Slint 局部状态，见 home.slint）。
+    callback home-row-scroll(int, length);
     callback tab-activated(string);
     callback source-selected(string);
     // 「我的列表」切换（本地持久化，Rust 侧处理）。
@@ -458,6 +463,9 @@ export component AppWindow inherits Window {
                 hover-clear: root.home-hover-clear;
                 image-window(row, first, count) => {
                     root.home-image-window(row, first, count);
+                }
+                row-scroll(row, x) => {
+                    root.home-row-scroll(row, x);
                 }
                 open-item(id) => {
                     root.focus-global();
@@ -792,6 +800,19 @@ export component AppWindow inherits Window {
         lib-page.reset-scroll();
     }
 
+    /// 让首页各行报一次行内横向滚动偏移（`sweep` 的恢复快照用，见 `docs/debugging.md`）。
+    public function report-home-row-scrolls() {
+        home-page.report-row-scrolls();
+    }
+
+    /// 把首页第 `row` 行的行内横向滚动写回 `x`（内容坐标，与 `flick.content-x` 同口径）。
+    ///
+    /// `sweep` 点过 `*.right` / `*.left` 之后用它把行滚回原位：`content-x` 是
+    /// Slint 的局部状态，Rust 没有其他通道。
+    public function reset-home-row-scroll(row: int, x: length) {
+        home-page.reset-row-scroll(row, x);
+    }
+
     /// 同上，搜索页。
     public function scroll-search-to-index(index: int) {
         search-page.scroll-to-index(index);
@@ -876,6 +897,9 @@ export component AppWindow inherits Window {
         }
         address-edited(text) => {
             root.add-server-address-edited(text);
+        }
+        user-edited(text) => {
+            root.add-server-user-edited(text);
         }
     }
 }

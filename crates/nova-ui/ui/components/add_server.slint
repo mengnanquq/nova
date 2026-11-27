@@ -29,6 +29,7 @@ export component AddServerDialog inherits Rectangle {
     callback close();
     callback submit();
     callback address-edited(string);
+    callback user-edited(string);
 
     // 调试通道：当前聚焦的是哪个输入框（0 = 都没有，1 = 地址，2 = 用户名，3 = 密码）。
     //
@@ -255,6 +256,9 @@ export component AddServerDialog inherits Rectangle {
 
                         accepted => {
                             root.submit();
+                        }
+                        edited => {
+                            root.user-edited(self.text);
                         }
                         key-pressed(event) => {
                             if (event.text == Key.Escape) {
