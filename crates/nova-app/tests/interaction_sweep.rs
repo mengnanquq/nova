@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use nova_app::Local;
 use nova_app::env::{CredentialMode, Env};
+use nova_app::ui::{PlayerAudio, restore_player_audio};
 use nova_app::views::LibrarySort;
 use nova_core::{
     AuthState, ImageSet, ItemId, Language, MediaItem, MediaKind, ServerId, ServerInfo, ServerKind,
@@ -468,4 +469,48 @@ fn dialog_sweep_restores_the_dialog_between_targets() {
     );
     assert_eq!(app.add_server_address(), "http://127.0.0.1:8096");
     assert_eq!(app.add_server_user(), "nova");
+}
+
+/// 体检 R7-D4：`sweep` 会点到播放器控制层的 `player.volume` 滑杆与 `player.mute`。
+///
+/// 调试通道的 `sweep` 包装（[`nova_app::ui::restore_player_audio`]）必须在扫描后把
+/// 两者放回去：否则体检一次就改了用户的音量 / 把片子留成静音，下次看片会误以为
+/// 是残留问题。这里用与真实点击**同一条**界面回调制造扫描的副作用，再断言恢复。
+#[test]
+fn sweep_restores_the_player_volume_and_mute() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Player, 0.88);
+
+    // 用户偏好：40% 音量、静音（两个都不是默认值，恢复错误一眼可见）。
+    let mut view = app.player_view();
+    view.volume = 0.42;
+    view.muted = true;
+    app.set_player(&view);
+    let before = PlayerAudio::from_view(&app.player_view());
+    assert_eq!(before.volume, 0.42);
+    assert!(before.muted);
+
+    // 扫描点到音量滑杆 / 静音按钮时会走这两条回调。
+    app.ui().invoke_player_volume_set(0.93);
+    app.ui().invoke_player_mute_toggle();
+    assert_ne!(
+        PlayerAudio::from_view(&app.player_view()),
+        before,
+        "前提：扫描确实会改音量 / 静音，否则这条用例测不到东西"
+    );
+
+    assert!(
+        restore_player_audio(&app, before),
+        "扫描改了音量 / 静音就必须恢复"
+    );
+    assert_eq!(
+        PlayerAudio::from_view(&app.player_view()),
+        before,
+        "扫描后音量与静音都要回到扫描前的值（顺序：先音量再静音）"
+    );
+    assert!(
+        !restore_player_audio(&app, before),
+        "已经是快照值时不该再动界面"
+    );
 }

@@ -1334,12 +1334,18 @@ impl Player {
     /// 推送的视图，缓冲期它就是上一部片子的位置或 0）。现在只提交
     /// `Session::reportable_position()`：本次打开还没出过画面就一条也不发。
     pub(crate) fn exit(&mut self, _ui_position: Duration) {
-        if let Some(progress) = self.build_progress() {
-            self.progress.submit(ProgressTrigger::Exit, progress);
-        }
+        // `submitted` 才是"本次退出有没有把进度交给上报队列"；下面的 `flushed` 只是
+        // 补发队列（之前没发出去的）这次发出去了几条。旧日志把补发条数写成 `sent`，
+        // 正常（无需补发）时永远是 0，被误读成"退出时没有上报进度"。
+        let submitted = if let Some(progress) = self.build_progress() {
+            self.progress.submit(ProgressTrigger::Exit, progress)
+        } else {
+            false
+        };
         if let Some(outcome) = self.progress.flush() {
             tracing::info!(
-                sent = outcome.sent,
+                submitted,
+                flushed = outcome.sent,
                 failed = outcome.failed,
                 queued = outcome.queued,
                 "退出播放页：补发进度"
@@ -1755,6 +1761,132 @@ mod tests {
         assert!(!view.playing);
         assert_eq!(view.rate, 1.0, "倍速随会话复位");
         assert_eq!(view.subtitle_delay, 0.0, "字幕延迟随会话复位");
+    }
+
+    /// 体检 R7-D2：`played` 且有中段续播点时，`begin()` 交给引擎的
+    /// `OpenRequest.resume_at` 不能是 0。
+    ///
+    /// 走真实 `begin()` 路径（本地缓存 → 起播前刷新 → `stream_target` → 投递
+    /// `OpenReady`）。令牌只为了让 `stream_target` 拼出直链（它不发请求）；
+    /// `base_url` 指向 `127.0.0.1:1`，起播前刷新会立刻失败并回退到缓存——这正是
+    /// “起播不被网络卡住”的设计。
+    #[test]
+    fn begin_resumes_a_played_item_with_a_mid_resume_point() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let server = nova_core::ServerInfo {
+            id: nova_core::ServerId::new("srv-player-resume"),
+            kind: nova_core::ServerKind::Jellyfin,
+            name: "续播测试".to_owned(),
+            base_url: "http://127.0.0.1:1".to_owned(),
+            version: None,
+            user_id: None,
+            auth: nova_core::AuthState::Unauthorized,
+            metadata_language: nova_core::Language::undetermined(),
+        };
+        // provider 在**构造时**从凭证存储读一次令牌；进程内存储是整个进程共享的，
+        // 所以这里写进去的令牌能被接下来 `Local::open` 构造的 provider 看到。
+        crate::env::open_credentials(crate::env::CredentialMode::Memory)
+            .store
+            .set(
+                &format!("jellyfin/{}/token", server.id.as_str()),
+                &nova_secrets::SecretString::new("test-token"),
+            )
+            .expect("写测试令牌");
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&server, 1).expect("写服务器");
+            let item = nova_core::MediaItem {
+                id: ItemId::new("item-1"),
+                kind: nova_core::MediaKind::Movie,
+                title: "6489".to_owned(),
+                sort_title: String::new(),
+                original_title: None,
+                year: None,
+                overview: None,
+                genres: Vec::new(),
+                runtime: Some(Duration::from_secs(5483)),
+                parent_id: None,
+                index_number: None,
+                index_number_end: None,
+                child_count: None,
+                images: nova_core::ImageSet::default(),
+                // 真实形态：服务端标记看完过，但仍保留 45:47 的续播点。
+                user_data: nova_core::UserData {
+                    played: true,
+                    resume_position: Duration::from_secs(2747),
+                    ..nova_core::UserData::default()
+                },
+            };
+            db.upsert_items(&server.id, &[item], 2).expect("写条目");
+            let mut source = source("src-1");
+            source.item_id = ItemId::new("item-1");
+            source.runtime = Some(Duration::from_secs(5483));
+            db.upsert_sources(&server.id, &[source])
+                .expect("写播放入口");
+        }
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(Local::open(&env, None).expect("打开本地状态"));
+        assert!(
+            local.provider_dyn().is_some(),
+            "有服务器就该有 provider（令牌只影响直链，不该影响续播位置）"
+        );
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        // 多线程 runtime：`begin()` 里用 `Handle::block_on` 做起播前刷新，
+        // 而 `Handle::block_on` 驱动不了 current_thread runtime 的 IO / 定时器，
+        // 那样 400ms 超时永远不会到点（测试会挂住，真机上是多线程 runtime）。
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let host = Rc::new(RefCell::new(Host::new(true)));
+        let mut player = Player::new(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+            host,
+            None,
+            Rc::new(RefCell::new(None)),
+        );
+
+        let posted: Arc<std::sync::Mutex<Vec<Message>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&posted);
+        let post: Post = Arc::new(move |message| match sink.lock() {
+            Ok(mut queue) => queue.push(message),
+            Err(poisoned) => poisoned.into_inner().push(message),
+        });
+        player.begin("item-1", None, &post);
+        // `stream_target` 只拼 URL（不发请求），但它在 tokio 上跑：驱动一拍让它投递结果。
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
+
+        let resume_at = {
+            let queue = match posted.lock() {
+                Ok(queue) => queue,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            queue.iter().find_map(|message| match message {
+                Message::OpenReady {
+                    request: Ok(request),
+                    ..
+                } => Some(request.resume_at),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            resume_at,
+            Some(Duration::from_secs(2747)),
+            "played 不代表从头播：交给引擎的 OpenRequest 必须续在 45:47"
+        );
+        assert_eq!(
+            player.session.position(),
+            Duration::from_secs(2747),
+            "会话也不能把续播位置夹成 0（版本时长会参与 clamp）"
+        );
     }
 
     /// 体检 R4-2：退出播放页必须把会话级错误一起收尾。

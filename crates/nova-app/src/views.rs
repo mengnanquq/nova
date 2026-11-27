@@ -7,9 +7,8 @@
 //! 抽出来的好处是离线启动、`--print-view`、`--snapshot`、窗口模式跑的是同一套
 //! 视图构建逻辑，测试可以直接断言卡片数量与顺序。
 
-use std::time::Duration;
-
 use nova_core::{ItemId, MediaItem, MediaKind, MediaSource, ServerId, UserPreferences};
+use nova_playback::{resume_label, resume_position_for_item};
 use nova_storage::Database;
 use nova_ui::viewmodel::{detail_meta_line, format_duration, meta_line};
 use nova_ui::{
@@ -315,7 +314,8 @@ pub fn detail_view(
         return Ok(None);
     };
     let sources = db.sources(server_id, &id)?;
-    let mut view = detail_from_item(&item, &sources);
+    let prefs = db.preferences()?;
+    let mut view = detail_from_item(&item, &sources, &prefs);
     view.in_my_list = db.in_mylist(server_id, &id)?;
     Ok(Some(view))
 }
@@ -354,12 +354,19 @@ pub fn card_view(item: &MediaItem) -> CardView {
 }
 
 /// 把条目 + 可播放版本压成详情页视图模型。
-pub fn detail_from_item(item: &MediaItem, sources: &[MediaSource]) -> DetailView {
+pub fn detail_from_item(
+    item: &MediaItem,
+    sources: &[MediaSource],
+    prefs: &UserPreferences,
+) -> DetailView {
     let mut view = DetailView::new(item.id.as_str(), item.title.clone());
     view.original_title = item.original_title.clone();
     view.meta_line = detail_meta_line(item.year, item.runtime, &item.genres);
     view.overview = item.overview.clone();
-    view.play_label = play_label(item.user_data.resume_position);
+    // 文案与起播位置**必须**走同一套判断（`resume_position_for_item`）：
+    // 以前这里直接用原始 `resume_position`，`Played = true` 的片中段续播点会
+    // 显示成「从 45:47 继续」而实际从头播（体检 R7-D2）。
+    view.play_label = resume_label(resume_position_for_item(item, prefs));
     view.genres = item.genres.clone();
     view.sources = sources
         .iter()
@@ -473,27 +480,6 @@ fn source_subtitle(source: &MediaSource) -> Option<String> {
         parts.push(format_duration(runtime));
     }
     non_empty(meta_line(&refs(&parts)))
-}
-
-fn play_label(resume: Duration) -> String {
-    if resume.as_secs() == 0 {
-        "播放".to_owned()
-    } else {
-        format!("从 {} 继续", clock_text(resume))
-    }
-}
-
-/// `Duration` → `"1:12:34"` / `"12:34"`。
-fn clock_text(duration: Duration) -> String {
-    let total = duration.as_secs();
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
 }
 
 fn refs(parts: &[String]) -> Vec<&str> {

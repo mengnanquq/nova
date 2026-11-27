@@ -73,7 +73,7 @@ async fn full_playback_flow_through_public_api() {
     let total = Duration::from_secs(7200);
     let resume = resume_position(&user_data, Some(total), &prefs);
     assert_eq!(resume, Duration::from_secs(754));
-    assert_eq!(resume_label(false, resume), "从 12:34 继续");
+    assert_eq!(resume_label(resume), "从 12:34 继续");
 
     // 2. open。
     session.begin(resume, Some(total));

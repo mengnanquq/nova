@@ -166,11 +166,13 @@ impl Progress {
         }
     }
 
-    /// 提交一次进度（非阻塞）。
-    pub(crate) fn submit(&self, trigger: ProgressTrigger, progress: PlaybackProgress) {
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::Submit(trigger, progress));
-        }
+    /// 提交一次进度（非阻塞）。返回是否**真的排进了**上报队列：`false` 表示
+    /// 上报通道已经关掉（进程正在退出），这次提交不会到达服务端。
+    pub(crate) fn submit(&self, trigger: ProgressTrigger, progress: PlaybackProgress) -> bool {
+        let Some(commands) = &self.commands else {
+            return false;
+        };
+        commands.send(Command::Submit(trigger, progress)).is_ok()
     }
 
     /// 退出前尽力补发；最多等 [`FLUSH_TIMEOUT`]。

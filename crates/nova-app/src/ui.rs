@@ -32,7 +32,7 @@ use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
 use nova_ui::{
     AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
-    LibraryView, Page, PlayerShellView, Route, SearchView, TargetInfo, TrackItem,
+    LibraryView, Page, PlayerShellView, PlayerView, Route, SearchView, TargetInfo, TrackItem,
 };
 use slint::ComponentHandle;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -88,7 +88,12 @@ enum UiMessage {
     /// 一次刷新完成，带上重建后的视图。
     Refreshed(Box<Refreshed>),
     /// 详情页数据（按需从服务端取回后重建）。
-    Detail(Box<DetailView>),
+    Detail {
+        /// 发起这次详情请求时的代次（见 [`accept_detail`]）。
+        generation: u64,
+        /// 重建好的详情页。
+        view: Box<DetailView>,
+    },
     /// 一次搜索的结果；`generation` 用来丢弃过期（乱序到达）的响应。
     Search {
         /// 发起这次查询时的代次。
@@ -177,6 +182,11 @@ pub(crate) struct Shell {
     search_debounce: RefCell<Option<JoinHandle<()>>>,
     /// 媒体库当前的排序方式（点排序条循环切换；只作用于本地缓存）。
     library_sort: RefCell<views::LibrarySort>,
+    /// 详情代次：`open_detail` / `spawn_detail` 每次 +1，晚到的旧响应按它丢弃。
+    ///
+    /// 详情刷新没有取消机制：点开 A 立刻又点开 B 时，A 的响应可能后到。
+    /// 只靠代次还不够（路由可能已经离开详情页），所以 [`accept_detail`] 还要看路由。
+    detail_generation: RefCell<u64>,
 }
 
 /// 跨线程消息通道：队列 + 唤醒事件循环用的弱窗口句柄。
@@ -297,6 +307,7 @@ pub fn run_window(
         search_generation: Arc::new(AtomicU64::new(0)),
         search_debounce: RefCell::new(None),
         library_sort: RefCell::new(views::LibrarySort::default()),
+        detail_generation: RefCell::new(0),
     });
     SHELL.with(|slot| {
         *slot.borrow_mut() = Some(Rc::clone(&shell));
@@ -1154,18 +1165,22 @@ impl Shell {
 
     /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
     ///
-    /// Shell 额外做两件事：
+    /// Shell 额外做三件事：
     /// - 扫描前记下窗口是否全屏（点 `player.fullscreen` 会真的切换窗口全屏），
     ///   扫描后恢复，避免调试把窗口留在全屏；
+    /// - 扫描前记下音量 / 静音（点 `player.volume` / `player.mute` 是真实副作用），
+    ///   扫描后恢复（见 [`restore_player_audio`]），否则体检一次就改了用户的偏好；
     /// - 扫描前没有播放器、扫描后有了（点到了 hero 的播放 / 详情页的播放），
     ///   收掉 mpv 会话，避免后台继续解码。
     fn sweep(&self, dead_only: bool) -> serde_json::Value {
         let was_fullscreen = self.app.player_fullscreen();
+        let was_audio = PlayerAudio::from_view(&self.app.player_view());
         let had_player = self.player.borrow().is_some();
         let report = self.app.sweep();
         if self.app.player_fullscreen() != was_fullscreen {
             self.app.ui().window().set_fullscreen(was_fullscreen);
         }
+        restore_player_audio(&self.app, was_audio);
         if !had_player && self.player.borrow().is_some() {
             self.stop_playback();
         }
@@ -1707,7 +1722,22 @@ impl Shell {
         }
     }
 
-    fn apply_detail(&self, detail: DetailView) {
+    fn apply_detail(&self, generation: u64, detail: DetailView) {
+        let route = self.app.current_route();
+        if !accept_detail(
+            *self.detail_generation.borrow(),
+            generation,
+            route.as_ref(),
+            &detail.item_id,
+        ) {
+            tracing::debug!(
+                item = detail.item_id,
+                generation,
+                ?route,
+                "丢弃过期 / 与当前路由不一致的详情结果"
+            );
+            return;
+        }
         let keys = detail.image_keys();
         // 服务端回灌的详情永远把第一个版本标成选中（`detail_from_item` 的行为），
         // 会把用户在版本下拉里选的那个重置掉。这里补回用户的选择。
@@ -1829,6 +1859,7 @@ impl Shell {
         if item_id == STATUS_ITEM_ID {
             return;
         }
+        let generation = self.next_detail_generation();
         match self.local.detail(item_id) {
             Ok(Some(detail)) => {
                 let keys = detail.image_keys();
@@ -1843,11 +1874,18 @@ impl Shell {
             }
             Err(error) => tracing::warn!(%error, "读取详情缓存失败"),
         }
-        self.spawn_detail(item_id.to_owned());
+        self.spawn_detail(item_id.to_owned(), generation);
+    }
+
+    /// 下一次详情请求的代次。
+    fn next_detail_generation(&self) -> u64 {
+        let mut generation = self.detail_generation.borrow_mut();
+        *generation = generation.wrapping_add(1);
+        *generation
     }
 
     /// 详情页按需联网：`item()` + `sources()` 写回缓存后重建详情视图。
-    fn spawn_detail(&self, item_id: String) {
+    fn spawn_detail(&self, item_id: String, generation: u64) {
         // 门控读 `Local` 的即时状态（不是 `self.state` 里可能更旧的快照）：
         // 离线时不联网，详情页继续用缓存渲染。
         let Some(provider) = online_provider(&self.local.status(), self.local.provider_dyn())
@@ -1897,7 +1935,10 @@ impl Shell {
                 })
                 .await;
             match build {
-                Ok(Ok(Some(detail))) => channel.post(UiMessage::Detail(Box::new(detail))),
+                Ok(Ok(Some(detail))) => channel.post(UiMessage::Detail {
+                    generation,
+                    view: Box::new(detail),
+                }),
                 Ok(Ok(None)) => tracing::debug!(item = item_id, "详情写回后仍读不到条目"),
                 Ok(Err(error)) => tracing::warn!(%error, "详情写缓存失败"),
                 Err(error) => tracing::warn!(%error, "详情构建任务失败"),
@@ -1906,9 +1947,15 @@ impl Shell {
     }
 
     fn play(self: &Rc<Self>, item_id: &str) {
+        // 起播的条目以**路由**为准：`app.slint` 传的是渲染出来的 `detail.item-id`，
+        // 路由与渲染数据不一致时（迟到的详情结果被 [`accept_detail`] 丢弃之前的那一帧），
+        // 按渲染数据起播就会播错片（体检 R7-D3）。
+        let item_id = play_target_item(self.app.current_route().as_ref(), item_id);
+        let item_id = item_id.as_str();
         if item_id == STATUS_ITEM_ID {
             return;
         }
+        let generation = self.next_detail_generation();
         match self.local.player(item_id) {
             Ok(Some(player)) => {
                 self.app.set_player(&player);
@@ -1939,7 +1986,7 @@ impl Shell {
         );
         self.play_item(item_id, source, capture, &post);
         // 标题/进度需要真实条目；顺手刷新一次。
-        self.spawn_detail(item_id.to_owned());
+        self.spawn_detail(item_id.to_owned(), generation);
     }
 
     fn activate_tab(&self, library_id: &str) {
@@ -2506,7 +2553,7 @@ fn apply_message(message: UiMessage) {
     };
     match message {
         UiMessage::Refreshed(payload) => shell.apply_refresh(*payload),
-        UiMessage::Detail(detail) => shell.apply_detail(*detail),
+        UiMessage::Detail { generation, view } => shell.apply_detail(generation, *view),
         UiMessage::Search { generation, view } => shell.apply_search_message(generation, *view),
         // `drain` 会把图片收进批次统一处理；这里保留单张的回退路径。
         UiMessage::Image { key, decoded } => shell.apply_images(vec![(key, decoded)]),
@@ -2524,6 +2571,46 @@ fn apply_images(images: Vec<(ImageKey, DecodedImage)>) {
     shell.apply_images(images);
 }
 
+/// 播放器的音量 / 静音快照。
+///
+/// 体检 R7-D4：`sweep` 会点到播放器控制层的 `player.volume` 滑杆与 `player.mute`。
+/// 扫完不放回去的话，用户会发现片子被静音了、音量也被改到了别的值。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerAudio {
+    /// 音量 `0.0..=1.0`。
+    pub volume: f32,
+    /// 是否静音。
+    pub muted: bool,
+}
+
+impl PlayerAudio {
+    /// 从播放页视图取当前音量 / 静音。
+    pub fn from_view(view: &PlayerView) -> Self {
+        Self {
+            volume: view.volume,
+            muted: view.muted,
+        }
+    }
+}
+
+/// 把音量 / 静音恢复到快照；返回是否真的改过界面。
+///
+/// 走界面的公开回调（与用户拖音量 / 点静音同一条路），引擎侧的音量也跟着回去。
+/// 顺序有讲究：设非零音量会自动取消静音（见 `player_volume_set`），
+/// 所以先恢复音量、再按需切回静音。
+pub fn restore_player_audio(app: &App, snapshot: PlayerAudio) -> bool {
+    let mut restored = false;
+    if (app.player_view().volume - snapshot.volume).abs() > f32::EPSILON {
+        app.ui().invoke_player_volume_set(snapshot.volume);
+        restored = true;
+    }
+    if app.player_view().muted != snapshot.muted {
+        app.ui().invoke_player_mute_toggle();
+        restored = true;
+    }
+    restored
+}
+
 /// 一条搜索结果是否应当上屏。
 ///
 /// “代次 / 路由 / 查询词”三重判定只在这里实现一份：调用方只负责把当前值读出来。
@@ -2538,6 +2625,46 @@ pub(crate) fn accept_search_result(
     current_generation == message_generation
         && on_search_route
         && message_term.trim() == current_input.trim()
+}
+
+/// 一条详情结果是否应当上屏。
+///
+/// “代次 + 路由”双重判定只在这里实现一份：调用方只负责把当前值读出来。
+///
+/// 详情刷新没有取消机制：点开 A 又立刻点开 B 时，A 的响应可能后到。以前
+/// `apply_detail` 不看路由也不看代次，迟到的 A 会直接盖掉 B 的详情页（海报 /
+/// 标题 /
+/// 播放按钮全指向 A），点「播放」就播错片（体检 R7-D3）。
+///
+/// 路由允许是 `Player`：起播后还会顺手刷一次详情（标题 / 播放文案），那时已经在
+/// 播放页了。
+pub(crate) fn accept_detail(
+    current_generation: u64,
+    message_generation: u64,
+    route: Option<&Route>,
+    item_id: &str,
+) -> bool {
+    if current_generation != message_generation {
+        return false;
+    }
+    match route {
+        Some(Route::Detail { item_id: current } | Route::Player { item_id: current }) => {
+            current == item_id
+        }
+        _ => false,
+    }
+}
+
+/// 详情页「播放」要播哪个条目：以**路由**为准。
+///
+/// 界面传上来的是渲染出来的 `detail.item-id`。路由与渲染数据分叉时（迟到的详情
+/// 结果刚被丢弃、界面还没重贴），按渲染数据起播就会播错片（体检 R7-D3）。
+/// 只有停在详情页时才用路由：`--play` 直达时路由可能还是首页。
+pub(crate) fn play_target_item(route: Option<&Route>, requested: &str) -> String {
+    match route {
+        Some(Route::Detail { item_id }) => item_id.clone(),
+        _ => requested.to_owned(),
+    }
 }
 
 /// 这次请求要不要真的联网：只有已连接（令牌可用）时才用 provider。
@@ -2610,6 +2737,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{LibraryView, Route, Status, online_provider, recovered_session};
+    use super::{accept_detail, play_target_item};
     use super::{accept_search_result, debounce_still_current, refresh_library_target};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -2658,6 +2786,60 @@ mod tests {
         let counter = AtomicU64::new(3);
         assert!(debounce_still_current(&counter, 3));
         assert!(!debounce_still_current(&counter, 2));
+    }
+
+    /// 体检 R7-D3：路由已经是 B 时，迟到的 A 详情必须被丢掉。
+    ///
+    /// 以前 `apply_detail` 不看路由也不看代次：点开 A 又立刻点开 B，A 的响应后到就会
+    /// 把 B 的详情页（标题 / 海报 / 播放按钮）整页盖成 A。
+    #[test]
+    fn detail_for_another_item_is_rejected() {
+        let route = Some(Route::Detail {
+            item_id: "b".to_owned(),
+        });
+        assert!(!accept_detail(1, 1, route.as_ref(), "a"));
+        assert!(accept_detail(1, 1, route.as_ref(), "b"));
+    }
+
+    /// 同一路由下的早先一次请求也不能事后翻盘（两次点开同一个条目）。
+    #[test]
+    fn stale_detail_generation_is_rejected() {
+        let route = Some(Route::Detail {
+            item_id: "b".to_owned(),
+        });
+        assert!(!accept_detail(2, 1, route.as_ref(), "b"));
+        assert!(accept_detail(2, 2, route.as_ref(), "b"));
+    }
+
+    /// 已经离开详情页：迟到结果不能写回任何模型（下次打开别的条目会短暂显示它）。
+    #[test]
+    fn detail_off_the_detail_route_is_rejected() {
+        let home = Some(Route::Home);
+        assert!(!accept_detail(1, 1, home.as_ref(), "b"));
+        assert!(!accept_detail(1, 1, None, "b"));
+    }
+
+    /// 起播后还会顺手刷一次详情，那时路由是播放页 —— 必须接受，否则标题 / 播放文案不更新。
+    #[test]
+    fn detail_is_accepted_on_the_player_route_for_the_same_item() {
+        let player = Some(Route::Player {
+            item_id: "b".to_owned(),
+        });
+        assert!(accept_detail(1, 1, player.as_ref(), "b"));
+        assert!(!accept_detail(1, 1, player.as_ref(), "a"));
+    }
+
+    /// 体检 R7-D3：详情数据还是 A（界面还没来得及重贴）时点「播放」，起播的必须是路由里的 B。
+    #[test]
+    fn play_uses_the_route_item_when_the_detail_view_lags_behind() {
+        let route = Some(Route::Detail {
+            item_id: "b".to_owned(),
+        });
+        // `app.slint` 传上来的是渲染出来的 detail.item-id（此时还是 A）。
+        assert_eq!(play_target_item(route.as_ref(), "a"), "b");
+        // 不在详情页（`--play` 直达时路由可能还是首页）：用传进来的条目。
+        assert_eq!(play_target_item(Some(&Route::Home), "a"), "a");
+        assert_eq!(play_target_item(None, "a"), "a");
     }
 
     fn dummy_provider() -> Arc<dyn nova_provider::MediaProvider> {
@@ -3103,7 +3285,10 @@ mod tests {
                 decoded: decoded(),
             });
         }
-        queue.push_back(UiMessage::Detail(Box::new(DetailView::new("x", "X"))));
+        queue.push_back(UiMessage::Detail {
+            generation: 1,
+            view: Box::new(DetailView::new("x", "X")),
+        });
 
         let (images, others) = partition_queue(queue);
         assert_eq!(images.len(), 5, "5 张图必须收成同一个批次");

@@ -17,18 +17,19 @@ use nova_core::{MediaItem, UserData, UserPreferences};
 ///
 /// 返回 `Duration::ZERO` 表示从头播（按钮文案也会是"播放"）。
 ///
-/// 分支顺序有讲究：`played` 最先判，因为服务端可能在用户看完后又保留了一个接近片尾的
-/// `resume_position`；此时按"看完"处理而不是"续播到片尾"。
+/// **`played` 不参与判定**：服务端会把一部看完的片子重新标成未看完，也会给
+/// `Played = true` 的条目保留一个中段的续播点（用户看完后又跳到中间继续看）。
+/// 只要续播点还在有效区间内（≥ `resume_min_position`，且剩余时长多于
+/// `finished_threshold`）就从那里续播；"已看完"只由"续播点为空 / 太靠前 /
+/// 已经贴近片尾"表达。这与 Emby 官方客户端一致：从 0 起播会让服务端把续播点
+/// 清零（播放进度达不到 MinResumePct），用户再也回不到原来的位置。
 pub fn resume_position(
     user_data: &UserData,
     duration: Option<Duration>,
     prefs: &UserPreferences,
 ) -> Duration {
-    if user_data.played {
-        return Duration::ZERO;
-    }
     let resume = user_data.resume_position;
-    if resume < prefs.resume_min_position {
+    if resume.is_zero() || resume < prefs.resume_min_position {
         return Duration::ZERO;
     }
     if let Some(total) = duration {
@@ -48,8 +49,10 @@ pub fn resume_position_for_item(item: &MediaItem, prefs: &UserPreferences) -> Du
 /// 播放按钮文案：`"播放"` / `"从 12:34 继续"`。
 ///
 /// 调用方应传入已经过 [`resume_position`] 处理的位置，这样"从头播"和"已看完"天然落到"播放"。
-pub fn resume_label(played: bool, position: Duration) -> String {
-    if played || position.is_zero() {
+/// **不要再自己拿 `played` 或原始 `resume_position` 判文案**：那正是"按钮写着从 45:47
+/// 继续、实际却从 0 起播"的来源。
+pub fn resume_label(position: Duration) -> String {
+    if position.is_zero() {
         return "播放".to_owned();
     }
     format!("从 {} 继续", format_position(position))
@@ -83,13 +86,35 @@ mod tests {
         }
     }
 
+    /// 体检 R7-D2：`played` 不再一票否决。
+    ///
+    /// 6489 在服务端是 `Played = true` 且带 resume（45:47）。以前这里返回 0，从 0 起播
+    /// 后进度到不了 Emby 的 MinResumePct，服务端把续播点清零——再也回不到原位置。
     #[test]
-    fn played_item_starts_over() {
+    fn played_with_mid_resume_resumes() {
+        let resume = Duration::from_secs(2747);
+        let total = Duration::from_secs(5483);
         assert_eq!(
-            resume_position(&user(true, 3000), Some(Duration::from_secs(7200)), &prefs()),
+            resume_position(&user(true, 2747), Some(total), &prefs()),
+            resume
+        );
+        assert_eq!(resume_label(resume), "从 45:47 继续");
+    }
+
+    /// `played` 且续播点已经贴近片尾（或根本没有续播点）：仍然从头播。
+    #[test]
+    fn played_at_end_starts_over() {
+        let prefs = prefs();
+        // 剩 50s < finished_threshold(90s)：看完的片子不能一进去就跳片尾。
+        assert_eq!(
+            resume_position(&user(true, 4833), Some(Duration::from_secs(4883)), &prefs),
             Duration::ZERO
         );
-        assert_eq!(resume_label(true, Duration::from_secs(3000)), "播放");
+        // 没有续播点。
+        assert_eq!(
+            resume_position(&user(true, 0), Some(Duration::from_secs(7200)), &prefs),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -143,16 +168,9 @@ mod tests {
 
     #[test]
     fn label_variants() {
-        assert_eq!(resume_label(false, Duration::ZERO), "播放");
-        assert_eq!(
-            resume_label(false, Duration::from_secs(754)),
-            "从 12:34 继续"
-        );
-        assert_eq!(
-            resume_label(false, Duration::from_secs(3723)),
-            "从 1:02:03 继续"
-        );
-        assert_eq!(resume_label(true, Duration::ZERO), "播放");
+        assert_eq!(resume_label(Duration::ZERO), "播放");
+        assert_eq!(resume_label(Duration::from_secs(754)), "从 12:34 继续");
+        assert_eq!(resume_label(Duration::from_secs(3723)), "从 1:02:03 继续");
     }
 
     #[test]
