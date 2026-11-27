@@ -2119,7 +2119,8 @@ fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -
         return handle_chrome_key(ui, state, page, layer, command);
     }
     match command {
-        // 播放页没有焦点环：Enter / Space 交给"播放/暂停"，不重新起播。
+        // 播放页没有焦点环：`Enter` / `Space` 交给“播放/暂停”；播完后同两个键 =
+        // 从头重播（见 [`player_play_pause`]）。
         KeyCommand::Accept if page == Page::Player => {
             player_play_pause(ui, state);
             true
@@ -2897,6 +2898,18 @@ fn player_note_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 }
 
 fn player_play_pause(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // 播完（`SessionState::Ended`）后：控制层播放键 / `Enter` / `Space` 都是“从头
+    // 重播”（与 Netflix 一致）。以前这里无条件原地 toggle：界面的 `playing` 翻了、
+    // 宿主的会话仍停在 `Ended`，引擎一个命令都收不到（体检 R8-B1 / R8-B2）。
+    //
+    // 重播走起播路径（`play_current` → `play`）：路由、会话代号、进度与界面复位
+    // 都由它收尾，不需要第二套逻辑。
+    if player_finished(&state.borrow().player) {
+        // 与普通 toggle 一样算一次用户输入（控制层重新计时），再走起播路径。
+        player_note_input(ui, state);
+        play_current(ui, state);
+        return;
+    }
     let (playing, handler) = {
         let mut state = state.borrow_mut();
         state.player.playing = !state.player.playing;

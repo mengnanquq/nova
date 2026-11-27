@@ -475,6 +475,12 @@ impl Worker {
         ) {
             self.refresh_buffering();
         }
+        // 从片尾 seek 回来：`eof-reached` 变 false 说明这个文件又能继续播了。
+        // 不清 `ended_reported` 的话，第二次自然播完不会再报 `Ended`（体检 R8-B3：
+        // 播完拖回去接着看，到片尾界面会永远停在“播放中”）。
+        if matches!(observed, ObservedProperty::Eof(false)) {
+            self.ended_reported = false;
+        }
         // `time-pos` 只在本次文件 **file-loaded 之后**才算数。
         //
         // `loadfile replace` 从下发到新文件真正加载完成之间（WAN 上实测能到几秒），

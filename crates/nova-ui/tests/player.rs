@@ -809,6 +809,87 @@ fn ended_playback_restarts_the_same_item() {
     );
 }
 
+/// 体检 R8-B1：播完后点控制层的播放键 = 从头重播。
+///
+/// 以前这里只是把界面的 `playing` 翻一下：宿主的会话仍停在 `Ended`（`Session::play`
+/// 返回 `false`），引擎一个命令都收不到——真机上就是“点了没反应”。
+#[test]
+fn ended_playback_play_button_restarts_instead_of_toggling() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    {
+        let sink = played.clone();
+        app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+    }
+    let toggles = Rc::new(RefCell::new(Vec::new()));
+    {
+        let sink = toggles.clone();
+        app.on_player_play_pause(move |playing| sink.borrow_mut().push(playing));
+    }
+
+    app.set_player(&player_view().with_ended(true).with_playing(false));
+    app.ui().invoke_player_play_pause();
+
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["dune"],
+        "播放键必须重新起播（不能停在片尾）"
+    );
+    assert!(
+        toggles.borrow().is_empty(),
+        "不能只翻界面的 playing：{:?}",
+        toggles.borrow()
+    );
+}
+
+/// 体检 R8-B2：播完后按 `Enter`（播放页）同样是从头重播。
+///
+/// `Enter` 在播放页映射到 `player-play-pause`（`KeyCommand::Accept`），不走
+/// `play()`，以前它在 `Ended` 下也一点反应没有。
+#[test]
+fn ended_playback_enter_restarts_instead_of_toggling() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    app.set_player(&player_view().with_ended(true).with_playing(false));
+    assert!(app.player_view().ended, "用例前提：视图已标记播完");
+
+    press(&app, Key::Return);
+
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["dune"],
+        "播完后 Enter 必须重新起播"
+    );
+}
+
+/// 体检 R8-B3：播完后拖进度条仍然是 seek（`Ended` 不是错误态，不能禁用拖动）。
+///
+/// 界面这一层的乐观更新以前就在，失败的是宿主：`Session::seek` 在 `Ended` 返回
+/// `false`，引擎收不到 seek，下一拍推送又把它弹回片尾。这里钉住界面的那一半。
+#[test]
+fn scrubbing_while_ended_still_seeks_to_the_target() {
+    let app = player_app();
+    let seeks = record_seeks(&app);
+    let mut finished = player_view().with_ended(true).with_playing(false);
+    finished.position = finished.duration.unwrap_or_default();
+    app.set_player(&finished);
+
+    app.player_scrub_start();
+    app.player_scrub_move(0.5);
+    assert!(seeks.borrow().is_empty(), "拖动期间不许发 seek");
+    app.player_scrub_commit(0.5);
+
+    assert_eq!(
+        seeks.borrow().as_slice(),
+        &[Duration::from_secs(4140)],
+        "播完拖动也要 seek 到 50% 处"
+    );
+    assert_eq!(app.player_view().position, Duration::from_secs(4140));
+}
+
 /// 起播失败停在错误卡上时再按 Enter：必须重新起播（错误卡上的「重试」同理）。
 #[test]
 fn error_state_playback_replays_the_same_item() {

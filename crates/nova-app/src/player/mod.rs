@@ -426,6 +426,8 @@ impl Host {
     }
 
     fn play(&mut self, runtime: &Handle) {
+        #[cfg(test)]
+        self.trace_push("play".to_owned());
         if let Some(engine) = self.engine.as_mut()
             && let Err(error) = runtime.block_on(engine.play())
         {
@@ -444,6 +446,8 @@ impl Host {
     }
 
     fn seek(&mut self, runtime: &Handle, position: Duration) {
+        #[cfg(test)]
+        self.trace_push(format!("seek:{}", position.as_secs()));
         if let Some(engine) = self.engine.as_mut()
             && let Err(error) = runtime.block_on(engine.seek(position))
         {
@@ -807,6 +811,17 @@ impl Player {
         prefs: Option<UserPreferences>,
         post: &Post,
     ) {
+        // 播完之后再播**同一个条目** = 重播：用户的明确操作，必须从 0 开始。
+        //
+        // 不能沿用续播点：播完的条目在服务端/本地缓存里的续播点常常还贴在片尾
+        // （体检 R8-B1/B2 的真机现象就是“按了播放键，画面还是最后一帧”），续上去
+        // 等于什么也没发生。会话代号照常递增：同一部片重播也是**新会话**。
+        let replay = self.session.state() == SessionState::Ended
+            && self
+                .target
+                .as_ref()
+                .or(self.pending.as_ref())
+                .is_some_and(|target| target.item_id.as_str() == item_id);
         // 换片：先把旧会话收尾。只 `session.reset()`（旧实现）会让旧片子的最后一段进度
         // 永远上不了报：Exit 提交、`stop`、补发都不发生，服务端的续播点停在上一次
         // 定时上报的位置，服务端也一直不知道这次会话已经结束。
@@ -916,7 +931,13 @@ impl Player {
                 }
             },
         };
-        let resume_at = resume_position_for_item(&item, &prefs);
+        let resume_at = if replay {
+            // 重播不读续播点：起播位置由 `Session::begin` / `OpenRequest` 的
+            // 0 决定，服务端那边也会因为新会话的第一个 `Started` 重新开始。
+            Duration::ZERO
+        } else {
+            resume_position_for_item(&item, &prefs)
+        };
         let duration = source.runtime.or(item.runtime);
         self.tracks = TrackSet::from_source(&source);
         let plan = self.selector.reapply(&self.tracks, &prefs);
@@ -1260,6 +1281,15 @@ impl Player {
 
     /// 播放 / 暂停（`playing` 是用户想要的最终状态）。
     pub(crate) fn set_playing(&mut self, playing: bool) {
+        // 播完（`Ended`）再按播放：重播，而且是新会话 + 从 0 开始。
+        //
+        // 界面在播完后本来就会走起播路径（`player_finished` → `play_current`），
+        // 这里兼作防御：界面视图晚一拍（节流推送）时，`set_playing(true)` 也不能
+        // 落到“引擎停在 EOF、只收到一个 play”的死局。
+        if playing && self.session.state() == SessionState::Ended {
+            self.replay();
+            return;
+        }
         let runtime = self.runtime.clone();
         if playing {
             if self.session.play() {
@@ -1276,9 +1306,16 @@ impl Player {
 
     /// seek（只有进度条松手才会到这里）。
     pub(crate) fn seek(&mut self, position: Duration) {
+        // 播完后的拖动：会话会从 `Ended` 转回 `Playing`（体检 R8-B3）。
+        let resumed_from_end = self.session.state() == SessionState::Ended;
         if self.session.seek(position) {
             let runtime = self.runtime.clone();
             self.host.borrow_mut().seek(&runtime, position);
+            if resumed_from_end {
+                // 引擎还停在 EOF（`keep-open` 在那里暂停），不补一次 play 的话
+                // 进度条动了、画面仍是最后一帧。
+                self.host.borrow_mut().play(&runtime);
+            }
             self.report(ProgressTrigger::Seek);
         }
         self.dirty = true;
@@ -1443,6 +1480,24 @@ impl Player {
             .borrow_mut()
             .enqueue_open(request.with_resume_at(position));
         self.dirty = true;
+    }
+
+    /// 播完之后从头重播（同一部片，新会话）。
+    ///
+    /// 走 [`Player::begin`]：会话代号递增、旧会话交出 `Exit`（服务端收到 `stop` 与
+    /// “已看完”）、重新取一次直链，并且由 `begin` 把起播位置钉在 0。不是“慢不慢”
+    /// 的问题——同一部片重播就是**新会话**，`session_seq` / 上报队列 / `Started`
+    /// 全按这条规则写的（见 `Player::session_seq` 的注释）。
+    ///
+    /// 不靠 `Session::play`：状态机能表达“回到开头继续”，但引擎还停在 EOF
+    /// （mpv `keep-open`），只发 `play` 不会重新出画。
+    fn replay(&mut self) {
+        let post = self.post.clone();
+        let target = self.target.clone().or_else(|| self.pending.clone());
+        if let (Some(post), Some(target)) = (post, target) {
+            let source = Some(target.source_id.as_str().to_owned());
+            self.begin(target.item_id.as_str(), source, None, &post);
+        }
     }
 
     /// 退出播放页：先提交一次进度并尽力补发，再停掉引擎与计时器。
@@ -2988,6 +3043,97 @@ mod tests {
                 Some("sess-new".to_owned()),
             ],
             "每条进度都带自己会话的标识：详情刷新（sess-detail）不能污染任何一条"
+        );
+    }
+
+    /// 体检 R8-B1 / R8-B2：播完（`Ended`）后按播放键 / `Enter` → 重播，且从 0 开始。
+    ///
+    /// 以前 `Session::play` 在 `Ended` 返回 `false`，界面 toggle 完引擎一个命令都收不到；
+    /// 就算走 `begin` 重开，也会沿用“播完条目仍保留的续播点”，画面直接停在片尾。
+    #[test]
+    fn returning_to_playback_after_end_starts_a_new_session_from_zero() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        let first = wait_for_open(&posted).expect("首次起播请求");
+        assert_eq!(
+            first.resume_at,
+            Duration::from_secs(2747),
+            "用例前提：首次起播续在 45:47"
+        );
+        player.target = player.pending.take();
+        let first_seq = player.session_seq;
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.handle(EngineEvent::Ended);
+        assert_eq!(player.session.state(), SessionState::Ended);
+        assert_eq!(player.session.position(), Duration::from_secs(5483));
+
+        // 控制层的播放键 / Enter 最终都是“想要播放”这一个动作。
+        player.set_playing(true);
+
+        let replay = wait_for_open(&posted).expect("重播请求");
+        assert_eq!(
+            replay.resume_at,
+            Duration::ZERO,
+            "播完重播必须从 0 开始（不能续在片尾）"
+        );
+        assert_eq!(player.session.state(), SessionState::Opening);
+        assert_eq!(player.session.position(), Duration::ZERO);
+        assert!(
+            player.session_seq > first_seq,
+            "播完重播是新会话（代号递增，{} 应大于 {first_seq}）",
+            player.session_seq
+        );
+    }
+
+    /// 体检 R8-B3：播完后拖进度条 → 会话落到目标位置、回到 `Playing`，
+    /// 引擎收到 `seek` + `play`，并按规则上报 `Seek`。
+    #[test]
+    fn seeking_after_end_resumes_playing_and_reports_seek() {
+        let (_dir, local, mut player, runtime, _posted) = resume_fixture(true);
+        let recorder = Arc::new(RecordingSink::default());
+        player.progress = sink::Progress::for_test(
+            &local,
+            runtime.handle(),
+            Arc::clone(&recorder) as Arc<dyn ProgressSink>,
+        );
+        let post: Post = Arc::new(|_| {});
+        player.begin("item-1", None, None, &post);
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.handle(EngineEvent::Ended);
+        assert_eq!(player.session.state(), SessionState::Ended);
+
+        player.seek(Duration::from_secs(2741));
+
+        assert_eq!(
+            player.session.position(),
+            Duration::from_secs(2741),
+            "拖到哪就落在哪"
+        );
+        assert_eq!(
+            player.session.state(),
+            SessionState::Playing,
+            "片尾拖动 = 从新位置继续看（与 Netflix 一致）"
+        );
+        let trace = Arc::clone(&player.host.borrow().trace);
+        assert!(
+            traced_text(&trace).iter().any(|entry| entry == "seek:2741"),
+            "引擎必须收到 seek：{:?}",
+            traced_text(&trace)
+        );
+        assert!(
+            traced_text(&trace).iter().any(|entry| entry == "play"),
+            "EOF 上还要补一次 play（否则画面停在最后一帧）：{:?}",
+            traced_text(&trace)
+        );
+        assert!(
+            wait_until(|| recorder
+                .reports()
+                .contains(&("item-1".to_owned(), Duration::from_secs(2741)))),
+            "seek 必须上报（否则服务端续播点停在片尾）: {:?}",
+            recorder.reports()
         );
     }
 

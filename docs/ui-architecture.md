@@ -206,7 +206,7 @@ export struct Target {
 | `←` `→` | 行内移动焦点（首页是横向行，媒体库是网格）；在 hero 层是播放 / 更多信息；在顶栏是标签 ↔ 搜索按钮 |
 | `↑` | 行/网格之间上移；**内容第一行**再往上：首页先进 hero 按钮行（hero 有简介时），再进顶栏；媒体库首行直接进顶栏；搜索页的结果网格**首行**先进页内搜索框，输入框里再按一次才进顶栏 |
 | `↓` | 行/网格之间下移；顶栏 → 首页先回 hero、其余页回内容层；hero → 内容层 |
-| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情 |
+| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情；播放页上是播放 / 暂停，**播完后是从头重播**（见「起播与页面导航」） |
 | `Esc` / `Backspace` | 在 chrome 层（顶栏 / hero）**只回内容层**，不返回上一页；在内容层返回上一级（栈空时无动作） |
 | `Ctrl+F` | 聚焦搜索框（首页/媒体库是顶栏胶囊，搜索页是页内大搜索框） |
 | 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
@@ -335,9 +335,17 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 
 - 起播条目由**路由**决定：`Route::Player { item_id }` 指向哪个条目就播哪个。
 - 在播放页**换片**会把当前路由栈顶替换为新片的 `Player`，返回时回到**新片**的详情页。
-- 正常播放时按 `Enter` **不会**重开；只有 `player_finished(&view)`（= `PlayerView::ended && !view.playing`）
-  或出错（`Failed`）后才允许重播。`ended` 由 `SessionState::Ended` 直传，不靠"位置 ≥ 时长"猜：
-  时长未知时位置永远推不到头，续播点贴片尾时位置又会一开始就 ≥ 时长。
+- 播放页的 `Enter` / `Space` / 控制层播放键都是**播放 / 暂停**。播完（`SessionState::Ended`，
+  界面侧判定 `player_finished(&view)` = `PlayerView::ended && !view.playing`）之后，同一个键
+  就是**从头重播**：走起播路径（`play_current` → `play` → `nova-app` 的 `Player::begin`），
+  会话代号递增（同一部片重播也是**新会话**，见 `PlaybackProgress::session_seq`）、旧会话
+  交出 `Exit`（服务端收到 `stop` 与「已看完」），起播位置钉在 **0**——不沿用服务端 / 缓存里
+  那份常常还贴在片尾的续播点（体检 R8-B1 / R8-B2 真机上就是「按了播放键，画面还是最后一帧」）。
+  重播期间照旧受 `Session::reportable_position` 保护：首帧之前一条进度都不发，所以起播 / 缓冲
+  不会产生 `Progress@0` 把续播点清掉。
+- 正常播放时按 `Enter` **不会**重开；只有播完或出错（`Failed`）后才允许重播。`ended` 由
+  `SessionState::Ended` 直传，不靠「位置 ≥ 时长」猜：时长未知时位置永远推不到头，续播点
+  贴片尾时位置又会一开始就 ≥ 时长。
 - 续播判定在 `nova_playback::resume::resume_position`（纯函数）：续播点为空、或
   `resume_position < resume_min_position`（太靠前）、或剩余时长不大于 `finished_threshold`
   （已看完）时从头播，否则从续播点起播。**`played` 不参与判定**：
@@ -345,12 +353,15 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
   按钮文案同样读它的结果（`resume_label`：`"播放"` / `"从 12:34 继续"`）。
 - 音量与静音在**本次运行内**跨会话保留（退出播放页只复位标题/进度/时长/轨道/倍速）。
 
-**已知限制（待修）**：
+**播完之后（`Ended`）**：位置固定为时长、界面显示「已看完」，三个入口的行为与 Netflix 一致：
 
-1. 播完后**拖动进度条无效**：`SessionState::seek` 只在 `Playing` / `Paused` / `Buffering` 接受，
-   `Ended` 下直接返回 `false`，界面也不做乐观更新；
-2. 控制层的**播放键在 `Ended` 状态下没有反应**：`SessionState::play` 只接受 `Paused` / `Buffering`，
-   想重播得按 `Enter`（走上面的 `player_finished` 路径重开）或返回详情页。
+1. 控制层播放键 / `Enter` / `Space` = 从头重播（新会话、位置 0，见上）；
+2. 拖动进度条、`←` / `→`（含 `Shift` 的 ±60s）= 跳到目标位置并**继续播放**：
+   `Session::seek` 在 `Ended` 下也生效（位置立刻生效、状态转回 `Playing`），并按
+   `ProgressTrigger::Seek` 上报一次进度。引擎这时还停在 EOF（mpv `keep-open`），
+   所以宿主在 seek 之后要补一次 `play`，否则进度条动了、画面仍是最后一帧；
+3. 同样的 session 继续播到片尾时仍然会再报一次 `Ended`（mpv `eof-reached` 回到 false
+   会清掉「已报过」标记），不会卡在「播放中」。
 
 ## 控制层
 
@@ -392,7 +403,7 @@ hero 上那种深色圆钮（`rgba(22,22,22,.7)` + 描边）**不用于播放器
 
 | 键 | 行为 |
 |---|---|
-| `Space` / `K` | 播放 / 暂停 |
+| `Space` / `K` | 播放 / 暂停（播完后是**从头重播**，`Enter` 同义） |
 | `←` / `→` | -15s / +15s（与 Infuse 一致） |
 | `Shift+←` / `Shift+→` | -60s / +60s |
 | `↑` / `↓` | 音量 ±5%（控制层**隐藏时**第一下只唤醒、不改音量：这两个键同时是唤醒键） |

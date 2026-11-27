@@ -153,7 +153,7 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 | `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签（本体）在标签区视口里的左右沿与标签区滚动量。窄窗口下“焦点标签完整可见”要连焦点环一起算：`left - focus-offset ≥ 0 && right + focus-offset ≤ viewport_w`，`focus-offset` / `focus-width` 从 `Theme` 取（当前 4px / 2px），**不在探针里重复上报**。左右沿是**即时**值（内容坐标 + 当前 `content-x`），不受“按下方向键那一刻已经滚到哪儿”影响；标签行左右各留 `Theme.focus-offset` 内边距并算进 `content-width`，所以 800px 下滚到底时 `focus_tab_right == tabs_viewport_w - focus-offset`（环外沿贴住视口右沿） |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |
 | `dialog.open` / `address` / `user` / `password_len` / `error` | 「添加服务器」对话框的字段与错误文案；**密码只报字符长度**，不回显明文 |
-| `player.playing` / `player.buffering` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。注意 `view.player` **没有** `ended` 字段（播完判定在界面侧是 `PlayerView::ended && !playing`）：要确认“是不是真的播完了”看 `playing: false` + `position_ms` 到底 + `error: null`，或看日志 |
+| `player.playing` / `player.buffering` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。注意 `view.player` **没有** `ended` 字段（播完判定在界面侧是 `PlayerView::ended && !playing`）：要确认“是不是真的播完了”看 `playing: false` + `position_ms` 到底 + `error: null`，或看日志。播完后 `Enter` / 播放键 / 拖动进度条都已生效：重播会把 `position_ms` 拉回 0（新会话），拖动会落到目标位置并回到 `playing: true` |
 | `player.audio_track` / `player.subtitle_track` | 当前选中的音轨 / 字幕轨：`{"index": <mpv aid/sid>, "label": "…"}`；`null` = 字幕「关闭」或引擎还没枚举到轨道 |
 
 密码只给长度的原因：回包会进脚本与日志，回显明文等于把凭据写出去。验证“输入框里有东西”

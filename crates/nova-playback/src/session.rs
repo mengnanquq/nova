@@ -23,6 +23,14 @@
 //!
 //! 缓冲期间不推进本地位置：缓冲中引擎给出的位置不写回，用户拖动 seek 例外（那是明确意图）。
 //!
+//! # 播完之后
+//!
+//! `Ended` 是「停在同一位置的暂停态」：位置固定为时长，但用户的操作仍然是明确的意图
+//! —— [`Session::play`] / [`Session::toggle_pause`] 从头重播（位置回到 0），
+//! [`Session::seek`] 跳到目标位置并回到 `Playing`（片尾拖动 = 从新位置继续播）。
+//! 引擎侧这时仍停在 EOF（mpv `keep-open`），所以只发 `play` 不会重新出画：
+//! 重播的调用方要么重开文件（`Player::begin(0, ..)`），要么先 seek 到 0 再 play。
+//!
 //! # 位置只属于"本次打开"
 //!
 //! `mpv` 在一个实例里复用（`loadfile replace`），切换文件的那一段时间里进程里还挂着
@@ -251,6 +259,10 @@ impl Session {
     }
 
     /// 用户请求播放。返回 `true` 表示需要在引擎上执行 `play`。
+    ///
+    /// `Ended` 下等于从头重播：位置回到 0、状态回到 `Playing`（体检 R8-B1：以前返回
+    /// `None`/`false`，播完后按播放键完全没反应）。引擎仍停在 EOF，调用方必须重开
+    /// 文件或同时 seek 到 0，只发 `play` 是原地不动。
     pub fn play(&mut self) -> bool {
         match self.state {
             SessionState::Paused => {
@@ -262,9 +274,20 @@ impl Session {
                 self.buffering_returns_to = SessionState::Playing;
                 true
             }
+            SessionState::Ended => {
+                self.restart_from_start();
+                true
+            }
             SessionState::Playing => false,
             _ => false,
         }
+    }
+
+    /// 从片尾回到开头继续：位置清 0，状态回到 `Playing`。
+    fn restart_from_start(&mut self) {
+        self.position = Duration::ZERO;
+        self.state = SessionState::Playing;
+        self.touch();
     }
 
     /// 用户请求暂停。返回 `true` 表示需要在引擎上执行 `pause`。
@@ -297,6 +320,12 @@ impl Session {
                 };
                 Some(!pause)
             }
+            // 播完再按一下 = 从头重播（与播放器 / 遥控器的播放键同义），不是
+            // "暂停在片尾"。
+            SessionState::Ended => {
+                self.restart_from_start();
+                Some(true)
+            }
             _ => None,
         }
     }
@@ -304,14 +333,25 @@ impl Session {
     /// 用户请求 seek。位置立即生效（乐观），返回 `true` 表示需要引擎 seek。
     ///
     /// 缓冲期间的 seek 也必须生效：用户明确要求跳转，不是"本地推进"。
+    ///
+    /// `Ended` 同样接受（体检 R8-B3：以前返回 `false`，播完后拖进度条没反应）：跳到
+    /// 目标位置并把状态转回 `Playing`——片尾拖动就是"从新位置接着看"，与 Netflix 一致。
+    /// 引擎这时候还停在 EOF，调用方要补一次 `play`。
     pub fn seek(&mut self, position: Duration) -> bool {
         if !matches!(
             self.state,
-            SessionState::Playing | SessionState::Paused | SessionState::Buffering
+            SessionState::Playing
+                | SessionState::Paused
+                | SessionState::Buffering
+                | SessionState::Ended
         ) {
             return false;
         }
+        let resumed_from_end = self.state == SessionState::Ended;
         self.position = clamp_position(position, self.duration);
+        if resumed_from_end {
+            self.state = SessionState::Playing;
+        }
         self.touch();
         true
     }
@@ -682,6 +722,53 @@ mod tests {
         session.handle(EngineEvent::PositionChanged(Duration::from_secs(7100)));
         assert_eq!(session.position(), Duration::from_secs(7200));
         assert_eq!(session.state(), SessionState::Ended);
+    }
+
+    /// 体检 R8-B1：播完后按播放（`play`）必须从头重播，不能“返回 false 什么都不发生”。
+    #[test]
+    fn play_after_end_restarts_from_the_beginning() {
+        let (mut session, _clock) = playing(600);
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(120)));
+        session.handle(EngineEvent::Ended);
+        assert_eq!(session.state(), SessionState::Ended);
+        assert_eq!(session.position(), Duration::from_secs(600));
+
+        assert!(session.play(), "Ended 下的 play 必须要求引擎动作");
+        assert_eq!(session.state(), SessionState::Playing);
+        assert_eq!(session.position(), Duration::ZERO);
+        // 回到开头之后位置继续接受引擎读数（不是卡在 0）。
+        session.handle(EngineEvent::PositionChanged(Duration::from_secs(3)));
+        assert_eq!(session.position(), Duration::from_secs(3));
+    }
+
+    /// 体检 R8-B1：播放 / 暂停键（`toggle_pause`）在 `Ended` 下同样是重播。
+    #[test]
+    fn toggle_after_end_restarts_from_the_beginning() {
+        let (mut session, _clock) = playing(600);
+        session.handle(EngineEvent::Ended);
+
+        assert_eq!(
+            session.toggle_pause(),
+            Some(true),
+            "播完按一下是从头重播，不是“暂停在片尾”"
+        );
+        assert_eq!(session.state(), SessionState::Playing);
+        assert_eq!(session.position(), Duration::ZERO);
+    }
+
+    /// 体检 R8-B3：播完后拖进度条要落到目标位置并回到 `Playing`。
+    #[test]
+    fn seek_after_end_resumes_playing_at_the_target() {
+        let (mut session, _clock) = playing(600);
+        session.handle(EngineEvent::Ended);
+
+        assert!(session.seek(Duration::from_secs(300)), "Ended 也接受 seek");
+        assert_eq!(session.position(), Duration::from_secs(300));
+        assert_eq!(session.state(), SessionState::Playing);
+
+        // 拖过片尾仍然 clamp 到时长，但状态保持 Playing（真正到片尾由引擎再报 Ended）。
+        assert!(session.seek(Duration::from_secs(900)));
+        assert_eq!(session.position(), Duration::from_secs(600));
     }
 
     #[test]
