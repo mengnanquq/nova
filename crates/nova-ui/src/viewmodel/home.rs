@@ -4,7 +4,6 @@
 //! 首页视图模型。
 
 use crate::viewmodel::card::CardView;
-use crate::viewmodel::focus::chunked_rows;
 use crate::viewmodel::image::{ImageKey, ImageKind};
 use crate::viewmodel::library::LibraryTab;
 
@@ -98,30 +97,100 @@ impl HomeView {
         cards[start..end].iter().map(CardView::poster_key).collect()
     }
 
-    /// 焦点行：继续观看是一行，最近添加按列数切行。
+    /// 焦点行：**每个视觉行一行**。
     ///
-    /// 继续观看为空时索引直接落在最近添加的第一行。
-    pub fn focus_rows(&self, columns: usize) -> Vec<usize> {
+    /// 继续观看 / 最近添加 / 各库行在界面上都是横向 Flickable（`home.slint` 的
+    /// `CardRow`），不是网格——所以「最近添加」那 200 张不能按列数切块：切块会让
+    /// `↓` / `↑` 在同一行里横跳（体检 R7-2：每次步进 6 张），而库行根本进不去
+    /// （行数只有 2，`↓` 到底就停）。
+    ///
+    /// **长度为 0 的行一律跳过**：`move_up` 用 `rows.first()` 判断“是否在第一行”，
+    /// 留住一个空行会让它永远判为第一行，`↑` 变成原地 no-op（库里第一行是空库时
+    /// 就回不到 hero / 顶栏）。
+    pub fn focus_rows(&self) -> Vec<usize> {
         let mut rows = Vec::new();
         if !self.continue_watching.is_empty() {
             rows.push(self.continue_watching.len());
         }
-        rows.extend(chunked_rows(self.recently_added.len(), columns));
+        if !self.recently_added.is_empty() {
+            rows.push(self.recently_added.len());
+        }
+        rows.extend(
+            self.library_rows
+                .iter()
+                .map(|row| row.items.len())
+                .filter(|len| *len > 0),
+        );
         rows
+    }
+
+    /// 扁平焦点索引所在的可视行：`0` = 继续观看、`1` = 最近添加、`2 + n` = 库行。
+    ///
+    /// 这个编号是**界面行号**（与 `.slint` 的 `keyboard-scroll-row` /
+    /// `library-row-starts` 同一套），和 [`Self::focus_rows`] 的下标不同：后者会
+    /// 跳过空行。首页滚动要按可视行算行上沿，所以不能复用过滤后的下标。
+    pub fn focus_row_at(&self, index: usize) -> Option<usize> {
+        if index < self.continue_watching.len() {
+            return Some(0);
+        }
+        let index = index - self.continue_watching.len();
+        if index < self.recently_added.len() {
+            return Some(1);
+        }
+        let mut index = index - self.recently_added.len();
+        for (row, library_row) in self.library_rows.iter().enumerate() {
+            if index < library_row.items.len() {
+                return Some(2 + row);
+            }
+            index -= library_row.items.len();
+        }
+        None
+    }
+
+    /// 各库行在扁平焦点索引里的起点（与 `library_rows` 一一对应，空行也保留）。
+    ///
+    /// `.slint` 侧要靠它把「页面级扁平焦点」换算成「某一行里的局部下标」：
+    /// 库行是 `for` 重复元素，页面没法按行号去问某一行。
+    pub fn library_row_starts(&self) -> Vec<usize> {
+        let mut start = self.continue_watching.len() + self.recently_added.len();
+        self.library_rows
+            .iter()
+            .map(|row| {
+                let at = start;
+                start += row.items.len();
+                at
+            })
+            .collect()
     }
 
     /// 可聚焦条目总数。
     pub fn card_count(&self) -> usize {
-        self.continue_watching.len() + self.recently_added.len()
+        self.continue_watching.len()
+            + self.recently_added.len()
+            + self
+                .library_rows
+                .iter()
+                .map(|row| row.items.len())
+                .sum::<usize>()
     }
 
-    /// 按扁平焦点索引取卡片。
+    /// 按扁平焦点索引取卡片（继续观看 → 最近添加 → 各库行）。
     pub fn card_at(&self, index: usize) -> Option<&CardView> {
         if index < self.continue_watching.len() {
             return self.continue_watching.get(index);
         }
-        self.recently_added
-            .get(index - self.continue_watching.len())
+        let index = index - self.continue_watching.len();
+        if index < self.recently_added.len() {
+            return self.recently_added.get(index);
+        }
+        let mut index = index - self.recently_added.len();
+        for row in &self.library_rows {
+            match row.items.get(index) {
+                Some(card) => return Some(card),
+                None => index -= row.items.len(),
+            }
+        }
+        None
     }
 }
 
@@ -134,9 +203,10 @@ mod tests {
         let home = HomeView::new();
         assert!(home.hero.is_none());
         assert!(home.is_empty());
-        assert!(home.focus_rows(6).is_empty());
+        assert!(home.focus_rows().is_empty());
         assert_eq!(home.card_count(), 0);
         assert_eq!(home.card_at(0), None);
+        assert!(home.library_row_starts().is_empty());
     }
 
     #[test]
@@ -146,12 +216,79 @@ mod tests {
         home.recently_added = (0..8)
             .map(|index| CardView::new(index.to_string(), "X"))
             .collect();
-        assert_eq!(home.focus_rows(6), vec![2, 6, 2]);
+        // 最近添加是一整行（不是 6 列块），所以焦点行只有一个 8。
+        assert_eq!(home.focus_rows(), vec![2, 8]);
         assert_eq!(home.card_at(0).map(|card| card.item_id.as_str()), Some("a"));
         assert_eq!(home.card_at(2).map(|card| card.item_id.as_str()), Some("0"));
         assert_eq!(home.card_at(9).map(|card| card.item_id.as_str()), Some("7"));
         assert_eq!(home.card_at(10), None);
         assert!(!home.is_empty());
+    }
+
+    /// 体检 R7-2：库行也是焦点行——`↓` 要到得了，`Enter` 要能打开。
+    #[test]
+    fn library_rows_are_focus_rows() {
+        let mut home = HomeView::new();
+        home.continue_watching = vec![CardView::new("c0", "C0")];
+        home.recently_added = (0..3)
+            .map(|index| CardView::new(format!("r{index}"), "R"))
+            .collect();
+        home.library_rows = vec![
+            LibraryRowView {
+                library_id: "lib-a".to_owned(),
+                title: "A 库".to_owned(),
+                items: (0..4)
+                    .map(|index| CardView::new(format!("a{index}"), "A"))
+                    .collect(),
+            },
+            LibraryRowView {
+                library_id: "lib-b".to_owned(),
+                title: "B 库".to_owned(),
+                items: (0..2)
+                    .map(|index| CardView::new(format!("b{index}"), "B"))
+                    .collect(),
+            },
+        ];
+
+        assert_eq!(home.focus_rows(), vec![1, 3, 4, 2]);
+        // 扁平下标 = 1(继续观看) + 3(最近添加) + 行内偏移。
+        assert_eq!(home.library_row_starts(), vec![4, 8]);
+        assert_eq!(home.card_count(), 10);
+        assert_eq!(
+            home.card_at(4).map(|card| card.item_id.as_str()),
+            Some("a0")
+        );
+        assert_eq!(
+            home.card_at(9).map(|card| card.item_id.as_str()),
+            Some("b1")
+        );
+        assert_eq!(home.card_at(10), None);
+    }
+
+    /// 空行不能留在 `focus_rows` 里：`move_up` 用 `rows.first()` 判断第一行。
+    #[test]
+    fn focus_rows_skip_empty_rows() {
+        let mut home = HomeView::new();
+        home.library_rows = vec![
+            LibraryRowView {
+                library_id: "lib-empty".to_owned(),
+                title: "空库".to_owned(),
+                items: Vec::new(),
+            },
+            LibraryRowView {
+                library_id: "lib-a".to_owned(),
+                title: "A 库".to_owned(),
+                items: vec![CardView::new("a0", "A0")],
+            },
+        ];
+
+        // 继续观看 / 最近添加为空 + 第一行库行为空：焦点行只有 A 库的 1 张。
+        assert_eq!(home.focus_rows(), vec![1]);
+        // `.slint` 的行号仍按可视行（空行也占位）算。
+        assert_eq!(home.library_row_starts(), vec![0, 0]);
+        // 可视行号：空库行是第 2 行，A 库是第 3 行（空行照样占一行）。
+        assert_eq!(home.focus_row_at(0), Some(3));
+        assert_eq!(home.focus_row_at(1), None);
     }
 
     #[test]

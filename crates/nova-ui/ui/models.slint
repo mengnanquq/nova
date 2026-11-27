@@ -62,8 +62,8 @@ export struct HomeData {
     recently-added: [CardData],
     // 各媒体库前 20 条的行（16:9，标题 = 库名）。
     library-rows: [RowData],
-    // 非空库行数（内容高度计算用）。
-    library-row-count: int,
+    // 每一条库行在扁平焦点索引里的起点（与 `library-rows` 等长）。
+    library-row-starts: [int],
     tabs: [TabData],
     current-tab: int,
     empty: bool,

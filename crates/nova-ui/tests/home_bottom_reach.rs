@@ -1,0 +1,297 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Nova contributors
+
+//! 体检 R7-1：首页**最后一个库行**必须能滚进视口。
+//!
+//! 修复前的真机现象（1920×1080，滚动钳在 content-y = -3825.07）：第 9 个库行
+//! （日番）在视口 y=730，第 10 个库行（日韩电视剧）的表头只在视口底部露出 8px，
+//! 整行卡片永远看不到。
+//!
+//! 根因有两层，都在“内容总高”与“布局真实占位”不一致上：
+//!
+//! 1. `home_view` 把「首页」导航哨兵（`local::HOME_TAB_ID`）也建成了一条库行。
+//!    它下面没有条目 → 空行；而 `.slint` 的纵向布局**不会**剔除 `visible: false`
+//!    的行，它照样占一整行高度；内容总高却按“非空行数”算 → 少一整行，最后一行
+//!    被挤到 content-height 之外（滚到底也看不到）。
+//! 2. 同理，只有一条库行空着（缓存里还没有该库的条目）也能复现。
+//!
+//! 因此本文件对两种数据形状都断言：滚到最大深度后，最后一行**整行**（表头 + 卡片）
+//! 必须落在视口内。800×600 与 1920×1080 两档都跑。
+
+mod common;
+
+use std::time::Duration;
+
+use common::{home_filled, init_backend};
+use nova_ui::{App, AppWindow, CardView, HomeView, LibraryRowView, Page, TargetInfo, Theme};
+use slint::ComponentHandle;
+
+fn app_at(width: f32, height: f32) -> App {
+    init_backend();
+    let app = App::new_with(AppWindow::new().expect("创建窗口"));
+    app.ui().set_window_w(width);
+    app.ui().set_window_h(height);
+    app.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(width, height));
+    app
+}
+
+/// 真实数据的形状：继续观看 2 张 + 最近添加 200 张 + 10 个库行（每行 20 张）。
+fn home_like_real() -> HomeView {
+    let mut home = home_filled();
+    home.continue_watching.truncate(2);
+    home.recently_added = (0..200)
+        .map(|index| CardView::new(format!("r{index}"), format!("最近 {index}")))
+        .collect();
+    home.library_rows = library_rows(10);
+    home
+}
+
+fn library_rows(count: usize) -> Vec<LibraryRowView> {
+    (0..count)
+        .map(|row| LibraryRowView {
+            library_id: format!("lib-{row}"),
+            title: format!("库 {row}"),
+            items: (0..20)
+                .map(|index| {
+                    CardView::new(format!("l{row}-{index}"), format!("库 {row} 第 {index}"))
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// 插一条空库行（修复前 `home_view` 就是这么给「首页」哨兵建行的）。
+fn home_with_empty_row(at: usize) -> HomeView {
+    let mut home = home_like_real();
+    home.library_rows.insert(
+        at,
+        LibraryRowView {
+            library_id: "lib-empty".to_owned(),
+            title: "空库".to_owned(),
+            items: Vec::new(),
+        },
+    );
+    home
+}
+
+fn pump() {
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(300));
+}
+
+fn find_target(app: &App, id: &str) -> Option<TargetInfo> {
+    app.targets().into_iter().find(|target| target.id == id)
+}
+
+/// 滚到最大深度，返回 (content_h, viewport_h)。
+fn scroll_home_to_bottom(app: &App) -> (f64, f64) {
+    let content_h = f64::from(app.ui().get_home_content_h());
+    let view_h = f64::from(app.ui().get_home_viewport_h());
+    let max_scroll = (content_h - view_h).max(0.0);
+    app.ui().invoke_scroll_home_to(-max_scroll as f32);
+    pump();
+    app.refresh_targets();
+    (content_h, view_h)
+}
+
+fn assert_row_visible(app: &App, row: usize, view_h: f64, label: &str) {
+    let more = find_target(app, &format!("home.row.lib.{row}.more"))
+        .unwrap_or_else(|| panic!("{label}: 最后一行（lib.{row}）的「查看全部」不在视口内"));
+    assert!(
+        f64::from(more.y) >= -0.5 && f64::from(more.y + more.height) <= view_h + 0.5,
+        "{label}: 最后一行表头 y={} h={} 超出视口（高 {view_h}）",
+        more.y,
+        more.height
+    );
+
+    // 行内第 1 张卡（横向第一张；行内横向滚动由 R7-2 的跟随逻辑负责）。
+    let id = format!("home.row.lib.{row}.card.0");
+    let card =
+        find_target(app, &id).unwrap_or_else(|| panic!("{label}: 最后一行卡片 {id} 不在视口内"));
+    assert!(
+        f64::from(card.y) >= -0.5 && f64::from(card.y + card.height) <= view_h + 0.5,
+        "{label}: 卡片 {id} y={} h={} 超出视口（高 {view_h}）",
+        card.y,
+        card.height
+    );
+}
+
+fn setup(home: &HomeView, width: f32, height: f32) -> App {
+    let app = app_at(width, height);
+    app.set_home(home);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    pump();
+    app.refresh_targets();
+    app
+}
+
+/// 真实数据形状：滚到底后最后一行（第 10 个库行）整行可见。
+#[test]
+fn last_library_row_is_reachable_with_real_data_shape() {
+    for (width, height) in [(1920.0f32, 1080.0f32), (800.0, 600.0)] {
+        let app = setup(&home_like_real(), width, height);
+        let (content_h, view_h) = scroll_home_to_bottom(&app);
+        // 滚动钳位与内容总高是两份独立的 f32 算术，带容差比较（少算 / 多算都会
+        // 让差值远超容差）。
+        let max_scroll = content_h - view_h;
+        assert!(
+            (f64::from(app.ui().get_home_scroll_y()) + max_scroll).abs() <= 0.5,
+            "{width}x{height}: 应滚到最大深度 {max_scroll}，实际 {}",
+            app.ui().get_home_scroll_y()
+        );
+        assert_row_visible(&app, 9, view_h, &format!("{width}x{height} 真实形状"));
+    }
+}
+
+/// 一条空库行（修复前 `home_view` 给「首页」哨兵建的就是这种行）：同样要能滚到底。
+#[test]
+fn last_library_row_is_reachable_with_an_empty_row() {
+    for (width, height) in [(1920.0f32, 1080.0f32), (800.0, 600.0)] {
+        for at in [0usize, 4] {
+            let app = setup(&home_with_empty_row(at), width, height);
+            let (_, view_h) = scroll_home_to_bottom(&app);
+            // 最后一行是 lib.10（第 `at` 行是空行，界面上看不到但它占位）。
+            assert_row_visible(&app, 10, view_h, &format!("{width}x{height} 空行 at {at}"));
+        }
+    }
+}
+
+/// 媒体库网格与搜索页网格：焦点落到**最后一张**卡时，最后一行必须完整可见
+/// （同一份 `PosterGrid` 几何，R7-1 的第二问）。
+#[test]
+fn library_and_search_last_row_are_reachable() {
+    let app = app_at(800.0, 600.0);
+    let mut library = common::library_view();
+    library.cards = (0..60)
+        .map(|index| CardView::new(format!("l{index:02}"), format!("第 {index} 部")))
+        .collect();
+    app.set_library(&library);
+    app.open_library(&library);
+    let mut search = common::search_view();
+    search.cards = (0..60)
+        .map(|index| CardView::new(format!("s{index:02}"), format!("第 {index} 部")))
+        .collect();
+    search.total = 60;
+    app.set_search(&search);
+    app.show_page(Page::Library);
+    app.ui().show().expect("显示窗口");
+    pump();
+
+    // 媒体库：最后一张（下标 59，第 10 行）必须完全可见。
+    app.ui().set_library_focus(59);
+    app.ui().invoke_scroll_library_to_index(59);
+    pump();
+    assert_focus_card_visible(
+        "媒体库最后一行",
+        app.ui().get_library_viewport_h(),
+        app.ui().get_library_focus_top(),
+        app.ui().get_library_focus_bottom(),
+    );
+
+    app.show_page(Page::Search);
+    pump();
+    app.ui().set_search_focus(59);
+    app.ui().invoke_scroll_search_to_index(59);
+    pump();
+    assert_focus_card_visible(
+        "搜索页最后一行",
+        app.ui().get_search_viewport_h(),
+        app.ui().get_search_focus_top(),
+        app.ui().get_search_focus_bottom(),
+    );
+}
+
+/// 焦点卡必须完整落在视口里（网格探针本来就是视口相对坐标）。
+fn assert_focus_card_visible(label: &str, viewport_h: f32, focus_top: f32, focus_bottom: f32) {
+    let top = f64::from(focus_top);
+    let bottom = f64::from(focus_bottom);
+    let view = f64::from(viewport_h);
+    assert!(
+        top >= -0.5,
+        "{label}: 焦点卡上沿 {top} 在视口上沿之上（视口高 {viewport_h}）"
+    );
+    assert!(
+        bottom <= view + 0.5,
+        "{label}: 焦点卡下沿 {bottom} 超出视口下沿 {view}"
+    );
+}
+
+/// 内容总高的各种组合（R7-1 的第三问：少算 / 多算都要抓得到）。
+///
+/// 判据是**最后一行第 1 张卡的底边**：滚到底后它必须正好落在
+/// `viewport_h - Theme.space-8`（内容底部的 `padding-bottom`）。用真实布局出来的
+/// 坐标比对，所以 `content-total` 少算一整行（卡底被挤到视口下方）或多算一整行
+/// （视口底部多出空白）都会失败；容差只吸收 f32 误差。
+#[test]
+fn content_total_handles_every_combinations_of_empty_blocks() {
+    const TOLERANCE: f64 = 1.0;
+
+    let mut no_hero = home_filled();
+    no_hero.hero = None;
+
+    let mut no_continue = home_filled();
+    no_continue.continue_watching.clear();
+
+    let mut no_recent = home_filled();
+    no_recent.recently_added.clear();
+
+    let mut no_library_rows = home_filled();
+    no_library_rows.library_rows.clear();
+
+    let mut one_library_row = home_filled();
+    one_library_row.library_rows.truncate(1);
+
+    // 搜索过滤后的形状：每个块都只剩 1 张卡（行数不变）。
+    let mut filtered = home_filled();
+    filtered.continue_watching.truncate(1);
+    filtered.recently_added.truncate(1);
+    for row in &mut filtered.library_rows {
+        row.items.truncate(1);
+    }
+
+    let cases: [(&str, HomeView); 6] = [
+        ("无 hero", no_hero),
+        ("继续观看为空", no_continue),
+        ("最近添加为空", no_recent),
+        ("0 个库行", no_library_rows),
+        ("1 个库行", one_library_row),
+        ("搜索过滤后", filtered),
+    ];
+
+    for (width, height) in [(1920.0f32, 1080.0f32), (800.0, 600.0)] {
+        for (label, view) in &cases {
+            let app = setup(view, width, height);
+            let (content_h, view_h) = scroll_home_to_bottom(&app);
+            let max_scroll = (content_h - view_h).max(0.0);
+            assert!(
+                max_scroll > 0.0,
+                "{width}x{height} {label}: 内容必须高于视口（content_h={content_h} view_h={view_h}）"
+            );
+            assert!(
+                (f64::from(app.ui().get_home_scroll_y()) + max_scroll).abs() <= 0.5,
+                "{width}x{height} {label}: 滚动范围应是 content_h - view_h = {max_scroll}，实际 {}",
+                app.ui().get_home_scroll_y()
+            );
+
+            let id = if view.library_rows.is_empty() {
+                // 库行全没了：最后一个块是「最近添加」（本组用例里它非空）。
+                "home.row.recent.card.0".to_owned()
+            } else {
+                format!("home.row.lib.{}.card.0", view.library_rows.len() - 1)
+            };
+            let card = find_target(&app, &id)
+                .unwrap_or_else(|| panic!("{width}x{height} {label}: 最后一张卡 {id} 不在视口内"));
+            let space = f64::from(app.ui().global::<Theme>().get_space_8());
+            let expected_bottom = view_h - space;
+            let bottom = f64::from(card.y + card.height);
+            assert!(
+                (bottom - expected_bottom).abs() <= TOLERANCE,
+                "{width}x{height} {label}: 最后一行卡底应贴在视口底 {expected_bottom}\
+                 （viewport_h - space-8）上，实际 {bottom}（差 {}）",
+                bottom - expected_bottom
+            );
+        }
+    }
+}

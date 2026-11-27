@@ -82,11 +82,13 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
             ),
         })
         .collect();
-    let library_row_count = view
-        .library_rows
-        .iter()
-        .filter(|row| !row.items.is_empty())
-        .count() as i32;
+    // 库行在扁平焦点索引里的起点（`.slint` 用它把页面级焦点换算成行内下标）。
+    // 与 `library_rows` 同一个来源，长度永远一致。
+    let library_row_starts: Vec<i32> = view
+        .library_row_starts()
+        .into_iter()
+        .map(|start| start as i32)
+        .collect();
     HomeData {
         hero: hero.unwrap_or_default(),
         has_hero,
@@ -103,7 +105,7 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
                 .collect(),
         ),
         library_rows: model(library_rows),
-        library_row_count,
+        library_row_starts: model(library_row_starts),
         tabs: model(view.library_tabs.iter().map(tab_data).collect()),
         // 首页顶栏常驻高亮第一个标签（「首页」）；搜索页不属于任何库，
         // `search_data` 的 `current_tab` 固定传 `-1`（无高亮）。

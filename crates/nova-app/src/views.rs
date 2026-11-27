@@ -147,10 +147,13 @@ pub fn home_view(
 
     view.continue_watching = in_progress.iter().map(card_view).collect();
     view.recently_added = recent.iter().map(card_view).collect();
+    // 只为**真正的媒体库**建行：「首页」是导航哨兵（`local::HOME_TAB_ID`），用它查子项
+    // 永远是空的。空行会渲染成一整行空白（`visible: false` 的行在纵向布局里照样占位），
+    // 用户滑到底会看到一大块空白和它后面的空标题。
     view.library_rows = view
         .library_tabs
         .iter()
-        .filter(|tab| !tab.id.is_empty())
+        .filter(|tab| !tab.id.is_empty() && tab.id != crate::local::HOME_TAB_ID)
         .map(
             |tab| -> Result<LibraryRowView, nova_storage::StorageError> {
                 let parent = ItemId::new(tab.id.clone());
@@ -175,6 +178,9 @@ pub fn home_view(
         .or_else(|| view.recently_added.first().cloned());
 
     apply_home_search(&mut view, search);
+    // 同一条理由：缓存里没有该库的条目、或搜索把所有卡都过滤掉了，这一行就不给界面
+    // （否则渲染成一整行空白）。
+    view.library_rows.retain(|row| !row.items.is_empty());
     Ok(view)
 }
 
@@ -718,6 +724,49 @@ mod tests {
             .map(|card| card.item_id.as_str())
             .collect();
         assert_eq!(ids, ["b", "a"], "跨库按加入时间倒序，且不含季");
+    }
+
+    /// 体检 R7-1：首页的库行只能是**真的有内容的媒体库**。
+    ///
+    /// 回归背景：`home_view` 以前把「首页」导航哨兵（`local::HOME_TAB_ID`）也当库建行，
+    /// 它下面没有条目 → 空行。`.slint` 的纵向布局不会剔除 `visible: false` 的行，
+    /// 空行会渲染成一整行空白（R7-1：真机滑到底能看到一大块空白与空标题）。
+    #[test]
+    fn home_rows_skip_the_home_tab_and_empty_libraries() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let mut movie = movie_with("a", "沙丘", "沙丘", Some(2024));
+        movie.parent_id = Some(ItemId::new("lib-a"));
+        db.upsert_items(&server.info.id, &[movie], 1)
+            .expect("写条目");
+
+        let home = home_view(
+            &db,
+            &server.info.id,
+            &UserPreferences::default(),
+            &Status::NoServer,
+            vec![
+                LibraryTab::new(crate::local::HOME_TAB_ID, "首页"),
+                LibraryTab::new("lib-a", "A 库"),
+                LibraryTab::new("lib-b", "B 库（缓存里还没有条目）"),
+            ],
+            None,
+        )
+        .expect("构建首页");
+
+        let titles: Vec<&str> = home
+            .library_rows
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(titles, ["A 库"], "「首页」哨兵与空库都不能变成库行");
+        assert!(
+            home.library_rows.iter().all(|row| !row.items.is_empty()),
+            "库行不能空着进界面（会渲染成一整行空白）"
+        );
+        // 焦点行：最近添加 1 张 + A 库 1 张。
+        assert_eq!(home.focus_rows(), vec![1, 1]);
     }
 
     #[test]

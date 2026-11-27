@@ -13,9 +13,9 @@ pub fn apply(ui: &AppWindow, view: &HomeView, images: &ImageStore) {
     ui.set_home(convert::home_data(view, images));
 }
 
-/// 首页的焦点行。
-pub fn focus_rows(view: &HomeView, columns: usize) -> Vec<usize> {
-    view.focus_rows(columns)
+/// 首页的焦点行（继续观看 / 最近添加 / 各库行，每个视觉行一项）。
+pub fn focus_rows(view: &HomeView) -> Vec<usize> {
+    view.focus_rows()
 }
 
 /// 按扁平焦点索引取卡片。

@@ -34,22 +34,24 @@ fn keyboard_moves_focus_and_navigates() {
     app.show_home();
     app.ui().set_home_focus(0);
 
-    // 继续观看 5 张 + 最近添加 8 张（6 列 → 6 + 2）。
+    // 焦点行 = 视觉行：继续观看 5 张 + 最近添加 8 张 + 库行（电影 4 / 剧集 3），
+    // 扁平下标 0..4 是继续观看、5..12 是最近添加、13..16 是「电影」、17.. 是「剧集」。
     press(&app, Key::RightArrow);
     press(&app, Key::RightArrow);
     assert_eq!(app.focus_index(), 2, "两次右移应到第 3 张继续观看");
 
     press(&app, Key::DownArrow);
-    assert_eq!(app.focus_index(), 7, "下移回到最近添加第 1 行第 3 列");
+    assert_eq!(app.focus_index(), 7, "下移进最近添加的同一列（第 3 张）");
 
     press(&app, Key::RightArrow);
     assert_eq!(app.focus_index(), 8, "最近添加行内右移");
 
+    // Down 是换行（不再在最近添加这一行里横跳）：进「电影」行，列号夹到该行卡片数。
     press(&app, Key::DownArrow);
-    assert_eq!(app.focus_index(), 12, "第二行只有 2 张，列位置夹到最后一格");
+    assert_eq!(app.focus_index(), 16, "换行到「电影」行，列位置夹到第 4 张");
 
     press(&app, Key::UpArrow);
-    assert_eq!(app.focus_index(), 6, "上移回到第一行同列");
+    assert_eq!(app.focus_index(), 8, "上移回最近添加同列");
 
     // Enter 打开详情：压栈 + 切页。
     press(&app, Key::Return);
@@ -57,7 +59,7 @@ fn keyboard_moves_focus_and_navigates() {
     assert_eq!(
         app.current_route(),
         Some(Route::Detail {
-            item_id: "r2".to_string()
+            item_id: "r4".to_string()
         })
     );
     assert_eq!(app.navigator().len(), 2);
@@ -66,7 +68,7 @@ fn keyboard_moves_focus_and_navigates() {
     press(&app, Key::Escape);
     assert_eq!(app.page(), Page::Home);
     assert_eq!(app.current_route(), Some(Route::Home));
-    assert_eq!(app.focus_index(), 6, "返回后焦点保留");
+    assert_eq!(app.focus_index(), 8, "返回后焦点保留");
 
     // 栈空时 Esc 无动作。
     press(&app, Key::Escape);

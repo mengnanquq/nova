@@ -912,18 +912,30 @@ impl App {
             let images = self.images.borrow();
             home::apply(&self.ui, view, &images);
         }
+        // 焦点**以 UI 属性为准**：悬停（`CardRow.focus-hover`）与键盘都直接写
+        // `.slint` 的 `focus-index`，Rust 的 `state.focus.home` 只是缓存（下一次
+        // 方向键由 `current_focus` 回写）。每批海报到达时 `apply_images` 会重贴
+        // **同一份**视图，若在这里无条件回写 `state.focus.home`，用户眼前的悬停
+        // 高亮（以及页面滚动）会被弹回上一次键盘位置。
+        //
+        // 所以只在 UI 焦点越界（数据变少）时才回写；其余情况保持不动。
+        let current = self.ui.get_home_focus().max(0) as usize;
         let mut state = self.state.borrow_mut();
         // 首页按行上报可见图片窗口是事件驱动的（滚动 / 布局变化）；数据本身变化
         // 不一定改几何，所以数据真变了时推一行代次，让每行重新上报自己的区间。
         // （`apply_image` 每次到图都会重贴**同一份**视图，那不该触发一整轮上报。）
         let changed = state.home != *view;
         state.home = view.clone();
-        if state.focus.home >= view.card_count() {
-            state.focus.home = 0;
-        }
-        let focus = state.focus.home;
+        let focus = if current >= view.card_count() {
+            0
+        } else {
+            current
+        };
+        state.focus.home = focus;
         drop(state);
-        self.ui.set_home_focus(focus as i32);
+        if self.ui.get_home_focus() != focus as i32 {
+            self.ui.set_home_focus(focus as i32);
+        }
         if changed {
             let next = self.ui.get_home_image_gen().wrapping_add(1);
             self.ui.set_home_image_gen(next);
@@ -1930,7 +1942,7 @@ fn focus_rows(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> Vec<usi
     let columns = ui.get_grid_columns().max(1) as usize;
     let state = state.borrow();
     match page {
-        Page::Home => home::focus_rows(&state.home, columns),
+        Page::Home => home::focus_rows(&state.home),
         Page::Library => library::focus_rows(&state.library, columns),
         Page::Detail => detail::focus_rows(&state.detail),
         Page::Search => search::focus_rows(&state.search, columns),
@@ -2113,10 +2125,16 @@ fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32
     }
     // 焦点可能被移出可视区，滚动让焦点卡完全可见。
     // 焦点数学在 Rust，滚动几何在 `.slint`（`scroll-to-index`），两份不重算。
-    // 首页有两条视觉行（继续观看 / 最近添加），纵向滚动 + 行内横向滚动都在
-    // `HomePage.scroll-to-index` 里完成（R2-2：以前 Home 分支是空的）。
+    // 首页是 N 条横向行（继续观看 / 最近添加 / 各库行）：纵向滚动按**可视行号**
+    // 在 `HomePage.scroll-to-index` 里算行上沿（库行是 `for` 重复元素，页面拿不到
+    // 它们的 `y`）；库行的横向滚动由页面下发「键盘滚到本行第 N 张」触发，悬停只
+    // 同步焦点、不滚动（R2-2 / R7-2）。可视行号必须在这里算：`focus_rows` 会跳过
+    // 空行，它的下标不能当界面行号用。
     match page {
-        Page::Home => ui.invoke_scroll_home_to_index(next as i32),
+        Page::Home => {
+            let row = state.borrow().home.focus_row_at(next).unwrap_or(0);
+            ui.invoke_scroll_home_to_index(next as i32, row as i32);
+        }
         Page::Library => ui.invoke_scroll_library_to_index(next as i32),
         Page::Search => ui.invoke_scroll_search_to_index(next as i32),
         Page::Detail | Page::Player => {}

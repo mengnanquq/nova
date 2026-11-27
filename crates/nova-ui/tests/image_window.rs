@@ -179,10 +179,21 @@ fn home_rows_request_their_visible_interval() {
         .expect("首屏必须上报最近添加行的可见窗口");
     assert_eq!(recent_head.1, 0, "最近添加行从第 0 张开始");
 
-    // 键盘 ↓：焦点按 6 列一块往下走，第 150 张在 25 块之后（最近添加是一整条
-    // 横向行，焦点块与列对齐——与 `HomeView::focus_rows` 同一口径）。
-    for _ in 0..26 {
-        press(&app, Key::DownArrow);
+    // 键盘 →：在「最近添加」这一行里横向走到第 150 张之后（体检 R7-2 之后行内
+    // 前进只归 ← / →；↓ / ↑ 是换行）。行内滚动跟随由 `CardRow` 自己负责。
+    //
+    // 先把指针移开（滚轮停在某张库卡上，悬停会把焦点同步过去——R7-2 的预期行为），
+    // 再用 ↑ 夹到内容第一行、↓ 进「最近添加」。
+    app.ui().window().dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(2.0, 2.0),
+    });
+    for _ in 0..20 {
+        press(&app, Key::UpArrow);
+    }
+    press(&app, Key::DownArrow);
+    press(&app, Key::DownArrow);
+    for _ in 0..160 {
+        press(&app, Key::RightArrow);
     }
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
     assert!(

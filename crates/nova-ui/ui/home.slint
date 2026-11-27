@@ -61,6 +61,12 @@ component CardRow inherits Rectangle {
     // 页面级的 `focus-index`，所以上报给 `HomePage` 去写（与 `PosterGrid` 悬停
     // 直接写 `focus-index` 是同一套语义）。
     callback focus-hover(int);
+    // 键盘焦点落到本行的某张卡时，页面把**行内局部下标**写到这里（悬停不写）。
+    //
+    // 库行是 `for` 重复元素，页面拿不到它们的 `flick`，没法直接调 `scroll-to-card`；
+    // 所以页面只下发「键盘滚到第 N 张」，由行自己执行。`-1` = 本行不是键盘焦点行。
+    // 悬停只同步 `focus-index`（放大 / 方向键起点），绝不触发滚动（R7-1）。
+    in property <int> keyboard-scroll: -1;
 
     // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
     // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
@@ -221,6 +227,14 @@ component CardRow inherits Rectangle {
             flick.content-x = -clamp(left - pad, 0px, max-x);
         } else if (right + pad > view-left + flick.width) {
             flick.content-x = -clamp(right + pad - flick.width, 0px, max-x);
+        }
+    }
+
+    // 只有键盘移动会改 `keyboard-scroll`（页面在 `scroll-to-index` 里下发），
+    // 悬停改的是 `focused-index`，不会走到这里——所以悬停不会把页面拽走（R7-1）。
+    changed keyboard-scroll => {
+        if (root.nav-active && root.keyboard-scroll >= 0) {
+            root.scroll-to-card(root.keyboard-scroll);
         }
     }
 
@@ -491,6 +505,11 @@ component CardRow inherits Rectangle {
 export component HomePage inherits Rectangle {
     in property <HomeData> data;
     in-out property <int> focus-index: 0;
+    // 键盘滚动请求（只由 `scroll-to-index` 写）：可视行号 + 行内局部下标。
+    // 行组件把「自己是不是这一行」折成 `keyboard-scroll`（-1 = 不是），
+    // 悬停路径永远不碰这两个属性（R7-1）。
+    in-out property <int> keyboard-scroll-row: -1;
+    in-out property <int> keyboard-scroll-local: -1;
     // 用户是否已开始导航；未激活时行不放大任何卡（首屏保持"干净"，与 Netflix 一致）。
     in property <bool> nav-active: false;
     in property <bool> search-focused: false;
@@ -548,25 +567,56 @@ export component HomePage inherits Rectangle {
 
     /// 键盘焦点移出可视区时，把焦点行 / 焦点卡滚进视口（体检 R2-2）。
     ///
+    /// `index` 是扁平焦点索引，`row` 是**可视行号**（`0` = 继续观看、`1` = 最近添加、
+    /// `2 + n` = 第 n 个库行；由 Rust 的 `HomeView::focus_row_at` 给出）。
+    ///
     /// 纵向：外层 `flick` 滚到整行卡区完全可见（与媒体库 / 搜索页的
-    /// `scroll-to-index` 同一套上下沿算法）；横向：行自己的 `scroll-to-card`。
-    /// 焦点行的判定与 `HomeView::focus_rows` 一致：先「继续观看」一行，
-    /// 再「最近添加」按 6 列切块——所以"最近添加第 N 块"仍然是同一个视觉行。
-    public function scroll-to-index(index: int) {
-        if (index < 0) {
+    /// `scroll-to-index` 同一套上下沿算法）。库行是 `for` 重复元素，页面拿不到
+    /// 它们的 `y`，但可以从 `content-total` 的同一套常量反推行上沿（`library-card-top`）。
+    /// 横向：页面只下发「本行第 N 张」，由行自己的 `changed keyboard-scroll` 执行
+    /// （库行的 `flick` 页面调不到）。
+    ///
+    /// 这个函数**只由键盘路径调用**：悬停只同步焦点，不滚动（R7-1）。
+    public function scroll-to-index(index: int, row: int) {
+        if (index < 0 || row < 0) {
             return;
         }
-        if (index < root.continue-count) {
+        if (row == 0) {
             root.scroll-to-row(row0.y + row0.cards-top, row0.cards-height);
-            row0.scroll-to-card(index);
+            root.request-row-scroll(0, index);
             return;
         }
-        let local = index - root.continue-count;
-        if (local >= root.recent-count) {
+        if (row == 1) {
+            root.scroll-to-row(row1.y + row1.cards-top, row1.cards-height);
+            root.request-row-scroll(1, index - root.continue-count);
             return;
         }
-        root.scroll-to-row(row1.y + row1.cards-top, row1.cards-height);
-        row1.scroll-to-card(local);
+        let ri = row - 2;
+        if (ri >= root.data.library-rows.length) {
+            return;
+        }
+        root.scroll-to-row(root.library-card-top(ri),
+            Theme.card-landscape-h + Theme.card-caption-height);
+        root.request-row-scroll(row, index - root.data.library-row-starts[ri]);
+    }
+
+    /// 库行卡区上沿（内容坐标）：与 `content-total` / `VerticalLayout` 同一套常量。
+    ///
+    /// 行顺序固定：hero → 继续观看 → 最近添加 → 各库行，块间距 `section-gap`；
+    /// 没有 hero 时第一个块从 0 开始（hero 是 `if` 子树，不会留空槽）。
+    function library-card-top(ri: int) -> length {
+        let rows-top = root.data.has-hero ? root.billboard-slot + Theme.section-gap : 0px;
+        return rows-top
+            + root.continue-row-h + Theme.section-gap
+            + root.recent-row-h + Theme.section-gap
+            + ri * (root.library-row-h + Theme.section-gap)
+            + Theme.section-title-height + Theme.row-title-gap;
+    }
+
+    /// 下发键盘滚动：本行横向跟随；`local` 是行内下标（非本行时为 -1）。
+    function request-row-scroll(row: int, local: int) {
+        root.keyboard-scroll-row = row;
+        root.keyboard-scroll-local = local;
     }
 
     // 纵向让一段卡区（上沿 + 卡片总高）完全可见；视口是外层 `flick`。
@@ -613,14 +663,19 @@ export component HomePage inherits Rectangle {
     property <length> recent-row-h: Theme.section-title-height + Theme.row-title-gap
         + Theme.card-portrait-h + Theme.card-caption-height;
     property <length> library-row-h: continue-row-h;
-    property <int> visible-blocks: (root.data.has-hero ? 1 : 0)
-        + (root.continue-count > 0 ? 1 : 0) + (root.recent-count > 0 ? 1 : 0)
-        + root.data.library-row-count;
+    // 布局块数 = 真正参与纵向布局的块数。
+    //
+    // 关键：`visible: false` **不**让块从布局里消失——`row0` / `row1` 是常驻实例，
+    // 即使继续观看 / 最近添加为空，它们照样占一整行高度；库行同理（`for` 的每项
+    // 都会占位）。以前这里按“非空行数”算，只要有一行是空的，内容总高就少一整行，
+    // 最后一个库行永远滚不进视口（体检 R7-1）。现在按**实例化的块数**算：
+    // hero 是 `if` 子树（没有就不实例化），其余两块 + 每条库行都算。
+    property <int> layout-blocks: (root.data.has-hero ? 1 : 0) + 2
+        + root.data.library-rows.length;
     property <length> content-total: root.billboard-slot
-        + (root.continue-count > 0 ? continue-row-h : 0px)
-        + (root.recent-count > 0 ? recent-row-h : 0px)
-        + root.data.library-row-count * library-row-h
-        + (root.visible-blocks > 0 ? (root.visible-blocks - 1) * Theme.section-gap : 0px)
+        + continue-row-h + recent-row-h
+        + root.data.library-rows.length * library-row-h
+        + (root.layout-blocks - 1) * Theme.section-gap
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
 
@@ -664,21 +719,30 @@ export component HomePage inherits Rectangle {
     // 实际早就滚出去了。现在“焦点卡在视口内”可以直接判断：
     // `0 ≤ focus_top && focus_bottom ≤ viewport_h`、
     // `0 ≤ focus_left && focus_right ≤ row_viewport_w`。
+    // 这四个探针只覆盖前两行（页面直接名字引用得到的行）。焦点在库行时一律报 -1：
+    // 库行是 `for` 重复元素，页面拿不到它们的 `y` / `flick`（用 `targets` 里的
+    // `home.row.lib.N.card.M` 窗口坐标判断可见性）。
+    property <bool> probe-focus-in-rows: root.focus-index >= 0
+        && root.focus-index < root.continue-count + root.recent-count;
     out property <bool> probe-focus-in-continue: root.focus-index < root.continue-count;
     out property <length> probe-viewport-h: flick.height;
-    out property <length> probe-focus-top: (root.probe-focus-in-continue
-        ? row0.y + row0.cards-top : row1.y + row1.cards-top) + flick.content-y;
-    out property <length> probe-focus-bottom: (root.probe-focus-in-continue
-        ? row0.y + row0.cards-top + row0.cards-height
-        : row1.y + row1.cards-top + row1.cards-height) + flick.content-y;
+    out property <length> probe-focus-top: !root.probe-focus-in-rows ? -1px
+        : (root.probe-focus-in-continue
+            ? row0.y + row0.cards-top : row1.y + row1.cards-top) + flick.content-y;
+    out property <length> probe-focus-bottom: !root.probe-focus-in-rows ? -1px
+        : (root.probe-focus-in-continue
+            ? row0.y + row0.cards-top + row0.cards-height
+            : row1.y + row1.cards-top + row1.cards-height) + flick.content-y;
     out property <length> probe-row-content-x: root.probe-focus-in-continue
         ? row0.probe-content-x : row1.probe-content-x;
     out property <length> probe-row-viewport-w: root.probe-focus-in-continue
         ? row0.probe-viewport-w : row1.probe-viewport-w;
-    out property <length> probe-focus-left: (root.probe-focus-in-continue
-        ? row0.probe-focus-left : row1.probe-focus-left) + root.probe-row-content-x;
-    out property <length> probe-focus-right: (root.probe-focus-in-continue
-        ? row0.probe-focus-right : row1.probe-focus-right) + root.probe-row-content-x;
+    out property <length> probe-focus-left: !root.probe-focus-in-rows ? -1px
+        : (root.probe-focus-in-continue
+            ? row0.probe-focus-left : row1.probe-focus-left) + root.probe-row-content-x;
+    out property <length> probe-focus-right: !root.probe-focus-in-rows ? -1px
+        : (root.probe-focus-in-continue
+            ? row0.probe-focus-right : row1.probe-focus-right) + root.probe-row-content-x;
 
     // 测试用：继续观看行的几何（「放大不跳布局」断言的基准）。
     out property <length> row0-y: row0.y - flick.content-y;
@@ -1022,8 +1086,11 @@ export component HomePage inherits Rectangle {
                 }
 
             // ---- 继续观看（16:9 横版缩略图，带进度）----
-            // 常驻实例 + visible 门控：布局器跳过不可见元素，
-            // 测试也能稳定读到行几何。
+            // 常驻实例 + `visible` 门控：`visible: false` 只影响绘制，**不**让本行从
+            // 纵向布局里消失（行高照算）。所以 `content-total` 必须把这两行**无条件**
+            // 算进去（体检 R7-1：当时按“非空行数”算，空行一出现内容总高就少一整行，
+            // 最后一个库行永远滚不进视口）。
+            // 好处是测试 / 探针能稳定读到行几何（行总是实例化的）。
             row0 := CardRow {
                 width: parent.width;
                 visible: root.continue-count > 0;
@@ -1032,6 +1099,8 @@ export component HomePage inherits Rectangle {
                 title: "继续观看";
                 cards: root.data.continue-watching;
                 focused-index: root.continue-focus;
+                keyboard-scroll: root.keyboard-scroll-row == 0
+                    ? root.keyboard-scroll-local : -1;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 0;
                 image-gen: root.image-gen;
@@ -1059,6 +1128,8 @@ export component HomePage inherits Rectangle {
                 portrait: true;
                 cards: root.data.recently-added;
                 focused-index: root.recent-focus;
+                keyboard-scroll: root.keyboard-scroll-row == 1
+                    ? root.keyboard-scroll-local : -1;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 1;
                 image-gen: root.image-gen;
@@ -1081,6 +1152,11 @@ export component HomePage inherits Rectangle {
             // ---- 各库前 20 条（16:9，标题 = 库名）----
             for row-data[ri] in root.data.library-rows :
                 CardRow {
+                    // 库里也有键盘焦点：局部下标 = 扁平焦点 - 本行起点（体检 R7-2：
+                    // 以前库行根本没接 `focused-index` / `focus-hover`，于是鼠标悬停
+                    // 不对齐、键盘更是整行进不去）。
+                    property <int> local-focus: root.focus-index
+                        - root.data.library-row-starts[ri];
                     width: parent.width;
                     visible: row-data.cards.length > 0;
                     target-prefix: "home.row.lib." + ri + ".";
@@ -1093,6 +1169,14 @@ export component HomePage inherits Rectangle {
                     page-active: root.page-active;
                     page-scroll-top: -flick.content-y;
                     page-viewport-h: flick.height;
+                    focused-index: local-focus >= 0
+                        && local-focus < row-data.cards.length ? local-focus : -1;
+                    keyboard-scroll: root.keyboard-scroll-row == 2 + ri
+                        ? root.keyboard-scroll-local : -1;
+                    nav-active: root.nav-active && root.content-focused;
+                    focus-hover(index) => {
+                        root.focus-index = root.data.library-row-starts[ri] + index;
+                    }
                     image-window(row, first, count) => {
                         root.image-window(row, first, count);
                     }

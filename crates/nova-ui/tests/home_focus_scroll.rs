@@ -40,8 +40,8 @@ fn press(app: &App, key: Key) {
 
 /// 首页：2 张「继续观看」+ 30 张「最近添加」。
 ///
-/// 焦点行是 `[2, 6, 6, 6, 6, 6]`（最近添加按 6 列切块，见 `HomeView::focus_rows`），
-/// 所以 Down 会把焦点推到最近添加的后续块——横向滚动的量足够大。
+/// 焦点行是 `[2, 30, 4, 3]`：继续观看 2 张、最近添加**一整行** 30 张，之后
+/// 两个库行（`home_filled` 的「电影」4 / 「剧集」3）。横向滚动的量足够大。
 fn home_with_many_recent() -> HomeView {
     let mut home = home_filled();
     home.continue_watching.truncate(2);
@@ -114,53 +114,85 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     let vpad = theme.get_zoom_allowance_y() / 2.0;
     let hpad = theme.get_zoom_allowance_x() / 2.0;
 
-    // 1 次 Down：继续观看 → 最近添加第 1 块（focus = 2）。最近添加整行在
+    // 1 次 Down：继续观看 → 最近添加第 1 张（focus = 2）。最近添加整行在
     // 800×600 的首屏之外，页面必须跟着纵向滚。
     press(&app, Key::DownArrow);
-    assert_eq!(app.focus_index(), 2, "Down 应落到最近添加的第 1 块");
+    assert_eq!(app.focus_index(), 2, "Down 应落到最近添加的第 1 张");
     assert!(
         f64::from(app.ui().get_home_scroll_y()) < 0.0,
         "焦点行在首屏之外时必须滚动（scroll-y = {}）",
         app.ui().get_home_scroll_y()
     );
     assert_focus_card_visible(
-        "首页（最近添加第 1 块）",
+        "首页（最近添加第 1 张）",
         app.ui().get_home_viewport_h(),
         app.ui().get_home_focus_top(),
         app.ui().get_home_focus_bottom(),
         vpad,
     );
 
-    // 再 4 次 Down：焦点沿最近添加的块前进（2 → 8 → 14 → 20 → 26），
-    // 行内横向滚动必须跟上。
-    for _ in 0..4 {
-        press(&app, Key::DownArrow);
+    // 行内 20 次 Right：焦点沿「最近添加」这一行横move（2 → 22），横向滚动必须跟上。
+    // 体检 R7-2：以前 Down / Up 被当成“换行网格”（每次 +6 张），Right 反而是唯一
+    // 能在行内前进的键；现在行内前进只归 ← / →。
+    for _ in 0..20 {
+        press(&app, Key::RightArrow);
     }
-    assert_eq!(app.focus_index(), 26, "每次 Down = 最近添加前进一块（+6）");
+    assert_eq!(app.focus_index(), 22, "Right 每次在图内前进一张（+1）");
     assert!(
         f64::from(app.ui().get_home_row_scroll_x()) < 0.0,
         "焦点卡横向超出视口时必须横向滚动（row content-x = {}）",
         app.ui().get_home_row_scroll_x()
     );
     assert_focus_card_visible_horizontally(
-        "首页（第 26 张）",
+        "首页（最近添加第 21 张）",
         app.ui().get_home_row_viewport_w(),
         app.ui().get_home_focus_left(),
         app.ui().get_home_focus_right(),
         hpad,
     );
     assert_focus_card_visible(
-        "首页（第 26 张，纵向）",
+        "首页（最近添加第 21 张，纵向）",
         app.ui().get_home_viewport_h(),
         app.ui().get_home_focus_top(),
         app.ui().get_home_focus_bottom(),
         vpad,
     );
 
-    // 5 次 Up 回到继续观看第 1 张：焦点卡仍然必须可见。
+    // Down 进入库行：列号夹到该行的卡片数（「电影」行只有 4 张 → 第 4 列）。
+    // 库行是 `for` 重复元素：纵向由 `HomePage.scroll-to-index` 按行号算，横向由页面
+    // 下发 `keyboard-scroll` 给行自己执行（R7-2），用目标清单断言。
+    press(&app, Key::DownArrow);
+    assert_eq!(app.focus_index(), 35, "Down 应进入第一个库行的第 4 张卡");
+    // 库行的横向跟随在行自己的 `changed keyboard-scroll` 里（下一帧生效）。
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(80));
+    app.refresh_targets();
+    let card = app
+        .target("home.row.lib.0.card.3")
+        .expect("库行焦点卡必须滚进窗口");
+    assert!(
+        f64::from(card.y) >= 0.0 && f64::from(card.y + card.height) <= f64::from(H),
+        "库行焦点卡纵向必须在窗口里：y={} h={}",
+        card.y,
+        card.height
+    );
+
+    // Up 回「最近添加」的同一列（第 4 列 → focus = 2 + 3）。
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_index(), 5, "Up 保持最接近的列");
+    assert_focus_card_visible(
+        "首页（最近添加第 4 张）",
+        app.ui().get_home_viewport_h(),
+        app.ui().get_home_focus_top(),
+        app.ui().get_home_focus_bottom(),
+        vpad,
+    );
+
+    // Left 到行首，再 Up 回继续观看第 1 张。
     for _ in 0..5 {
-        press(&app, Key::UpArrow);
+        press(&app, Key::LeftArrow);
     }
+    assert_eq!(app.focus_index(), 2, "Left 夹在行首");
+    press(&app, Key::UpArrow);
     assert_eq!(app.focus_index(), 0, "Up 应回到继续观看第 1 张");
     assert_focus_card_visible(
         "首页（回到继续观看行）",

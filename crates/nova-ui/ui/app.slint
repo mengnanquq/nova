@@ -750,8 +750,11 @@ export component AppWindow inherits Window {
     }
 
     /// 把首页滚到键盘焦点行 / 焦点卡（方向键移动后由 Rust 调用，R2-2）。
-    public function scroll-home-to-index(index: int) {
-        home-page.scroll-to-index(index);
+    ///
+    /// `row` 是可视行号（0 = 继续观看、1 = 最近添加、2 + n = 库行），由 Rust 的
+    /// `HomeView::focus_row_at` 给出——`.slint` 不做焦点数学，只按行号算几何。
+    public function scroll-home-to-index(index: int, row: int) {
+        home-page.scroll-to-index(index, row);
     }
 
     /// 把媒体库 / 搜索页的结果网格滚到键盘焦点卡（方向键移动后由 Rust 调用）。
