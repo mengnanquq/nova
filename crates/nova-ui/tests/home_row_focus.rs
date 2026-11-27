@@ -570,14 +570,16 @@ fn refocusing_the_home_keeps_the_focus_on_the_library_duplicate() {
     );
 }
 
-/// R7-悬停：数据变少、但指针仍停在一张**还存在的**卡上时，放大效果不能熄灭。
+/// R7-悬停（本轮复审第 2 项调整了语义）：数据变少、焦点被钳回 0 时，放大效果不能
+/// 留在**指针已经不在的那一格**上；但它也不能被"永久熄灭"——指针一动就要重新点亮。
 ///
-/// 修复前 `CardRow.changed hover-reset` 无条件把 `hot` / `latch` 清成 -1：清空
-/// 「继续观看」让焦点下标越界（页面于是要求清悬停锁存）时，指针明明还停在
-/// 「最近添加」第 6 张上，那一行的放大与左右箭头却一起消失了——而 `has-hover`
-/// 的边沿事件不会自己重发，指针不动就再也点不亮。
+/// 历史：R7 当时的判据是"指针停在一张还存在的卡上，放大必须留着"（只按条数判断
+/// `hover-reset`）。实测前提不成立：清空「继续观看」后「最近添加」整行上移 274px
+/// （1920×1080），指针那一格下面**一张卡都没有**了，放大留在 `hot` 上就是复审说的
+/// "停在指针并没有停留的卡上"。所以现在改成清掉、再由仍有 `has-hover` 的卡重新点亮
+/// （`CardRow.hover-reset`）：没有卡带悬停 ⇒ 熄灭；指针一动 ⇒ 立即可重新点亮。
 #[test]
-fn shrinking_the_data_keeps_the_zoom_of_a_card_that_still_exists() {
+fn shrinking_the_data_does_not_leave_the_zoom_on_a_stale_card() {
     let app = app_1920x1080();
     let mut view = home();
     view.hero = None;
@@ -612,15 +614,110 @@ fn shrinking_the_data_keeps_the_zoom_of_a_card_that_still_exists() {
         "前提：悬停让这一行出现左右箭头（放大已点亮）"
     );
 
-    // 数据变少：清空「继续观看」→ 焦点 7 越界，页面要求清悬停锁存；指针仍停在
-    // 「最近添加」第 6 张上，而这一行的 cards.length 仍是 6（那张卡还在）。
+    // 数据变少：清空「继续观看」→ 焦点 7 越界，页面要求重算悬停（`hover-reset`）。
     let mut shrunk = view.clone();
     shrunk.continue_watching.clear();
     app.set_home(&shrunk);
     settle(&app);
     assert_eq!(app.ui().get_home_focus(), 0, "越界焦点必须钳回第 1 张");
     assert!(
-        app.target("home.row.recent.left").is_some(),
-        "指针仍停在一张还存在的卡上，放大与左右箭头必须留着"
+        !any_card_under(&app, x, y),
+        "前提：行上移后指针 ({x}, {y}) 下面已经没有卡"
     );
+    assert!(
+        app.target("home.row.recent.left").is_none(),
+        "指针下面没有卡，放大与左右箭头必须熄掉（不能留在旧下标上）"
+    );
+
+    // 复位不是"永久熄灭"：指针动一下，同一格立刻重新点亮（R7 的原关注点）。
+    let card = app
+        .target("home.row.recent.card.5")
+        .expect("「最近添加」第 6 张仍应在窗口里");
+    let (x, y) = card.center();
+    app.hover_at(x + 1.0, y).expect("再悬停第 6 张");
+    settle(&app);
+    assert!(
+        app.target("home.row.recent.left").is_some(),
+        "指针一动就必须能重新点亮（`has-hover` 不该被永久熄灭）"
+    );
+    assert_eq!(
+        app.ui().get_home_focus(),
+        5,
+        "重新点亮后焦点回到「最近添加」第 6 张（继续观看已空）"
+    );
+}
+
+/// R7-悬停（本轮复审第 2 项）：数据条数**不变**、但本行的卡片被整体替换后，指针
+/// 没动也不能把放大效果留在旧下标那张卡上。
+///
+/// `hover-reset` 以前只看长度：5 → 5 的替换它一律放行，`hot` 还是 2，放大就停在
+/// 下标 2 上。现在改成"清掉 + 由仍有 `has-hover` 的卡重新点亮"：Slint 的 `for`
+/// 重复元素在数组换成新实例时会把卡片实例全部重建（`has-hover` 随之清空，指针不动
+/// 也不会有新事件），重算的结果就是熄灭——指针一动立刻能重新点亮。
+#[test]
+fn replacing_the_cards_under_a_parked_pointer_clears_the_zoom() {
+    let app = app_1920x1080();
+    let mut view = home();
+    view.hero = None;
+    view.continue_watching = (0..5)
+        .map(|index| CardView::new(format!("c{index}"), format!("C{index}")))
+        .collect();
+    view.recently_added.clear();
+    view.library_rows.clear();
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    let card = app
+        .target("home.row.continue.card.2")
+        .expect("「继续观看」第 3 张应在窗口里");
+    let (x, y) = card.center();
+    app.hover_at(x, y).expect("悬停第 3 张");
+    settle(&app);
+    assert!(app.ui().get_row0_zoom_on(), "前提：悬停点亮放大");
+    assert_eq!(
+        app.ui().get_home_focus(),
+        2,
+        "前提：悬停把焦点对齐到第 3 张"
+    );
+    let zoom_x = app.ui().get_zoom_rect_x();
+
+    // 条数不变（5 → 5）、内容整体替换：卡片实例全部重建，指针没动。
+    let mut replaced = view.clone();
+    replaced.continue_watching = (10..15)
+        .map(|index| CardView::new(format!("d{index}"), format!("D{index}")))
+        .collect();
+    app.set_home(&replaced);
+    settle(&app);
+    // 页面在数据变化后要求重算悬停（`set_home` 只在焦点越界时自己推一档，
+    // 这里条数没变，所以按页面同一套接口手动推一档）。
+    let reset = app.ui().get_home_hover_reset().wrapping_add(1);
+    app.ui().set_home_hover_reset(reset);
+    settle(&app);
+    assert!(
+        !app.ui().get_row0_zoom_on(),
+        "卡片被替换后没有任何卡还带着 `has-hover`，放大不能留在旧下标（{zoom_x}）"
+    );
+
+    // 指针再动一下：同一格重新点亮。
+    let card = app
+        .target("home.row.continue.card.2")
+        .expect("替换后第 3 张仍应在窗口里");
+    let (x, y) = card.center();
+    app.hover_at(x + 1.0, y).expect("再悬停第 3 张");
+    settle(&app);
+    assert!(app.ui().get_row0_zoom_on(), "指针一动就必须能重新点亮");
+    assert_eq!(app.ui().get_home_focus(), 2, "重新点亮后焦点回到第 3 张");
+}
+
+/// 指针 (x, y) 下面是否压着某张首页卡片（`home.row.*.card.*` 目标矩形）。
+fn any_card_under(app: &App, x: f32, y: f32) -> bool {
+    app.targets().into_iter().any(|target| {
+        target.id.contains(".card.")
+            && x >= target.x
+            && x <= target.x + target.width
+            && y >= target.y
+            && y <= target.y + target.height
+    })
 }

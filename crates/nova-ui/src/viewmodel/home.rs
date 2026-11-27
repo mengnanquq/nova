@@ -223,7 +223,11 @@ pub fn rebase_home_focus(old: &HomeView, old_focus: usize, next: &HomeView) -> u
         return fallback;
     };
     // 序列相同 ⇒ 每个 id 的位置都不变（含重复 id 的相对次序），旧下标就是正确位置。
-    if old_focus < total && home_focus_ids(old).eq(home_focus_ids(next)) {
+    //
+    // 上界取**旧**视图的条数（`old.card_count()`），不是 `next` 的 `total`：
+    // 这个短路的语义是"旧下标在旧视图里是一张真的卡"，用新视图的大小当门只会
+    // 把"序列未变但下标越界"的情形挡在门外，白白漏到下面的按 id 查找里。
+    if old_focus < old.card_count() && home_focus_ids(old).eq(home_focus_ids(next)) {
         return old_focus;
     }
     (0..total)
@@ -436,6 +440,37 @@ mod tests {
             1,
             "序列没变就不该动下标"
         );
+    }
+
+    /// R7-焦点：序列未变但**旧下标越界**（调用方传进来的下标早就不在旧视图范围内）时，
+    /// 既不 panic、也不能按 id 落到别处同 id 的卡上——直接夹到新视图的最后一格。
+    ///
+    /// 这个短路的上界必须是**旧**视图的条数：判断依据是“旧下标在旧视图里是不是
+    /// 一张真的卡”，与 `next` 的条数无关。
+    #[test]
+    fn rebase_home_focus_clamps_an_out_of_range_index_when_the_sequence_is_unchanged() {
+        let mut home = HomeView::new();
+        home.continue_watching = vec![CardView::new("dup", "DUP"), CardView::new("b", "B")];
+        home.library_rows = vec![LibraryRowView {
+            library_id: "lib".to_owned(),
+            title: "库".to_owned(),
+            items: vec![CardView::new("x", "X"), CardView::new("dup", "DUP")],
+        }];
+        assert_eq!(home.card_count(), 4);
+        // 前提：下标 5 越界（旧视图里根本没有这张卡），而 0 / 3 是两张同 id 的 dup。
+        assert_eq!(home.card_at(5), None);
+        assert_eq!(
+            home.card_at(3).map(|card| card.item_id.as_str()),
+            Some("dup")
+        );
+        // 同一份视图（序列未变）：夹到最后一格 3，而不是瞎猜别的下标。
+        assert_eq!(
+            rebase_home_focus(&home, 5, &home),
+            3,
+            "越界下标应夹到新视图范围（3），不能按 id 跑到别处"
+        );
+        // 旧视图自己空着时越界下标同样不 panic。
+        assert_eq!(rebase_home_focus(&HomeView::new(), 7, &HomeView::new()), 0);
     }
 
     /// 序列真的变了才 rebase：同 id 的候选里取**离旧下标最近**的那个。

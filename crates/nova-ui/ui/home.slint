@@ -117,17 +117,26 @@ component CardRow inherits Rectangle {
             root.latch = root.hot;
         }
     }
-    // 页面要求清掉悬停锁存（数据变少、焦点被钳回 0）：指针位置没变也不会再点亮
-    // 旧卡（`has-hover` 的边沿事件不会自己重发）。
+    // 悬停复算请求序号（`hover-reset` 时本行推一档，见下）。
+    //
+    // `has-hover` 是**边沿事件**：`hot` 被清掉之后，指针仍停在同一张卡上也不会
+    // 自己重报。所以复算不能由行去读卡片的 `has-hover`（`for` 重复元素拿不到实例
+    // 属性），改成把序号推下去、由**每张卡自己**按当前的 `has-hover` 决定要不要
+    // 重新点亮自己。
+    property <int> hover-gen: 0;
+    // 页面要求重算悬停（数据变了 / 焦点被钳回 0）：不复用旧下标。
+    //
+    // 只按长度判断太窄了——数据条数没变、但卡片被替换或整体前移时，同一个下标
+    // 指向的已经不是指针下面那张卡，放大效果会停在指针没停留的卡上。所以这里
+    // **全部清掉**，再让仍有 `has-hover` 的卡自己把 `hot` / `latch` 点亮回来
+    // （以前无条件清零也留不住“指针没动”的悬停，`has-hover` 的边沿事件不会重发）。
     changed hover-reset => {
-        // 只清掉**已经不存在**的下标：数据变少但指针仍停在一张还在的卡上时，
-        // 放大效果必须留着（以前无条件清零，指针不动就再也点不亮——`has-hover`
-        // 的边沿事件不会自己重发）。
-        if (root.hot >= root.cards.length) {
+        // 指针停在放大覆盖层或左右箭头上时不动：那两种情况放大层本来就是指针下的
+        // 对象（`zoom-index` 回退到 `latch`），清掉只会让指针底下的放大层自己消失。
+        if (!(zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)) {
             root.hot = -1;
-        }
-        if (root.latch >= root.cards.length) {
             root.latch = -1;
+            root.hover-gen += 1;
         }
     }
     property <int> zoom-index: root.hot >= 0 ? root.hot
@@ -298,6 +307,7 @@ component CardRow inherits Rectangle {
                 card: card;
                 card-width: root.poster-width;
                 image-height: root.poster-height;
+                hover-gen: root.hover-gen;
                 // 首页行是横版集数卡：官方 `li` 有 8px 内衬 + 2px 描边。
                 framed: true;
                 target-id: root.target-prefix + "card." + i;

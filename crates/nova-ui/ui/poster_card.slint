@@ -71,6 +71,17 @@ export component PosterCard inherits Rectangle {
         * root.scale;
     // 覆盖层是否正被悬停（放大完成后才可能为真）。
     out property <bool> hovered: card-area.has-hover;
+    // 悬停复算请求序号（父行在 `hover-reset` 时推一档）。
+    //
+    // `has-hover` 是边沿事件：指针不动、只有数据变化时它不会重发，父行也就没机会
+    // 按“每张卡当前的悬停状态”重算放大的是哪一张。所以父行推一档序号，本卡若
+    // **仍被悬停**就重新上报一次（没被悬停的卡不说话 = 放大自然会熄灭）。
+    in property <int> hover-gen: 0;
+    changed hover-gen => {
+        if (card-area.has-hover) {
+            root.hover-changed(true);
+        }
+    }
     callback clicked();
     // 悬停状态上报给行（行用它在覆盖层里放大这张卡）。
     callback hover-changed(bool);
