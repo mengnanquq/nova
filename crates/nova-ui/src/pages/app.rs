@@ -2519,6 +2519,17 @@ fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> boo
     true
 }
 
+/// 播放页上的这一条是否已经播完（引擎报过 `Ended`）。
+///
+/// `PlayerView` 没有 `ended` 标志，但 `Player::fill_view` 在 `SessionState::Ended`
+/// 时把位置推到时长（`Session::handle(Ended)` 同样），所以 `position >= duration`
+/// 是现有字段里唯一可靠的读数。时长未知时不判满（宁可不动，也不把正在放的
+/// 片子当“播完”重开）。
+fn player_finished(view: &PlayerView) -> bool {
+    view.duration
+        .is_some_and(|total| !total.is_zero() && view.position >= total)
+}
+
 fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     let item_id = {
         let state = state.borrow();
@@ -2550,10 +2561,16 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
         //
         // 播放页按 Enter 走 `play_current` → `play`，以前会把同一个 `Player{A}`
         // 弹了再压一次：播放页闪一下、重新取直链、重开 mpv（连进度位置都重算）。
+        //
+        // **例外**：片子自然播完（Ended）或起播失败停在错误卡上时，Enter 就是
+        // “重播”。这两个状态都不是“还在放”，提前返回会让用户只能退出播放页
+        // 再进来才能重新看。
         if matches!(
             state.nav.current(),
             Some(Route::Player { item_id: playing }) if *playing == target
-        ) {
+        ) && state.player.error.is_none()
+            && !player_finished(&state.player)
+        {
             return true;
         }
         // 已经在播放页再播另一条：**替换**栈顶而不是叠加，返回仍然只回一层。

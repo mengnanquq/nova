@@ -158,6 +158,13 @@ pub(crate) struct Host {
     /// 测试：实际交给引擎的字幕上抬量（百分比）序列。
     #[cfg(test)]
     subtitle_margins: Vec<i64>,
+    /// 测试：与引擎 / 上报打交道的动作序列（`"pause"` / `"open:<url>"`）。
+    ///
+    /// 换片必须**先**停旧引擎、**再**上报进度：顺序错了用户就会听到两路声音，
+    /// 或者界面被阻塞式补发卡住。测试 sink（`TracingSink`）往同一个 log 里写
+    /// `"report:<secs>"` / `"stop:<secs>"`，才能断言两者之间的先后。
+    #[cfg(test)]
+    trace: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Host {
@@ -183,6 +190,8 @@ impl Host {
             last_present: None,
             #[cfg(test)]
             subtitle_margins: Vec::new(),
+            #[cfg(test)]
+            trace: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -402,7 +411,18 @@ impl Host {
     }
 
     fn enqueue_open(&mut self, request: OpenRequest) {
+        #[cfg(test)]
+        self.trace_push(format!("open:{}", request.url));
         self.pending_open = Some(request);
+    }
+
+    /// 测试：往共享 trace 里记一笔（与测试 sink 的 `report` / `stop` 同一条时间线）。
+    #[cfg(test)]
+    fn trace_push(&self, entry: String) {
+        self.trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(entry);
     }
 
     fn play(&mut self, runtime: &Handle) {
@@ -414,6 +434,8 @@ impl Host {
     }
 
     fn pause(&mut self, runtime: &Handle) {
+        #[cfg(test)]
+        self.trace_push("pause".to_owned());
         if let Some(engine) = self.engine.as_mut()
             && let Err(error) = runtime.block_on(engine.pause())
         {
@@ -620,6 +642,18 @@ pub(crate) fn install_notifier(
 /// 捕获结果的共享槽（`ui` 模块在事件循环结束后读它，决定退出码）。
 pub(crate) type CaptureSlot = Rc<RefCell<Option<capture::Outcome>>>;
 
+/// 结束会话时的收尾方式（[`Player::end_session`]）。
+///
+/// 两者的区别只在**要不要在界面线程上有界地等一次补发**：换片一秒都不能停，
+/// 离开播放页则可以等（补发结果直接决定下次的续播点）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionEnd {
+    /// 换片：引擎先停，进度交给 worker 异步补发。
+    Switch,
+    /// 离开播放页：有界等待一次补发（`sink::FLUSH_TIMEOUT`）。
+    Exit,
+}
+
 /// 播放页控制器（主线程；持有会话、进度上报与界面视图）。
 /// 自动重连次数上限（0.5+1+2+4+8 秒退避，合计约 15 秒）。
 const MAX_AUTO_RETRY: u32 = 5;
@@ -752,7 +786,9 @@ impl Player {
         // 永远上不了报：Exit 提交、`stop`、补发都不发生，服务端的续播点停在上一次
         // 定时上报的位置，服务端也一直不知道这次会话已经结束。
         if self.session.state() != SessionState::Idle {
-            self.end_session();
+            // 换片：引擎**立刻**停（旧片的声音不能等到上报补发完），进度交给
+            // 上报 worker 异步补发，绝不在这条路径上 `block_on`。
+            self.end_session(SessionEnd::Switch);
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
@@ -1392,7 +1428,7 @@ impl Player {
     /// 推送的视图，缓冲期它就是上一部片子的位置或 0）。现在只提交
     /// `Session::reportable_position()`：本次打开还没出过画面就一条也不发。
     pub(crate) fn exit(&mut self, _ui_position: Duration) {
-        self.end_session();
+        self.end_session(SessionEnd::Exit);
         // 会话级的错误也属于这次播放：退出播放页必须一并收尾。只 `session.reset()`
         // 不够——起播早退（没有服务器 / 条目不在缓存）走的是 `fail()` 设置的
         // `self.error`，不清理就会一直被调试通道读成「当前错误」，进另一个条目的
@@ -1421,31 +1457,52 @@ impl Player {
         self.dirty = true;
     }
 
-    /// 结束当前会话：提交一次 `Exit` 进度（服务端据此把续播点落盘并收到 `stop`），
-    /// 尽力补发，再把引擎停下来、会话复位。
+    /// 结束当前会话：停引擎、提交一次 `Exit` 进度（服务端据此把续播点落盘并收到
+    /// `stop`），然后按 [`SessionEnd`] 决定要不要有界地等一次补发。
     ///
     /// 退出播放页（[`Player::exit`]）与换片（[`Player::begin`] 里已有会话）都走这里。
     /// 换片以前只 `session.reset()`：旧会话最后一段进度既没提交，服务端也收不到 `stop`。
-    fn end_session(&mut self) {
+    fn end_session(&mut self, how: SessionEnd) {
+        // **顺序**：先停引擎再提交进度。
+        //
+        // 以前是「提交 → 有界等待补发 → pause」：换片时界面线程被 `flush()` 的
+        // `block_on`（上限 1500ms）卡住，这段时间旧片的声音还在放、画面还在动。
+        let runtime = self.runtime.clone();
+        self.host.borrow_mut().pause(&runtime);
+
         // `submitted` 才是"本次退出有没有把进度交给上报队列"；下面的 `flushed` 只是
         // 补发队列（之前没发出去的）这次发出去了几条。旧日志把补发条数写成 `sent`，
         // 正常（无需补发）时永远是 0，被误读成"退出时没有上报进度"。
         let submitted = if let Some(progress) = self.build_progress() {
+            // `Exit` 交给 worker 就是 fire-and-forget：worker 收到后会先 `stop`
+            // 再自己补发积压的队列（`ProgressReporter::submit` 对 `Exit` 会 drain），
+            // 所以换片路径不需要界面线程在这里等。
             self.progress.submit(ProgressTrigger::Exit, progress)
         } else {
             false
         };
-        if let Some(outcome) = self.progress.flush() {
-            tracing::info!(
-                submitted,
-                flushed = outcome.sent,
-                failed = outcome.failed,
-                queued = outcome.queued,
-                "退出播放页：补发进度"
-            );
+        match how {
+            // 离开播放页：这一次**有界**等待（`FLUSH_TIMEOUT`）能把补发文件落盘，
+            // 用户在等页面退出，卡一下可以接受。
+            SessionEnd::Exit => {
+                if let Some(outcome) = self.progress.flush() {
+                    tracing::info!(
+                        submitted,
+                        flushed = outcome.sent,
+                        failed = outcome.failed,
+                        queued = outcome.queued,
+                        "结束播放会话：补发进度"
+                    );
+                }
+            }
+            // 换片：界面线程一秒都不能停——用户在等着看新片。
+            SessionEnd::Switch => {
+                tracing::debug!(
+                    submitted,
+                    "结束播放会话：进度已交给上报 worker（换片不等待补发）"
+                );
+            }
         }
-        let runtime = self.runtime.clone();
-        self.host.borrow_mut().pause(&runtime);
         self.session.reset();
     }
 
@@ -2306,6 +2363,38 @@ mod tests {
         }
     }
 
+    /// 把上报调用记进**共享 trace** 的 sink：与 `Host` 的 `pause` / `open` 写同一条
+    /// 时间线，才能断言「先停引擎、再上报」的顺序。
+    struct TracingSink {
+        trace: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl nova_playback::ProgressSink for TracingSink {
+        async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
+            traced(&self.trace).push(format!("report:{}", progress.position.as_secs()));
+            Ok(())
+        }
+
+        async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
+            traced(&self.trace).push(format!("stop:{}", progress.position.as_secs()));
+            Ok(())
+        }
+    }
+
+    fn traced(
+        trace: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::sync::MutexGuard<'_, Vec<String>> {
+        trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// trace 的一份拷贝（持锁时间只在函数内，断言消息里再取一次也不会死锁）。
+    fn traced_text(trace: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+        traced(trace).clone()
+    }
+
     /// 本地缓存里有两个条目（`a` / `b`），但本机没有令牌：起播会走到取直链那一步
     /// 并立刻失败（`base_url` 指向 `127.0.0.1:1`），不需要 mpv。会话状态由用例自己推进。
     fn switch_fixture() -> (
@@ -2401,6 +2490,9 @@ mod tests {
 
         player.begin("b", None, None, &post);
 
+        // 换片路径不再阻塞等补发（那是界面线程上的 `block_on`），`Exit` 只交给
+        // worker：上报与 `stop` 是异步发生的，所以这里轮询等它做完。
+        wait_until(|| recorder.stops().len() == 1);
         assert_eq!(
             recorder.reports(),
             vec![("a".to_owned(), Duration::from_secs(600))],
@@ -2420,6 +2512,125 @@ mod tests {
             Duration::ZERO,
             "B 从头开始（不是 A 的 10:00）"
         );
+    }
+
+    /// 等 worker 线程把命令处理完（最多 3 秒）。
+    ///
+    /// 换片路径不再阻塞等补发，界面线程只管把 `Exit` 排进 channel；上报与 `stop`
+    /// 是 worker 异步做的，测试只能轮询。
+    fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        done()
+    }
+
+    /// 换片不能在界面线程上等补发（回归：旧实现先 `flush()`——`block_on` + 1500ms
+    /// 上限——再 `pause`，等的那段时间旧片的声音与画面一直在继续）。
+    ///
+    /// 断言：换片一次阻塞式 `flush()` 都不调；引擎在**上报之前**就停了；旧会话的
+    /// `Exit` / `stop` 仍然照常交给 worker（不阻塞不等于不上报）。
+    #[test]
+    fn switching_items_stops_the_old_engine_before_reporting_progress() {
+        let (_dir, local, mut player, runtime) = switch_fixture();
+        let trace = player.host.borrow().trace.clone();
+        player.progress = sink::Progress::for_test(
+            &local,
+            runtime.handle(),
+            Arc::new(TracingSink {
+                trace: Arc::clone(&trace),
+            }) as Arc<dyn ProgressSink>,
+        );
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.advance_position(Duration::from_secs(600));
+        traced(&trace).clear();
+
+        player.begin("b", None, None, &post);
+
+        assert_eq!(
+            player.progress.flush_count(),
+            0,
+            "换片路径不能调 `Progress::flush()`：那是界面线程上的 block_on"
+        );
+        assert!(
+            wait_until(|| traced_text(&trace).iter().any(|entry| entry == "stop:600")),
+            "Exit 仍必须交给 worker（否则服务端永远收不到 stop）：{:?}",
+            traced_text(&trace)
+        );
+        let log = traced_text(&trace);
+        let at = |needle: &str| log.iter().position(|entry| entry == needle);
+        let pause = at("pause").expect("换片必须停掉旧引擎");
+        let report = at("report:600").expect("旧会话的 Exit 进度必须上报");
+        let stop = at("stop:600").expect("服务端要收到 stop");
+        assert!(
+            pause < report && pause < stop,
+            "必须先停旧引擎、再上报进度（旧实现先 block_on 等补发）：{log:?}"
+        );
+    }
+
+    /// 复审 💡5：换片时**旧引擎先停**，新引擎的 `OpenRequest` 才下去。
+    ///
+    /// 顺序错了就是两路声音（旧片还在放，新片已经开），或者旧引擎把新会话的
+    /// 位置报上来。
+    #[test]
+    fn switching_items_stops_the_old_engine_before_opening_the_new_one() {
+        let (_dir, _local, mut player, _runtime) = switch_fixture();
+        let trace = player.host.borrow().trace.clone();
+        let post: Post = Arc::new(|_| {});
+
+        // A 已经打开并出画。
+        player.begin("a", None, None, &post);
+        let generation = player.generation;
+        player.on_open_ready(
+            generation,
+            Ok(Box::new(OpenRequest::new("http://a.example/stream"))),
+        );
+        player.session.handle(EngineEvent::FirstFrame);
+        traced(&trace).clear();
+
+        // 换片：B 的直链还没回来，引擎必须已经被停掉。
+        player.begin("b", None, None, &post);
+        assert_eq!(
+            traced_text(&trace).first().map(String::as_str),
+            Some("pause"),
+            "换片的第一件事是停旧引擎（不能先等上报补发）：{:?}",
+            traced_text(&trace)
+        );
+
+        // B 的直链回来：新请求交给引擎，且仍然排在 pause 之后。
+        let generation = player.generation;
+        player.on_open_ready(
+            generation,
+            Ok(Box::new(OpenRequest::new("http://b.example/stream"))),
+        );
+        let log = traced_text(&trace);
+        assert_eq!(
+            log.last().map(String::as_str),
+            Some("open:http://b.example/stream"),
+            "新引擎收到的必须是 B 的 OpenRequest：{log:?}"
+        );
+        assert!(
+            log.iter().position(|entry| entry == "pause")
+                < log
+                    .iter()
+                    .position(|entry| entry == "open:http://b.example/stream"),
+            "旧引擎先停，新引擎再 open：{log:?}"
+        );
+        let host = player.host.borrow();
+        assert_eq!(
+            host.pending_open.as_ref().map(|open| open.url.as_str()),
+            Some("http://b.example/stream"),
+            "排进引擎的必须是 B 的请求"
+        );
+        drop(host);
     }
 
     fn init_test_backend() {

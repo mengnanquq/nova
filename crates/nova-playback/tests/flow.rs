@@ -54,6 +54,11 @@ impl ProgressSink for CountingSink {
         }
         Ok(())
     }
+
+    /// 这个用例只关心进度点是否发出；会话结束在 nova-app 的用例里覆盖。
+    async fn stop(&self, _progress: &PlaybackProgress) -> Result<(), ReportError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

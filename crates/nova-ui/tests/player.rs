@@ -776,3 +776,59 @@ fn playing_the_item_already_on_screen_changes_nothing() {
     );
     assert_eq!(app.page(), Page::Player);
 }
+
+/// 片子自然播完（`Ended`）后再按 Enter：必须重新起播。
+///
+/// 回归：`play()` 只按“路由里的条目等于当前条目”就提前返回，播完的片子
+/// 按 Enter 一点反应也没有，用户只能先退出播放页再进来。
+/// `PlayerView` 没有 `ended` 标志，`Ended` 时位置被推到时长（`Session::handle`），
+/// 所以这里用 `position >= duration` 引出“已播完”态。
+#[test]
+fn ended_playback_restarts_the_same_item() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    let mut finished = player_view();
+    finished.position = finished.duration.unwrap_or_default();
+    finished.playing = false;
+    app.set_player(&finished);
+    assert_eq!(
+        app.player_view().position,
+        app.player_view().duration.unwrap_or_default(),
+        "用例前提：位置已推到时长"
+    );
+
+    assert!(app.play("dune"), "重播也算处理掉了");
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["dune"],
+        "播完之后按 Enter 必须重新起播（不能走提前返回）"
+    );
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Player {
+            item_id: "dune".to_owned()
+        }),
+        "重播不能多叠一层播放页"
+    );
+}
+
+/// 起播失败停在错误卡上时再按 Enter：必须重新起播（错误卡上的「重试」同理）。
+#[test]
+fn error_state_playback_replays_the_same_item() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    app.set_player(&player_error());
+
+    assert!(app.play("dune"), "重播也算处理掉了");
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["dune"],
+        "错误态下按 Enter 必须重新起播（不能走提前返回）"
+    );
+}

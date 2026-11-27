@@ -8,6 +8,8 @@
 //! 界面线程只往无界 channel 里塞"该上报了"，退出时发一条 `Flush` 并**有界地**等结果。
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -97,6 +99,11 @@ enum Command {
 pub(crate) struct Progress {
     commands: Option<UnboundedSender<Command>>,
     runtime: Handle,
+    /// 测试：调用过几次**阻塞式**补发（`flush()`）。
+    ///
+    /// 换片路径绝不能碰到它：那里面有 `block_on` + 1500ms 上限，跑在界面线程上。
+    #[cfg(test)]
+    flushes: Arc<AtomicUsize>,
 }
 
 impl Progress {
@@ -109,6 +116,8 @@ impl Progress {
             return Self {
                 commands: None,
                 runtime: runtime.clone(),
+                #[cfg(test)]
+                flushes: Arc::new(AtomicUsize::new(0)),
             };
         };
         Self::with_sink(local, runtime, Arc::new(ProviderSink::new(provider)))
@@ -177,6 +186,8 @@ impl Progress {
         Self {
             commands: Some(commands),
             runtime: runtime.clone(),
+            #[cfg(test)]
+            flushes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -190,7 +201,12 @@ impl Progress {
     }
 
     /// 退出前尽力补发；最多等 [`FLUSH_TIMEOUT`]。
+    ///
+    /// **只给离开播放页 / 进程退出用**：它 `block_on` 在界面线程上。换片
+    /// （[`Player::begin`](crate::player::Player)）只 `submit`，不等补发。
     pub(crate) fn flush(&self) -> Option<FlushOutcome> {
+        #[cfg(test)]
+        self.flushes.fetch_add(1, Ordering::SeqCst);
         let commands = self.commands.as_ref()?;
         let (reply, wait) = oneshot::channel();
         if commands.send(Command::Flush(reply)).is_err() {
@@ -214,6 +230,12 @@ impl Progress {
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Command::Shutdown);
         }
+    }
+
+    /// 测试：`flush()` 被调用过几次。换片路径必须是 0。
+    #[cfg(test)]
+    pub(crate) fn flush_count(&self) -> usize {
+        self.flushes.load(Ordering::SeqCst)
     }
 }
 

@@ -89,10 +89,10 @@ pub trait ProgressSink: Send + Sync {
     /// 结束会话（[`ProgressTrigger::Exit`] 的那一条上报之后调用一次）。
     ///
     /// 服务端（Jellyfin / Emby）只在收到这条时把续播点落盘，它和进度上报是**两个**
-    /// 请求。默认什么都不做：只关心进度的 sink 不必实现它。
-    async fn stop(&self, _progress: &PlaybackProgress) -> Result<(), ReportError> {
-        Ok(())
-    }
+    /// 请求。**生产 sink 必须实现它**：默认“什么都不做”会让服务端永远不知道会话
+    /// 结束，续播点停在上一次定时上报的位置，所以这里**故意不给默认实现**，
+    /// 逼每个 sink 显式表态。
+    async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError>;
 }
 
 /// 一次上报的结果。
@@ -529,6 +529,12 @@ mod tests {
             }
             drop(failures);
             lock(&self.reports).push(progress.clone());
+            Ok(())
+        }
+
+        /// 这个用例集的 sink 只关心进度上报；会话结束单独在 nova-app 的
+        /// `RecordingSink` 里覆盖。
+        async fn stop(&self, _progress: &PlaybackProgress) -> Result<(), ReportError> {
             Ok(())
         }
     }
