@@ -253,42 +253,112 @@ fn narrow_window_drops_the_tabs_that_do_not_fit() {
 /// `focus_tab_right=643.2 > tabs_viewport_w=623`（首页同尺寸却是 574.6 ≤ 587）——
 /// 看着像"搜索页标签行少算了一段余量"，其实两页标签行宽度、最大滚动量完全一致
 /// （`content-width` = 标签行 `preferred-width`，两者贴合）。改成内容坐标 +
-/// 当前滚动偏移后，滚到底的探针位置就是标签真正的位置：右沿贴视口右沿。
+/// 当前滚动偏移后，滚到底的探针位置就是标签真正的位置。
+///
+/// 另一条余量（本测试同时守住）：标签行左右各留 `Theme.focus-offset` 内边距，
+/// 焦点环画在标签本体外 `Theme.focus-offset` 处。所以滚到底时**标签本体**右沿是
+/// `viewport - focus-offset`，焦点环的外沿才贴住视口右沿。
 #[test]
 fn last_tab_scrolls_fully_into_the_tabs_viewport() {
+    let last = real_tabs().len() - 1;
     for (width, height) in [(800.0f32, 600.0f32), (1920.0, 1080.0)] {
         for page in [Page::Home, Page::Search] {
-            let (left, right, viewport, scroll_x) = last_tab_geometry(page, width, height);
+            let geometry = tab_geometry(page, width, height, last);
             let label = format!("{page:?} {width}x{height}");
             assert!(
-                left >= -0.5 && right <= viewport + 0.5,
-                "{label}: 焦点标签要完整落在标签区里：left={left} right={right} viewport={viewport} scroll_x={scroll_x}"
+                geometry.ring_fits(),
+                "{label}: 焦点环（含描边余量）要完整落在标签区里：left={} right={} offset={} viewport={} scroll_x={}",
+                geometry.left,
+                geometry.right,
+                geometry.focus_offset,
+                geometry.viewport,
+                geometry.scroll_x
             );
             if width < 1000.0 {
                 assert!(
-                    scroll_x < 0.0,
-                    "{label}: 800px 下标签行必须已经横向滚动（content-x = {scroll_x}）"
+                    geometry.scroll_x < 0.0,
+                    "{label}: 800px 下标签行必须已经横向滚动（content-x = {}）",
+                    geometry.scroll_x
                 );
-                // 滚到底 = Flickable 的滚动钳制处；标签行末端与内容宽度齐平，
-                // 所以最后一个标签的右沿应当**贴住**视口右沿，不是差一截。
+                // 滚到底 = Flickable 的滚动钳制处：标签行末端（含焦点环余量）与
+                // 内容宽度齐平，所以最后一个标签的**焦点环外沿**应当贴住视口右沿。
+                let ring_right = geometry.right + geometry.focus_offset;
                 assert!(
-                    (viewport - right).abs() <= 1.0,
-                    "{label}: 滚到底后最后一个标签的右沿 {right} 应贴住视口右沿 {viewport}（探针偏了 {}px）",
-                    viewport - right
+                    (geometry.viewport - ring_right).abs() <= 1.0,
+                    "{label}: 滚到底后最后一个标签的焦点环右沿 {ring_right} 应贴住视口右沿 {}（探针偏了 {}px）",
+                    geometry.viewport,
+                    geometry.viewport - ring_right
                 );
             } else {
                 assert!(
-                    scroll_x.abs() < 0.5,
-                    "{label}: 1920px 下标签全都放得下，不该有滚动（content-x = {scroll_x}）"
+                    geometry.scroll_x.abs() < 0.5,
+                    "{label}: 1920px 下标签全都放得下，不该有滚动（content-x = {}）",
+                    geometry.scroll_x
                 );
             }
         }
     }
 }
 
-/// 把键盘焦点推到最后一个标签，返回 `(focus_tab_left, focus_tab_right,
-/// tabs_viewport_w, tabs_scroll_x)`（都是顶栏探针的原样输出）。
-fn last_tab_geometry(page: Page, width: f32, height: f32) -> (f32, f32, f32, f32) {
+/// 焦点环余量：两端标签的环都必须完整可见，首页与搜索页、800 / 1920 都一致。
+///
+/// 回归（审查 R8-A1 后续）：标签行原来没有内边距，`content-width` 只算标签本体。
+/// 滚到最右时最后一个标签的右沿贴住视口，焦点环的右侧描边被 `tabs-stretch` 的
+/// `clip` 裁掉；`content-x = 0` 时第一个标签的左侧描边同理。现在标签行左右各留
+/// `Theme.focus-offset`，判定用 `left - focus-offset >= 0 &&
+/// right + focus-offset <= viewport`（值全部从 theme 取，不写死）。
+#[test]
+fn first_and_last_tab_focus_rings_stay_inside_the_tabs_viewport() {
+    let last = real_tabs().len() - 1;
+    for (width, height) in [(800.0f32, 600.0f32), (1920.0, 1080.0)] {
+        for page in [Page::Home, Page::Search] {
+            for index in [0, last] {
+                let geometry = tab_geometry(page, width, height, index);
+                assert!(
+                    geometry.focus_offset >= geometry.focus_width,
+                    "{page:?} {width}x{height}: 焦点环余量 {} 不能小于描边宽度 {}，否则描边没有可画的位置",
+                    geometry.focus_offset,
+                    geometry.focus_width
+                );
+                assert!(
+                    geometry.ring_fits(),
+                    "{page:?} {width}x{height} 标签 {index}: 焦点环要完整落在标签区里：ring_left={} ring_right={} offset={} viewport={} scroll_x={}",
+                    geometry.left - geometry.focus_offset,
+                    geometry.right + geometry.focus_offset,
+                    geometry.focus_offset,
+                    geometry.viewport,
+                    geometry.scroll_x
+                );
+            }
+        }
+    }
+}
+
+/// 顶栏焦点标签的几何（探针原样值 + 画焦点环需要的 theme 值）。
+struct TabGeometry {
+    /// 标签本体在标签区视口里的左沿（`nav_geometry.focus_tab_left`）。
+    left: f32,
+    /// 标签本体在标签区视口里的右沿（`nav_geometry.focus_tab_right`）。
+    right: f32,
+    viewport: f32,
+    scroll_x: f32,
+    /// 焦点环相对标签本体向外的偏移（`Theme.focus-offset`）。
+    focus_offset: f32,
+    /// 焦点环描边宽度（`Theme.focus-width`）。
+    focus_width: f32,
+}
+
+impl TabGeometry {
+    /// 焦点环（含左右两侧的描边）是否完整落在标签区里。
+    fn ring_fits(&self) -> bool {
+        self.left - self.focus_offset >= -0.5
+            && self.right + self.focus_offset <= self.viewport + 0.5
+    }
+}
+
+/// 把键盘焦点推到 `index` 号标签：先进顶栏层，再一路向左到 0（端头夹住，
+/// 不回绕），然后向右 `index` 步。返回探针几何与 theme 里的焦点环尺寸。
+fn tab_geometry(page: Page, width: f32, height: f32, index: usize) -> TabGeometry {
     init_backend();
     let app = App::new_with(AppWindow::new().expect("创建窗口"));
     app.ui()
@@ -312,7 +382,7 @@ fn last_tab_geometry(page: Page, width: f32, height: f32) -> (f32, f32, f32, f32
     app.ui().show().expect("显示窗口");
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
 
-    // 进顶栏层（首页可能先经过 hero 按钮行）。
+    // 进顶栏层（首页可能先经过 hero 按钮行；搜索页先落在页内大输入框）。
     for _ in 0..3 {
         if app.focus_layer() == FocusLayer::Navbar {
             break;
@@ -324,23 +394,35 @@ fn last_tab_geometry(page: Page, width: f32, height: f32) -> (f32, f32, f32, f32
         FocusLayer::Navbar,
         "{page:?} {width}x{height}: 顶栏层要能被方向键到达"
     );
-    // 逐步移到最后一个标签：每一步都触发一次 `ensure-visible`（平滑滚动）。
-    for _ in 0..(tabs.len() - 1) {
+    // 先回到第一个标签（左端夹住），再向右走到目标：每一步都可能触发
+    // `ensure-visible`（平滑滚动）。
+    for _ in 0..tabs.len() {
+        press(&app, slint::platform::Key::LeftArrow);
+    }
+    assert_eq!(
+        app.nav_focus(),
+        0,
+        "{page:?} {width}x{height}: 焦点要能回到第一个标签"
+    );
+    for _ in 0..index {
         press(&app, slint::platform::Key::RightArrow);
     }
     assert_eq!(
         app.nav_focus(),
-        tabs.len() - 1,
-        "{page:?} {width}x{height}: 焦点要能到最后一个标签"
+        index,
+        "{page:?} {width}x{height}: 焦点要能到第 {index} 个标签"
     );
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
 
-    (
-        app.ui().get_nav_focus_tab_left(),
-        app.ui().get_nav_focus_tab_right(),
-        app.ui().get_nav_tabs_viewport_w(),
-        app.ui().get_nav_tabs_scroll_x(),
-    )
+    let theme = app.ui().global::<Theme>();
+    TabGeometry {
+        left: app.ui().get_nav_focus_tab_left(),
+        right: app.ui().get_nav_focus_tab_right(),
+        viewport: app.ui().get_nav_tabs_viewport_w(),
+        scroll_x: app.ui().get_nav_tabs_scroll_x(),
+        focus_offset: theme.get_focus_offset(),
+        focus_width: theme.get_focus_width(),
+    }
 }
 
 /// 发一个键并让动画走一小步（50ms：`ensure-visible` 的平滑滚动还在途中，

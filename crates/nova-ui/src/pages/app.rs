@@ -1161,8 +1161,7 @@ impl App {
             // “当前路由 == 某库”判断也会对着旧 id 做。返回仍然只回一层
             // （与 `open_search` 换查询词同一做法）。
             Some(Route::Library { .. }) => {
-                state.nav.pop();
-                state.nav.push(Route::Library {
+                state.nav.replace_top(Route::Library {
                     id: view.id.clone(),
                     title: view.title.clone(),
                 });
@@ -1186,8 +1185,7 @@ impl App {
             Some(Route::Search { term }) if *term == view.term => {}
             Some(Route::Search { .. }) => {
                 // 查询词变了：替换栈顶，不重复压栈（返回仍然只回一层）。
-                state.nav.pop();
-                state.nav.push(Route::Search {
+                state.nav.replace_top(Route::Search {
                     term: view.term.clone(),
                 });
             }
@@ -2647,8 +2645,7 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
                 Some(Route::Detail { item_id: below }) if *below != target
             );
             if stale_detail {
-                state.nav.pop();
-                state.nav.push(Route::Detail {
+                state.nav.replace_top(Route::Detail {
                     item_id: target.clone(),
                 });
             }
@@ -2814,8 +2811,7 @@ fn clear_search_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         state.focus.search = 0;
         // 路由顶端的查询词跟着清空：否则从结果点进详情再返回，栈顶还挂着旧词。
         if matches!(state.nav.current(), Some(Route::Search { .. })) {
-            state.nav.pop();
-            state.nav.push(Route::Search {
+            state.nav.replace_top(Route::Search {
                 term: String::new(),
             });
         }

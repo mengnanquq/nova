@@ -75,9 +75,15 @@ pub struct Navigator { /* 栈 + back() */ }
 （`AppWindow.page`，`Page::index()` 与之对应）。新页面**不重排已有编号**，只在末尾追加。
 
 **换实例 = 替换栈顶**：已经停在媒体库时再打开另一个库（顶栏标签、调试通道 `tab`）
-是弹出旧的 `Route::Library` 再压入新的，不新增一层——否则 `current_route()` 会永远
+走 `Navigator::replace_top`（替换栈顶，不新增一层）——否则 `current_route()` 会永远
 停在第一个进的库上（体检 R8-A2：页面 / 高亮 / 标题都已经切对，`view.route` 却是旧库），
-而返回仍然只回一层。`Route::Search` 换查询词也是同一做法。
+而返回仍然只回一层。`Route::Search` 换查询词、播放页下方挂着另一条的详情也是同一
+做法（统一用 `replace_top`，不再手写 `pop` + `push`）。
+
+从**详情页**触发顶栏标签（调试通道 `tab`，以及以后详情页上的顶栏）是**压栈**：
+新库压在详情页上，返回先回详情页。点的是当前详情所属的库也一样——栈里会短暂出现
+两份相同的 `Route::Library`，这是保留“返回 = 回到来时的页面”的代价（去重会让返回
+直接跳过详情页），页面 / 高亮 / 探针只看栈顶，不受影响。
 
 ## 搜索页（独立路由）
 
@@ -220,10 +226,14 @@ export struct Target {
 - 焦点环只在键盘导航中显示：`AppWindow.focus-layer != 0`（顶栏 / hero 层）才画，
   鼠标点击不会进入这两层，所以不会留下一个「假焦点」；
 - 焦点离开内容层时，内容网格 / 行**不再放大**焦点卡（避免两处焦点指示同时亮着）；
-- 窄窗口下顶栏标签行是横向 Flickable：焦点移到被截断的标签上时，那个标签会被
-  `ensure-visible` 横向滚入标签区；标签行宽度就是标签区的 `content-width`（末端没有
-  额外余量），所以滚到最右时最后一个标签的右沿**贴住**标签区右沿（`nav_geometry`
-  报 `focus_tab_right == tabs_viewport_w`）；
+- 窄窗口下顶栏标签行是横向 Flickable：焦点移到被截断的标签上时，焦点**环**会被
+  `ensure-visible` 横向滚入标签区。标签行（`tabs-row`）左右各留 `Theme.focus-offset`
+  的内边距，这段余量算进标签区的 `content-width`——否则滚到两端时第一个 / 最后一个
+  标签的环描边会被标签区的 `clip` 裁掉。所以“焦点环完整可见”的判定是
+  `focus_tab_left - focus-offset >= 0 && focus_tab_right + focus-offset <=
+  tabs_viewport_w`（`focus-offset` / `focus-width` 都从 `Theme` 取）；800px 下滚到底时
+  标签本体右沿是 `tabs_viewport_w - focus-offset`，环的外沿才贴住视口右沿
+  （旧版“末端无额外余量 / `focus_tab_right == tabs_viewport_w`”的说法已过时）；
 - 搜索页的顶栏**不画**胶囊搜索框（页内已有大搜索框），那个控件也就不能占标签区的
   宽度（`R7-C1`：以前 `visible: false` 照样占位，800px 下标签区从 587 掉到 383）。
   标签区的宽度与首页同一套算法，两页的标签行 / 最大滚动量也完全一致（`R8-A1`

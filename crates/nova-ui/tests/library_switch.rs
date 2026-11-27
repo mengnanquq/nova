@@ -188,7 +188,7 @@ fn tab_activated_click_resets_scroll_and_focus() {
 /// `App::current_route()` 仍是**第一个进的库**——调试通道 `view.route` 报旧 id
 /// （真机：页面已经是「海外电影」4546 部，`route` 还写着 `动画电影`），
 /// 任何"当前路由 == 某个库"的判断（例如快照重建）也会对着旧 id 做。
-/// 修复后换库走"弹出旧的、压入新的"，栈深度不变。
+/// 修复后换库走 `Navigator::replace_top`（替换栈顶），栈深度不变。
 #[test]
 fn switching_library_replaces_the_route_in_place() {
     let a = library("lib-a", "动画电影", "a");
@@ -243,4 +243,118 @@ fn switching_library_replaces_the_route_in_place() {
     assert!(app.go_back(), "库页可以返回");
     assert_eq!(app.page(), Page::Home, "返回落在首页而不是旧库");
     assert_eq!(app.current_route(), Some(Route::Home));
+}
+
+/// 从详情页点**另一个库**的标签：压一层新库，详情页留在下层；返回回到详情页。
+///
+/// 详情页本身没有顶栏（鼠标要点标签得先返回库页），但调试通道的 `tab` 命令
+/// （以及以后详情页上的顶栏）会在详情页直接触发 `tab-activated`。导航语义要与
+/// “从详情页去别处”一致：点标签 = 从当前页离开去库 B，返回仍然回到来时的详情页。
+/// 修复前没有任何测试钉住这条路径（只有库页之间切库 + 库页 → 详情 → 返回）。
+#[test]
+fn tab_click_from_detail_pushes_library_and_back_returns_to_detail() {
+    let a = library("lib-a", "动画电影", "a");
+    let b = library("lib-b", "海外电影", "b");
+    init_backend();
+    let app = App::new_with(AppWindow::new().expect("创建窗口"));
+    app.ui().set_window_w(W);
+    app.ui().set_window_h(H);
+    app.ui().window().set_size(slint::LogicalSize::new(W, H));
+    app.set_home(&home_filled());
+    app.show_home();
+    app.open_library(&a);
+    assert!(app.open_detail("a19"));
+    assert_eq!(app.page(), Page::Detail);
+    let detail_route = app.current_route().expect("详情路由");
+    assert_eq!(
+        detail_route,
+        Route::Detail {
+            item_id: "a19".to_owned(),
+        },
+        "前提：栈顶是库 A 的详情页"
+    );
+    let depth = app.navigator().len();
+
+    // 点标签最终走 `App::open_library`（`tab_activated` → `Shell::activate_tab`）。
+    app.open_library(&b);
+    assert_eq!(app.page(), Page::Library);
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Library {
+            id: "lib-b".to_owned(),
+            title: "海外电影".to_owned(),
+        })
+    );
+    assert_eq!(
+        app.navigator().len(),
+        depth + 1,
+        "从详情页点标签要压栈，不能把详情页替换掉"
+    );
+
+    assert!(app.go_back(), "库页可以返回");
+    assert_eq!(
+        app.page(),
+        Page::Detail,
+        "返回要回到详情页，而不是直接回库 A"
+    );
+    assert_eq!(app.current_route(), Some(detail_route));
+    assert_eq!(app.navigator().len(), depth, "返回一层后栈深度复原");
+}
+
+/// 💡3：从详情页点**同一个库**的标签会再压一份相同的库路由（栈里出现重复 A）。
+///
+/// 评估后**保留**这个行为：详情页点标签的语义是“从这里去某个库，返回还回到这里”
+/// ——与点另一个库完全一致。要保留返回目标，栈顶就必须压一层；在这里“去重”
+/// （不压栈或直接替换详情页）会让返回跳过详情页，破坏“返回 = 回到来时的页面”。
+/// 重复的 A 只是同一条路由出现两次，不影响页面 / 高亮 / 探针（它们只看栈顶）。
+/// 这条测试把行为钉住：`[.., A, Detail, A]`，返回先回详情，再回库 A。
+#[test]
+fn tab_click_for_the_same_library_from_detail_keeps_the_detail_on_the_stack() {
+    let a = library("lib-a", "动画电影", "a");
+    init_backend();
+    let app = App::new_with(AppWindow::new().expect("创建窗口"));
+    app.ui().set_window_w(W);
+    app.ui().set_window_h(H);
+    app.ui().window().set_size(slint::LogicalSize::new(W, H));
+    app.set_home(&home_filled());
+    app.show_home();
+    app.open_library(&a);
+    assert!(app.open_detail("a19"));
+    let depth = app.navigator().len();
+
+    app.open_library(&a);
+    assert_eq!(app.page(), Page::Library);
+    assert_eq!(app.navigator().len(), depth + 1, "从详情页点标签是压栈");
+    assert_eq!(
+        app.navigator().stack(),
+        [
+            Route::Home,
+            Route::Library {
+                id: "lib-a".to_owned(),
+                title: "动画电影".to_owned(),
+            },
+            Route::Detail {
+                item_id: "a19".to_owned(),
+            },
+            Route::Library {
+                id: "lib-a".to_owned(),
+                title: "动画电影".to_owned(),
+            },
+        ],
+        "同一个库的标签也会压一层：详情页必须留在下层"
+    );
+
+    assert!(app.go_back());
+    assert_eq!(app.page(), Page::Detail, "第一次返回回到详情页");
+    assert_eq!(app.navigator().len(), depth);
+    assert!(app.go_back());
+    assert_eq!(app.page(), Page::Library, "第二次返回回到库 A");
+    assert_eq!(app.navigator().len(), depth - 1);
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Library {
+            id: "lib-a".to_owned(),
+            title: "动画电影".to_owned(),
+        })
+    );
 }

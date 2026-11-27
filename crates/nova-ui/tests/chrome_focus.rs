@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::{home_filled, init_backend, library_view};
-use nova_ui::{App, AppWindow, FocusLayer, HomeView, LibraryTab, Page, Route, SearchView};
+use nova_ui::{App, AppWindow, FocusLayer, HomeView, LibraryTab, Page, Route, SearchView, Theme};
 use slint::ComponentHandle;
 use slint::platform::Key;
 
@@ -390,14 +390,25 @@ fn narrow_navbar_scrolls_the_focused_tab_into_view() {
     let left = app.ui().get_nav_focus_tab_left();
     let right = app.ui().get_nav_focus_tab_right();
     let viewport = app.ui().get_nav_tabs_viewport_w();
+    // 焦点环画在标签本体外 `Theme.focus-offset`：判定要连环一起算，
+    // 只看标签本体的话末位标签的右侧描边被裁掉也“通过”。
+    let theme = app.ui().global::<Theme>();
+    let offset = theme.get_focus_offset();
+    let focus_width = theme.get_focus_width();
+    assert!(
+        offset >= focus_width,
+        "焦点环余量 {offset} 不能小于描边宽度 {focus_width}"
+    );
     assert!(
         app.ui().get_nav_tabs_scroll_x() < 0.0,
         "标签区应该已经横向滚动（content-x = {}）",
         app.ui().get_nav_tabs_scroll_x()
     );
     assert!(
-        left >= 0.0 && right <= viewport,
-        "焦点标签要完整落在标签区里：left={left} right={right} viewport={viewport} scroll_x={}",
+        left - offset >= -0.5 && right + offset <= viewport + 0.5,
+        "焦点环要完整落在标签区里：ring_left={} ring_right={} offset={offset} viewport={viewport} scroll_x={}",
+        left - offset,
+        right + offset,
         app.ui().get_nav_tabs_scroll_x()
     );
 }

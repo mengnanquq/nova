@@ -64,6 +64,18 @@ impl Navigator {
         self.stack.pop()
     }
 
+    /// 替换栈顶路由；栈空时等同于压栈。
+    ///
+    /// 用于“同一层换个目标”：换库（`open_library`）、换查询词（`open_search` /
+    /// 清空输入）、换片（播放页下方挂着另一条的详情）。这些地方以前写
+    /// `pop(); push(..)`，语义一样但要保证成对出现；统一走这里，栈深度不变。
+    pub fn replace_top(&mut self, route: Route) {
+        match self.stack.last_mut() {
+            Some(top) => *top = route,
+            None => self.stack.push(route),
+        }
+    }
+
     /// 返回上一级：弹出当前路由并返回新的栈顶。
     ///
     /// 只剩根路由（或空栈）时不做任何事并返回 `None`。
@@ -117,6 +129,21 @@ mod tests {
         assert_eq!(nav.pop(), Some(detail("a")));
         assert_eq!(nav.current(), Some(&Route::Home));
         assert_eq!(nav.len(), 1);
+    }
+
+    #[test]
+    fn replace_top_swaps_only_the_top() {
+        let mut nav = Navigator::new(Route::Home);
+        nav.push(detail("a"));
+        nav.replace_top(detail("b"));
+        assert_eq!(nav.len(), 2, "替换栈顶不改变栈深度");
+        assert_eq!(nav.current(), Some(&detail("b")));
+        assert_eq!(nav.stack()[0], Route::Home);
+        assert_eq!(nav.back(), Some(&Route::Home), "返回仍然只回一层");
+
+        let mut empty = Navigator::empty();
+        empty.replace_top(Route::Home);
+        assert_eq!(empty.current(), Some(&Route::Home), "空栈时等同于压栈");
     }
 
     #[test]

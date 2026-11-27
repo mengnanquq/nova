@@ -116,9 +116,12 @@ export component Navbar inherits Rectangle {
     //
     // 焦点标签的位置由**焦点那个标签自己**写进来（`for` 元素无法从父组件按下标访问），
     // 记的是**标签行内容坐标**（`self.x`，滚动不会改它）；下面四个 `probe-*` 再
-    // 换算成**标签区视口坐标**报出去：
-    // `0 <= probe-focus-tab-left && probe-focus-tab-right <= probe-tabs-viewport-w`
-    // 就是"焦点标签完整可见"。
+    // 换算成**标签区视口坐标**报出去。标签行左右各留 `Theme.focus-offset` 的内边距
+    // （见 `tabs-row`），焦点环画在标签本体外 `Theme.focus-offset` 处，所以
+    // "焦点环完整可见"（含描边）的判定是
+    // `probe-focus-tab-left - Theme.focus-offset >= 0 &&
+    //  probe-focus-tab-right + Theme.focus-offset <= probe-tabs-viewport-w`；
+    // 只看标签本体（`0 <= left && right <= viewport`）会漏掉被裁掉的环。
     //
     // 以前这里记的是 `absolute-position`（**已经含滚动偏移**），探针又加了一遍
     // `content-x`：同一个标签报出的左右沿会随"按下方向键那一刻已经滚到哪儿"漂移
@@ -236,6 +239,12 @@ export component Navbar inherits Rectangle {
 
             tabs-row := HorizontalLayout {
                 spacing: Theme.nav-link-gap;
+                // 焦点环画在标签本体左右各 `Theme.focus-offset` 之外（见下面的
+                // `FocusRing`）。给标签行留同样的内边距，`content-width`
+                // （= `tabs-row.preferred-width`）才把焦点环的余量算进去：否则滚到
+                // 最右 / 最左时，最后一个 / 第一个标签的环描边会被 `clip` 裁掉。
+                padding-left: Theme.focus-offset;
+                padding-right: Theme.focus-offset;
                 height: parent.height;
                 cross-axis-alignment: center;
 
@@ -274,9 +283,11 @@ export component Navbar inherits Rectangle {
                     property <bool> keyboard-focused: i == root.focus-index;
                     changed keyboard-focused => {
                         if (self.keyboard-focused) {
-                            // 窄窗口下标签行比标签区宽：把焦点标签横向滚入可见区
+                            // 窄窗口下标签行比标签区宽：把焦点**环**横向滚入可见区
                             // （`ensure-visible` 滚的是包着它的 `tabs-view`）。
-                            self.ensure-visible(ScrollBehavior.smooth);
+                            // 只滚标签本体不够：环比本体左右各宽 `Theme.focus-offset`，
+                            // 滚到两端时描边仍会被标签区裁掉，所以对环本身 ensure。
+                            focus-ring.ensure-visible(ScrollBehavior.smooth);
                         }
                         // 把几何报给顶栏的探针（见 `probe-focus-tab-*`）。
                         self.report-geometry();
@@ -302,7 +313,7 @@ export component Navbar inherits Rectangle {
 
                     // 焦点环（accent 2px 描边）：与"当前标签"的白色文字（选中态）区分。
                     // 只在键盘进入顶栏层时才有非 -1 的 `focus-index`，鼠标点击不出环。
-                    FocusRing {
+                    focus-ring := FocusRing {
                         x: -Theme.focus-offset;
                         y: (parent.height - self.height) / 2;
                         width: parent.width + Theme.focus-offset * 2;
