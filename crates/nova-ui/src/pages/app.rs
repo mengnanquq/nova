@@ -2898,6 +2898,16 @@ fn player_note_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 }
 
 fn player_play_pause(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    // 错误卡（`view.error` 非空）：`Enter` / `Space` / 控制层播放键 = 卡上的「重试」。
+    //
+    // 以前这里无条件走 toggle：宿主的会话停在 `Failed`，`Session::play` 直接拒绕，
+    // 连一个命令都发不出去——用户看到的就是“按了没反应”（尤其是重播取直链失败后，
+    // 卡片就在画面中央）。走重试回调与点「重试」按钮完全同一条路径（`Player::retry`），
+    // 不另做一套逻辑。
+    if state.borrow().player.error.is_some() {
+        player_retry(ui, state);
+        return;
+    }
     // 播完（`SessionState::Ended`）后：控制层播放键 / `Enter` / `Space` 都是“从头
     // 重播”（与 Netflix 一致）。以前这里无条件原地 toggle：界面的 `playing` 翻了、
     // 宿主的会话仍停在 `Ended`，引擎一个命令都收不到（体检 R8-B1 / R8-B2）。

@@ -346,6 +346,11 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 - 正常播放时按 `Enter` **不会**重开；只有播完或出错（`Failed`）后才允许重播。`ended` 由
   `SessionState::Ended` 直传，不靠「位置 ≥ 时长」猜：时长未知时位置永远推不到头，续播点
   贴片尾时位置又会一开始就 ≥ 时长。
+- 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
+  与点击按钮同一条路径（`player_retry` → `Player::retry`）。起播（含取直链）失败时
+  `request` / `pending` / `target` 已被清空，`retry` 靠最后一次起播目标的快照
+  （`Player::last_start`：条目 + 版本 + 偏好）重跑一遍 `begin`——没有快照时只能静默
+  返回，表现就是“点了没反应”。
 - 续播判定在 `nova_playback::resume::resume_position`（纯函数）：续播点为空、或
   `resume_position < resume_min_position`（太靠前）、或剩余时长不大于 `finished_threshold`
   （已看完）时从头播，否则从续播点起播。**`played` 不参与判定**：
@@ -355,13 +360,21 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 
 **播完之后（`Ended`）**：位置固定为时长、界面显示「已看完」，三个入口的行为与 Netflix 一致：
 
+> 前提：引擎给 mpv 设了 `keep-open=yes` / `idle=yes`（`crates/nova-playback-mpv/src/options.rs`
+> 的默认选项），播完停最后一帧而不是销毁媒体。用户用额外 mpv options（`NOVA_MPV_OPTIONS`）
+> 把 `keep-open` 改成 `no` 时，播完后的拖动行为**不保证**：媒体已卸载，seek 可能没反应，
+> 也不会再产生第二次 `Ended`。
+
 1. 控制层播放键 / `Enter` / `Space` = 从头重播（新会话、位置 0，见上）；
 2. 拖动进度条、`←` / `→`（含 `Shift` 的 ±60s）= 跳到目标位置并**继续播放**：
    `Session::seek` 在 `Ended` 下也生效（位置立刻生效、状态转回 `Playing`），并按
    `ProgressTrigger::Seek` 上报一次进度。引擎这时还停在 EOF（mpv `keep-open`），
    所以宿主在 seek 之后要补一次 `play`，否则进度条动了、画面仍是最后一帧；
-3. 同样的 session 继续播到片尾时仍然会再报一次 `Ended`（mpv `eof-reached` 回到 false
-   会清掉「已报过」标记），不会卡在「播放中」。
+3. 同一个 session 继续播到片尾会**再报一次** `Ended`，不会卡在「播放中」：worker 的
+   `Command::Seek` 分支**无条件**清掉「已报过 Ended」的标记（`worker::EndedGuard::after_seek`），
+   不依赖 mpv 的具体时序——旧实现只靠 `eof-reached` 回到 `false` 来清，拖动后 mpv 不保证
+   送这个翻转，第二次播完就不再产生 `Ended`。`eof-reached=false` 的清除逻辑作为补充保留
+   （`EndedGuard::observe_eof`），两条路径都有单测（`worker::tests::seek_after_end_*`）。
 
 ## 控制层
 

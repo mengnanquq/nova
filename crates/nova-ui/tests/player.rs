@@ -890,6 +890,32 @@ fn scrubbing_while_ended_still_seeks_to_the_target() {
     assert_eq!(app.player_view().position, Duration::from_secs(4140));
 }
 
+/// 错误卡上按 `Enter` = 错误卡上的「重试」。
+///
+/// 回归（复审 🟡3）：旧实现无条件走 toggle，宿主会话停在 `Failed`，`Session::play`
+/// 直接把绕，一个命令都发不出去——用户看到的就是“按了没反应”。
+#[test]
+fn enter_on_the_error_card_triggers_retry() {
+    let app = player_app();
+    let retried = Rc::new(RefCell::new(0));
+    let sink = retried.clone();
+    app.on_player_retry(move || *sink.borrow_mut() += 1);
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let played_sink = played.clone();
+    app.on_play(move |id| played_sink.borrow_mut().push(id.to_owned()));
+
+    app.set_player(&player_error());
+    assert!(app.player_view().error.is_some(), "用例前提：停在错误卡");
+
+    press(&app, Key::Return);
+    assert_eq!(*retried.borrow(), 1, "错误卡上按 Enter 必须等同点「重试」");
+    assert!(
+        played.borrow().is_empty(),
+        "重试不能是重播：它不走向导航的起播路径（那条路径会重置位置）：{:?}",
+        played.borrow()
+    );
+}
+
 /// 起播失败停在错误卡上时再按 Enter：必须重新起播（错误卡上的「重试」同理）。
 #[test]
 fn error_state_playback_replays_the_same_item() {

@@ -684,6 +684,12 @@ pub(crate) struct Player {
     target: Option<Target>,
     /// 待播放的条目 / 资源（取直链期间就有）。
     pending: Option<Target>,
+    /// 最后一次起播目标的快照（条目 + 版本 + 偏好），取直链之前就记下。
+    ///
+    /// 重试必须能用它重跑一遍 [`Player::begin`]：取直链失败的路径会把
+    /// `request` / `pending` / `target` 全部清空，没有快照时错误卡上的「重试」
+    /// 会静默地什么都不做（点了没反应）。
+    last_start: Option<StartPoint>,
     /// 引擎枚举出的轨道（`TracksChanged` 之前用服务端资源的兜底）。
     tracks: TrackSet,
     selected_audio: Option<u32>,
@@ -745,6 +751,17 @@ struct Target {
     duration: Option<Duration>,
 }
 
+/// 最后一次起播的参数（重试用）。
+///
+/// 只存 [`Player::begin`] 需要的三样东西：条目、版本（`None` = 自动挑）与偏好快照
+/// （`None` = 重试用数据库里的当前值，这也是 `begin` 原来的行为）。
+#[derive(Clone, Debug)]
+struct StartPoint {
+    item_id: String,
+    source_id: Option<String>,
+    prefs: Option<UserPreferences>,
+}
+
 impl Player {
     /// 新建控制器。`capture_options` 非空时启用 `--capture`。
     pub(crate) fn new(
@@ -771,6 +788,7 @@ impl Player {
             prefs,
             request: None,
             target: None,
+            last_start: None,
             pending: None,
             tracks: TrackSet::default(),
             selected_audio: None,
@@ -832,6 +850,13 @@ impl Player {
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        // 起播目标快照：取直链失败会把 request / pending / target 全清掉，
+        // 错误卡上的「重试」只能靠它重跑一遍起播。
+        self.last_start = Some(StartPoint {
+            item_id: item_id.to_owned(),
+            source_id: source_id.clone(),
+            prefs: prefs.clone(),
+        });
         // 换片 / 重播：旧会话的 `Exit` 已在上面用**旧代号**交出去了，这里再递增。
         // 代号 `0` 留给"没有代号"的旧数据，所以从 1 开始。
         self.session_seq = self.session_seq.saturating_add(1).max(1);
@@ -1463,13 +1488,21 @@ impl Player {
     /// 重试：`session.retry()` 拿到位置，再按同一请求重新 open。
     pub(crate) fn retry(&mut self) {
         let Some(request) = self.request.clone() else {
-            // 还没拿到请求：从头再来一遍准备流程。
-            let post = self.post.clone();
-            let target = self.pending.clone().or_else(|| self.target.clone());
-            if let (Some(post), Some(target)) = (post, target) {
-                let source = Some(target.source_id.as_str().to_owned());
-                self.begin(target.item_id.as_str(), source, None, &post);
-            }
+            // 还没拿到请求：按最后一次起播目标从头再来一遍准备流程。
+            let (Some(post), Some(start)) = (self.post.clone(), self.last_start.clone()) else {
+                tracing::warn!(
+                    has_post = self.post.is_some(),
+                    has_start = self.last_start.is_some(),
+                    "重试时既没有播放请求也没有可重跑的起播目标，忽略"
+                );
+                return;
+            };
+            self.begin(
+                start.item_id.as_str(),
+                start.source_id.clone(),
+                start.prefs.clone(),
+                &post,
+            );
             return;
         };
         let position = self.session.retry();
@@ -1492,12 +1525,19 @@ impl Player {
     /// 不靠 `Session::play`：状态机能表达“回到开头继续”，但引擎还停在 EOF
     /// （mpv `keep-open`），只发 `play` 不会重新出画。
     fn replay(&mut self) {
-        let post = self.post.clone();
-        let target = self.target.clone().or_else(|| self.pending.clone());
-        if let (Some(post), Some(target)) = (post, target) {
-            let source = Some(target.source_id.as_str().to_owned());
-            self.begin(target.item_id.as_str(), source, None, &post);
-        }
+        let (Some(post), Some(target)) = (
+            self.post.clone(),
+            self.target.clone().or_else(|| self.pending.clone()),
+        ) else {
+            tracing::warn!(
+                has_post = self.post.is_some(),
+                has_target = self.target.is_some() || self.pending.is_some(),
+                "重播时缺少取直链入口或当前目标，忽略"
+            );
+            return;
+        };
+        let source = Some(target.source_id.as_str().to_owned());
+        self.begin(target.item_id.as_str(), source, None, &post);
     }
 
     /// 退出播放页：先提交一次进度并尽力补发，再停掉引擎与计时器。
@@ -1525,6 +1565,9 @@ impl Player {
         self.request = None;
         self.target = None;
         self.pending = None;
+        // 起播目标也属于这次播放：不清的话，退出播放页后错误卡（或调试通道）
+        // 上的「重试」会把已经离开的条目重新拉起来。
+        self.last_start = None;
         // 界面视图也复位：标题 / 进度 / 时长 / 轨道 / 错误都随会话结束。
         // 音量与静音是用户偏好，`reset_session` 会保留。
         let mut view = self
@@ -2022,6 +2065,33 @@ mod tests {
     /// `with_token` 为 `false` 时**不写令牌**：起播会在 `stream_target` 拿到
     /// [`nova_provider::ProviderError::NoToken`]，`OpenReady` 带着错误回来。
     /// 无令牌的用例用另一个服务器标识，避免蹭到进程内共享凭证存储里别的用例写的令牌。
+    /// 同一份本地数据里的第二个条目：`Played = true`，续播点在 30:00。
+    ///
+    /// 用来验“播完 A 之后起播 B”不能被当成重播 A（否则试播位置会被钉成 0）。
+    fn second_item() -> nova_core::MediaItem {
+        nova_core::MediaItem {
+            id: ItemId::new("item-2"),
+            kind: nova_core::MediaKind::Movie,
+            title: "第二部".to_owned(),
+            sort_title: String::new(),
+            original_title: None,
+            year: None,
+            overview: None,
+            genres: Vec::new(),
+            runtime: Some(Duration::from_secs(5483)),
+            parent_id: None,
+            index_number: None,
+            index_number_end: None,
+            child_count: None,
+            images: nova_core::ImageSet::default(),
+            user_data: nova_core::UserData {
+                played: true,
+                resume_position: Duration::from_secs(1800),
+                ..nova_core::UserData::default()
+            },
+        }
+    }
+
     fn resume_fixture(with_token: bool) -> ResumeFixture {
         init_test_backend();
         let dir = tempfile::tempdir().expect("临时目录");
@@ -2075,11 +2145,15 @@ mod tests {
                     ..nova_core::UserData::default()
                 },
             };
-            db.upsert_items(&server.id, &[item], 2).expect("写条目");
-            let mut source = source("src-1");
-            source.item_id = ItemId::new("item-1");
-            source.runtime = Some(Duration::from_secs(5483));
-            db.upsert_sources(&server.id, &[source])
+            db.upsert_items(&server.id, &[item.clone(), second_item()], 2)
+                .expect("写条目");
+            let mut source_1 = source("src-1");
+            source_1.item_id = ItemId::new("item-1");
+            source_1.runtime = Some(Duration::from_secs(5483));
+            let mut second_source = source("src-2");
+            second_source.item_id = ItemId::new("item-2");
+            second_source.runtime = Some(Duration::from_secs(5483));
+            db.upsert_sources(&server.id, &[source_1, second_source])
                 .expect("写播放入口");
         }
         let env = crate::env::Env {
@@ -2189,6 +2263,79 @@ mod tests {
             player.session.position(),
             Duration::from_secs(2747),
             "会话也不能把续播位置夹成 0（版本时长会参与 clamp）"
+        );
+    }
+
+    /// 播完 A 之后起播 B：B 必须用它**自己的**续播点，不能被当成“重播 A”而钉在 0。
+    ///
+    /// 回归保险：[`Player::begin`] 里的 `replay` 判定看的是“会话是 `Ended` 且目标
+    /// 条目相同”。只拿“会话是 Ended”当事会当场把 B 从头开。
+    #[test]
+    fn ended_session_starting_another_item_resumes_at_its_own_point() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        // 先把 item-1 放到 `Ended`：`target` / `pending` 都指向 item-1。
+        player.begin("item-1", None, None, &post);
+        let request = match wait_for_open(&posted) {
+            Ok(request) => request,
+            Err(failure) => panic!("第一次起播就该拿到直链：{failure:?}"),
+        };
+        player.on_open_ready(player.generation, Ok(request));
+        player.session.handle(EngineEvent::Ended);
+        assert_eq!(
+            player.session.state(),
+            SessionState::Ended,
+            "用例前提：会话停在片尾"
+        );
+
+        // 换一部片：同一会话状态、不同条目 → 照旧从它的续播点（30:00）起播。
+        player.begin("item-2", None, None, &post);
+        assert_eq!(
+            wait_for_resume_at(&posted),
+            Duration::from_secs(1800),
+            "播完 A 后起播 B 不是重播：B 必须从自己的续播点开始"
+        );
+    }
+
+    /// 回归（复审 🟡3）：重播取直链失败后，错误卡上的「重试」必须重跑同一条目。
+    ///
+    /// 旧实现只在 `request` 有值时才重开引擎；取直链失败的路径把
+    /// `request` / `pending` / `target` 全清空，`retry` 于是静默 return——用户
+    /// 看到的就是“点了没反应”（`Failed` 下 toggle 也什么都发不出去）。
+    /// 现在靠 [`StartPoint`] 快照重跑 `begin`。
+    #[test]
+    fn retry_after_a_failed_replay_starts_the_same_item_again() {
+        // 无令牌：`stream_target` 必失败，验证的就是“取直链失败”这条路径。
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(false);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        let failure = match wait_for_open(&posted) {
+            Ok(_) => panic!("没有令牌时不该拿到直链"),
+            Err(failure) => failure,
+        };
+        player.on_open_ready(player.generation, Err(failure));
+        assert!(player.error.is_some(), "应停在错误卡：{:?}", player.error);
+        assert!(
+            player.request.is_none() && player.pending.is_none() && player.target.is_none(),
+            "用例前提：取直链失败后三个字段都空（旧实现就是在这里静默 return 的）"
+        );
+
+        player.retry();
+
+        // "重试"必须真的又走了一遍起播：队列里出现第二个 `OpenReady`（依旧失败）。
+        assert!(
+            wait_for_open(&posted).is_err(),
+            "没有令牌时重试也不该成功，但它必须把新的 OpenReady 投递回来"
+        );
+        assert_eq!(
+            player
+                .pending
+                .as_ref()
+                .map(|target| target.item_id.as_str()),
+            Some("item-1"),
+            "重试必须重新起播同一条目"
         );
     }
 
