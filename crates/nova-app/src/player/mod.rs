@@ -1646,6 +1646,8 @@ fn subtitle_lift_percent(
 /// 把 provider 的错误翻译成可行动的中文（不含 URL / 令牌）。
 fn player_error_text(error: &nova_provider::ProviderError) -> String {
     match error {
+        // 本机没有令牌：请求根本没发出去，说“未登录”而不是“状态已失效”。
+        nova_provider::ProviderError::NoToken => "尚未登录，无法获取播放地址".to_owned(),
         nova_provider::ProviderError::Unauthorized => "登录状态已失效，请重新登录服务器".to_owned(),
         nova_provider::ProviderError::NotFound => {
             "服务器上找不到这个文件，可能已被移动或删除".to_owned()

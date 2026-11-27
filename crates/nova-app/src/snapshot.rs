@@ -182,10 +182,9 @@ where
     if specs.is_empty() {
         return;
     }
-    let fetcher: Option<Arc<dyn nova_provider::MediaProvider>> = local.provider_dyn();
     let service = Arc::new(ImageService::new(
         Arc::clone(&local.image_cache),
-        Arc::new(ProviderFetcher::new(fetcher)),
+        Arc::new(ProviderFetcher::from_local(Arc::clone(local))),
     ));
 
     let loaded = runtime.block_on(async {

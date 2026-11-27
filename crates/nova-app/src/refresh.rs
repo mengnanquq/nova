@@ -152,11 +152,15 @@ pub async fn refresh(local: Arc<Local>, status: Status) -> RefreshReport {
     }
 
     let info = provider.server_info();
+    let status = Status::Connected {
+        server: info.name,
+        base_url: info.base_url,
+    };
+    // 刷新成功也把 `Local` 的状态改成已连接：图片下载器与详情按需刷新都读
+    // `Local::status()` 的即时值；只更新界面状态会让它们永远停在“离线”。
+    local.set_status(status.clone());
     RefreshReport {
-        status: Status::Connected {
-            server: info.name,
-            base_url: info.base_url,
-        },
+        status,
         libraries,
         item_count: local_item_count(&local).await,
         synced,
@@ -581,6 +585,10 @@ mod paging_tests {
     /// 服务端大库的真实条目数：故意不是 200 的整数倍。
     const TOTAL: u32 = 450;
 
+    /// 自愈测试用的服务器 id：不能与其它测试共用（内存凭证存储是进程级共享的，
+    /// 同一个 `jellyfin/<id>/token` 键会让并行的离线测试意外“有令牌”）。
+    const EXPIRED_SERVER_ID: &str = "srv-expired";
+
     /// 与 `tests` 模块里的同名辅助独立：那里是私有的，不能跨模块复用。
     fn server_info() -> ServerInfo {
         ServerInfo {
@@ -984,5 +992,110 @@ mod paging_tests {
             harness.cached("keep-me").is_some(),
             "令牌过期不清缓存，重新登录后继续用"
         );
+    }
+
+    /// 库里的「过期」记录与真实令牌不矛盾时，刷新要能把它自愈掉。
+    ///
+    /// 以前 `Local::open` 一看 `AuthState::Expired` 就置 `Status::Expired`，而
+    /// `refresh()` 对非 `Connected` 状态直接原样返回——一条请求都不发，一次真 401
+    /// 就把这台服务器永久钉在「登录已过期」，即使令牌完全有效。
+    #[tokio::test]
+    async fn an_expired_record_with_a_valid_token_heals_after_a_refresh() {
+        let server = MockServer::start().await;
+        let (local, dir) = expired_local(&server);
+        mount_full_library(&server).await;
+
+        assert!(
+            local.status().is_connected(),
+            "有令牌就应该按 Connected 启动（交给刷新验证）：{:?}",
+            local.status()
+        );
+        let report = refresh(Arc::clone(&local), local.status()).await;
+        server.verify().await;
+
+        assert!(
+            report.status.is_connected(),
+            "刷新成功：{:?}",
+            report.status
+        );
+        let stored = local
+            .db
+            .server(&ServerId::new(EXPIRED_SERVER_ID))
+            .expect("读服务器")
+            .expect("服务器还在");
+        assert!(
+            stored.info.auth.is_authorized(),
+            "刷新成功要把 Authorized 写回库：{:?}",
+            stored.info.auth
+        );
+        drop(dir);
+    }
+
+    /// 令牌真的被服务端拒了：刷新后回到 `Expired` 并落库（自愈不能变成永远乐观）。
+    #[tokio::test]
+    async fn a_rejected_token_expires_again_after_the_refresh() {
+        let server = MockServer::start().await;
+        let (local, dir) = expired_local(&server);
+        Mock::given(method("GET"))
+            .and(path(format!("/Users/{USER_ID}/Views")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let report = refresh(Arc::clone(&local), local.status()).await;
+        server.verify().await;
+
+        assert!(
+            matches!(report.status, Status::Expired { .. }),
+            "真 401 要回到 Expired：{:?}",
+            report.status
+        );
+        let stored = local
+            .db
+            .server(&ServerId::new(EXPIRED_SERVER_ID))
+            .expect("读服务器")
+            .expect("服务器还在");
+        assert!(
+            matches!(stored.info.auth, AuthState::Expired { .. }),
+            "401 后的状态要落库：{:?}",
+            stored.info.auth
+        );
+        drop(dir);
+    }
+
+    /// 一台「库里写着过期 + 凭证存储里有令牌」的服务器，地址指向 wiremock。
+    fn expired_local(server: &MockServer) -> (Arc<Local>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("临时目录");
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            let info = nova_core::ServerInfo {
+                id: ServerId::new(EXPIRED_SERVER_ID),
+                kind: ServerKind::Jellyfin,
+                name: "测试".to_owned(),
+                base_url: server.uri(),
+                version: None,
+                user_id: Some(USER_ID.to_owned()),
+                auth: AuthState::Expired {
+                    user_name: "tester".to_owned(),
+                },
+                metadata_language: Language::undetermined(),
+            };
+            db.upsert_server(&info, 1).expect("写服务器");
+        }
+        // `NOVA_CREDENTIALS=memory` 用的是进程内共享的那一份存储。
+        let store = crate::env::open_credentials(CredentialMode::Memory).store;
+        store
+            .set(
+                &format!("jellyfin/{EXPIRED_SERVER_ID}/token"),
+                &SecretString::new(TOKEN),
+            )
+            .expect("写令牌");
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        let local = Local::open(&env, None).expect("打开状态目录");
+        (Arc::new(local), dir)
     }
 }

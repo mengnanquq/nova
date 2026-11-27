@@ -62,8 +62,13 @@ pub struct Local {
     /// 当前会话的 provider；未登录/地址不合规时为 `None`。
     pub provider: Mutex<Option<Arc<Provider>>>,
     status: Mutex<Status>,
+    /// 状态变化回调（窗口模式用它把新状态投给界面）。
+    status_listener: Mutex<Option<StatusListener>>,
     libraries: Mutex<Vec<Library>>,
 }
+
+/// 状态变化回调：参数是刚刚生效的 [`Status`]。
+type StatusListener = Arc<dyn Fn(&Status) + Send + Sync>;
 
 impl Local {
     /// 打开数据目录、数据库、图片缓存，并尽力构造 provider。
@@ -93,14 +98,18 @@ impl Local {
                         .ok()
                         .flatten()
                         .is_some_and(|token| !token.is_empty());
-                    status = if matches!(stored.info.auth, AuthState::Expired { .. }) {
-                        Status::Expired {
-                            url: stored.info.base_url.clone(),
-                        }
-                    } else if token_present {
+                    status = if token_present {
+                        // 只要凭证存储里有令牌就按已连接启动，交给后台刷新去验证：
+                        // 库里的 `Expired` 可能是上次真的 401，也可能是“本地曾经
+                        // 没有令牌”被误写下的。刷新成功会写回 `Authorized`，真 401
+                        // 再写回 `Expired`。
                         Status::Connected {
                             server: stored.info.name.clone(),
                             base_url: stored.info.base_url.clone(),
+                        }
+                    } else if matches!(stored.info.auth, AuthState::Expired { .. }) {
+                        Status::Expired {
+                            url: stored.info.base_url.clone(),
                         }
                     } else {
                         Status::MissingToken {
@@ -156,6 +165,7 @@ impl Local {
             server: Mutex::new(server),
             provider: Mutex::new(provider),
             status: Mutex::new(status),
+            status_listener: Mutex::new(None),
             libraries: Mutex::new(libraries),
         })
     }
@@ -176,8 +186,22 @@ impl Local {
     }
 
     /// 覆盖连接状态（刷新失败、令牌过期时用）。
+    ///
+    /// 注册过监听器时会把新状态通知出去：令牌过期不应该等下一次启动才变成横幅。
     pub fn set_status(&self, status: Status) {
-        *lock(&self.status) = status;
+        *lock(&self.status) = status.clone();
+        let listener = lock(&self.status_listener).clone();
+        if let Some(listener) = listener {
+            // 在锁外调用：监听器会去投递界面消息，不能持着状态锁。
+            listener(&status);
+        }
+    }
+
+    /// 注册状态变化回调（窗口模式把它投给界面；快照 / 打印模式不注册）。
+    ///
+    /// 只保留最新注册的那一个：同一个进程只开一个窗口。
+    pub fn set_status_listener(&self, listener: StatusListener) {
+        *lock(&self.status_listener) = Some(listener);
     }
 
     /// 当前已知的服务端媒体库（刷新后才有；启动时从 SQLite 读回）。
@@ -716,6 +740,102 @@ mod tests {
         assert!(home.hero.is_none());
         assert!(home.continue_watching.is_empty() && home.recently_added.is_empty());
         assert!(local.status().banner_data().is_some());
+    }
+
+    /// 令牌过期发生在后台任务里（详情 / 搜索 / 刷新）：状态变化必须立刻通知界面，
+    /// 否则横幅要等到下一次启动才变成「登录已过期」。
+    #[test]
+    fn mark_expired_notifies_the_status_listener_and_persists() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        let server_id = "srv-status-listener";
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            let mut server = info(server_id);
+            server.auth = AuthState::Authorized {
+                user_name: "阿明".to_owned(),
+                credential_key: format!("jellyfin/{server_id}/token"),
+            };
+            db.upsert_server(&server, 1).expect("写服务器");
+        }
+        let local = Local::open(&env, None).expect("打开状态目录");
+        let seen: Arc<Mutex<Vec<Status>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        local.set_status_listener(Arc::new(move |status: &Status| {
+            lock(&recorder).push(status.clone());
+        }));
+
+        local.mark_expired();
+
+        assert!(
+            matches!(local.status(), Status::Expired { .. }),
+            "内存状态要变成过期：{:?}",
+            local.status()
+        );
+        let stored = local
+            .db
+            .server(&ServerId::new(server_id))
+            .expect("读服务器")
+            .expect("服务器还在");
+        assert!(
+            matches!(stored.info.auth, AuthState::Expired { .. }),
+            "过期要落到本地库：{:?}",
+            stored.info.auth
+        );
+        let seen = lock(&seen).clone();
+        assert_eq!(seen.len(), 1, "监听器应当只被通知一次：{seen:?}");
+        assert!(
+            matches!(seen[0], Status::Expired { .. }),
+            "通知的应当是刚生效的状态：{:?}",
+            seen[0]
+        );
+    }
+
+    /// 体检：库里写着「登录已过期」、但凭证存储里其实有令牌时，不能一启动就判死。
+    ///
+    /// 以前 `Local::open` 先看 `AuthState::Expired`、后看 `token_present`，状态直接是
+    /// `Expired`；而 `refresh()` 只处理 `is_connected` 的状态，于是一次请求都不发，
+    /// 横幅永远显示「登录已过期」。有令牌时应当按 `Connected` 启动，交给刷新去验证：
+    /// 验证成功写回 `Authorized`，真 401 再写回 `Expired`。
+    #[test]
+    fn an_expired_record_with_a_token_starts_connected() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        let server_id = "srv-selfheal";
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            let mut server = info(server_id);
+            server.auth = AuthState::Expired {
+                user_name: "阿明".to_owned(),
+            };
+            db.upsert_server(&server, 1).expect("写服务器");
+        }
+
+        // 没有令牌：保持原来的语义（过期就是过期）。
+        let local = Local::open(&env, None).expect("打开状态目录");
+        assert!(matches!(local.status(), Status::Expired { .. }));
+        drop(local);
+
+        // 有令牌：按已连接启动，交给 refresh 验证。
+        let store = crate::env::open_credentials(CredentialMode::Memory).store;
+        store
+            .set(
+                &format!("jellyfin/{server_id}/token"),
+                &nova_secrets::SecretString::new("token-selfheal"),
+            )
+            .expect("写令牌");
+        let local = Local::open(&env, None).expect("重新打开状态目录");
+        assert!(
+            local.status().is_connected(),
+            "有令牌就该按 Connected 启动（交给刷新验证），实际：{:?}",
+            local.status()
+        );
     }
 
     #[test]

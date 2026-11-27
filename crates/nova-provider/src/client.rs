@@ -332,7 +332,8 @@ impl Provider {
     ///
     /// 状态里没有时（例如新进程只从凭证存储里恢复到了令牌），用当前认证头惰性发
     /// 一次 `GET /Users/Me` 把 `Id` 解析出来并**写回状态**；后续调用直接命中状态。
-    /// 连令牌都没有（或服务端说令牌无效）时才报 [`ProviderError::Unauthorized`]。
+    /// 连令牌都没有（或服务端说令牌无效）时才报 [`ProviderError::NoToken`] /
+    /// [`ProviderError::Unauthorized`]。
     ///
     /// 防并发重复请求：慢路径在 [`Provider::user_id_resolve`] 上排队，只有拿到锁的
     /// 那个调用会真的发请求，其余在锁释放后重新读状态就命中了（值的唯一来源是
@@ -387,7 +388,7 @@ impl Provider {
         self.read_state()
             .token
             .clone()
-            .ok_or(ProviderError::Unauthorized)
+            .ok_or(ProviderError::NoToken)
     }
 
     fn read_state(&self) -> RwLockReadGuard<'_, State> {
@@ -1441,16 +1442,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_token_is_reported_separately_from_a_server_401() {
+        // 本机没有任何令牌：请求根本不会发出去。
+        let provider = provider();
+        let error = provider
+            .item(&ItemId::new("missing-token-item"))
+            .await
+            .expect_err("没有令牌必须报错");
+        assert!(
+            matches!(error, ProviderError::NoToken),
+            "没有令牌不能用 `Unauthorized`（那会被上层当成服务端 401）：{error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn unauthenticated_calls_fail_fast() {
         let provider = provider();
-        // 没有令牌时惰性解析也不该发请求：直接就是未认证。
+        // 没有令牌时惰性解析也不该发请求：直接就是“本机没有令牌”。
         let error = provider
             .user_id()
             .await
-            .expect_err("没有 user_id 必须报未认证");
-        assert!(matches!(error, ProviderError::Unauthorized));
-        let error = provider.token().expect_err("没有令牌必须报未认证");
-        assert!(matches!(error, ProviderError::Unauthorized));
+            .expect_err("没有 user_id 必须报没有令牌");
+        assert!(matches!(error, ProviderError::NoToken));
+        let error = provider.token().expect_err("没有令牌必须报没有令牌");
+        assert!(matches!(error, ProviderError::NoToken));
     }
 
     #[test]

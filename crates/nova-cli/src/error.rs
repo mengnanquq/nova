@@ -168,6 +168,8 @@ impl CliError {
 /// `ProviderError` → `CliError`。认证失败单独翻译成带引导的文本。
 pub(crate) fn provider(error: ProviderError) -> CliError {
     match error {
+        // 本机没有令牌：与“服务器拒了令牌”分开，不把用户引向“密码不对”。
+        ProviderError::NoToken => CliError::Auth("本机没有访问令牌，请重新登录".to_owned()),
         ProviderError::Unauthorized => CliError::Auth("用户名或密码不对，或令牌已失效".to_owned()),
         ProviderError::Unsupported(message) => CliError::Config(message.to_owned()),
         other => CliError::Provider(other),

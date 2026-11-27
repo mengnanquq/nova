@@ -20,6 +20,7 @@ pub const MAX_SERVER_MESSAGE: usize = 200;
 ///
 /// | 变体 | 调用方应对 |
 /// |---|---|
+/// | [`NoToken`](Self::NoToken) | 本机没有令牌；与“服务器拒绝令牌”区分，不要标成会话过期 |
 /// | [`Unauthorized`](Self::Unauthorized) | 重新登录，不要重试 |
 /// | [`NotFound`](Self::NotFound) | 该条目已从服务端消失，可从本地缓存剔除 |
 /// | [`Http`](Self::Http) | 服务端拒绝；4xx 不要重试，5xx 可延后重试 |
@@ -32,6 +33,15 @@ pub const MAX_SERVER_MESSAGE: usize = 200;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProviderError {
+    /// 本机没有访问令牌（未登录 / 钥匙环里被清掉）。
+    ///
+    /// 与 [`Unauthorized`](Self::Unauthorized) 分开是因为两者该做的事不同：
+    /// 这个错误出现在**没发请求**的时候（构造 provider 时不要求有令牌），
+    /// 把它当成服务端 401 会把“本地还没登录”误标成“服务器判定会话过期”，
+    /// 并且写进本地库。
+    #[error("本机没有访问令牌")]
+    NoToken,
+
     /// 未认证，或令牌已失效。
     #[error("未认证或令牌已失效")]
     Unauthorized,
@@ -149,6 +159,7 @@ mod tests {
     #[test]
     fn transience_rules() {
         assert!(!ProviderError::Unauthorized.is_transient());
+        assert!(!ProviderError::NoToken.is_transient());
         assert!(!ProviderError::NotFound.is_transient());
         assert!(!ProviderError::from_status(400).is_transient());
         assert!(ProviderError::from_status(429).is_transient());

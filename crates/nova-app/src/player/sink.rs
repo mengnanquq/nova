@@ -54,6 +54,8 @@ impl ProgressSink for ProviderSink {
         }
         match self.provider.report_progress(progress).await {
             Ok(()) => Ok(()),
+            // 本机没有令牌：请求根本没发出去，按“被拒”处理（不重试、也不算登录失效）。
+            Err(ProviderError::NoToken) => Err(ReportError::Rejected),
             Err(ProviderError::Unauthorized) => Err(ReportError::Unauthorized),
             Err(error) if is_transient(&error) => Err(ReportError::Transient),
             Err(_) => Err(ReportError::Rejected),
@@ -66,6 +68,8 @@ impl ProviderSink {
     async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
         match self.provider.report_stopped(progress).await {
             Ok(()) => Ok(()),
+            // 同上：本机没有令牌不是服务端拒了这次上报。
+            Err(ProviderError::NoToken) => Err(ReportError::Rejected),
             Err(ProviderError::Unauthorized) => Err(ReportError::Unauthorized),
             Err(error) if is_transient(&error) => Err(ReportError::Transient),
             Err(_) => Err(ReportError::Rejected),

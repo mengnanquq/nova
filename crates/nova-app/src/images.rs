@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use nova_core::{ItemId, MediaItem};
 use nova_images::{
-    DecodedImage, FetchError, FetchFuture, Fetcher, ImageCache, ImageRequest, cache_key,
+    DecodedImage, FetchError, FetchFuture, Fetcher, ImageCache, ImageError, ImageRequest, cache_key,
 };
 use nova_provider::{
     ImageKind as ProviderImageKind, ImageRequest as ProviderImageRequest, MediaProvider,
@@ -172,31 +172,45 @@ impl ImageSpec {
 
 /// 下载适配器：把合成 URL 还原成 provider 请求。
 pub struct ProviderFetcher {
-    provider: Mutex<Option<Arc<dyn MediaProvider>>>,
+    /// 每次请求时求值：窗口模式按 [`Local`] 的**即时**状态取 provider，
+    /// 快照 / 测试用固定 provider。
+    source: ProviderSource,
 }
 
+/// 取当前可用 provider 的来源（离线时返回 `None`）。
+type ProviderSource = Arc<dyn Fn() -> Option<Arc<dyn MediaProvider>> + Send + Sync>;
+
 impl ProviderFetcher {
-    /// 用当前会话的 provider 构造；离线时传 `None`（只会命中磁盘缓存）。
+    /// 用一个固定的 provider 构造；离线时传 `None`（只会命中磁盘缓存）。
     pub fn new(provider: Option<Arc<dyn MediaProvider>>) -> Self {
+        let provider = Mutex::new(provider);
         Self {
-            provider: Mutex::new(provider),
+            source: Arc::new(move || lock(&provider).clone()),
         }
     }
 
-    /// 换会话后更新 provider（应用内登录成功时调用；`None` = 离线）。
+    /// 跟着 [`Local`] 的状态走：每次取图都重新问一次，登录 / 刷新后立刻生效。
     ///
-    /// 下一次图片请求就生效；已失败/已开始的请求不受影响。
-    pub fn set_provider(&self, provider: Option<Arc<dyn MediaProvider>>) {
-        *lock(&self.provider) = provider;
+    /// 以前 fetcher 是启动时一次性构造的：`NOVA_CREDENTIALS=memory` 启动时没有
+    /// 令牌，之后应用内登录成功也不会换上新 provider，海报再也下载不下来。
+    pub fn from_local(local: Arc<Local>) -> Self {
+        Self {
+            source: Arc::new(move || {
+                crate::ui::online_provider(&local.status(), local.provider_dyn())
+            }),
+        }
+    }
+
+    fn provider(&self) -> Option<Arc<dyn MediaProvider>> {
+        (self.source)()
     }
 
     async fn download(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let endpoint = nova_images::endpoint_of(url);
-        let Some(provider) = lock(&self.provider).clone() else {
-            tracing::debug!(endpoint, "离线：图片未命中磁盘缓存，保留占位");
-            // `FetchError` 没有"未配置 provider"变体，返回空响应体让缓存层报
-            // `EmptyBody`；上层随后把它记成"不重试的失败"。
-            return Ok(Vec::new());
+        let Some(provider) = self.provider() else {
+            // 离线 / 未登录：磁盘缓存在这之前已经查过了，这次只是跳过。
+            tracing::debug!(endpoint, "没有可用的会话：跳过本次图片请求（不记为失败）");
+            return Err(FetchError::Unavailable);
         };
         let Some(parsed) = parse_synthetic_url(url) else {
             tracing::warn!(endpoint, "无法解析图片请求，按失败处理");
@@ -213,6 +227,11 @@ impl ProviderFetcher {
         match provider.image(request).await {
             Ok(bytes) => Ok(bytes),
             Err(error) => match error {
+                // 本机没有令牌：请求根本没发出去，不是服务端 401。
+                ProviderError::NoToken => {
+                    tracing::debug!(endpoint, "本机没有令牌：跳过本次图片请求（不记为失败）");
+                    Err(FetchError::Unavailable)
+                }
                 ProviderError::Unauthorized => Err(FetchError::Http {
                     status: 401,
                     endpoint,
@@ -244,7 +263,7 @@ impl std::fmt::Debug for ProviderFetcher {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProviderFetcher")
-            .field("online", &lock(&self.provider).is_some())
+            .field("online", &self.provider().is_some())
             .finish()
     }
 }
@@ -490,6 +509,16 @@ impl ImageService {
         drop(permit);
         match outcome {
             Ok(image) => Some((spec.key.clone(), image)),
+            // 离线 / 未登录：只是这次没联网，不是“这张图坏了”。解除已请求标记，
+            // 下次进入视口（或登录之后）还会重新尝试。
+            Err(ImageError::Fetch(FetchError::Unavailable)) => {
+                tracing::debug!(
+                    endpoint = nova_images::endpoint_of(&spec.url),
+                    "没有可用的会话：图片本次跳过，联网后再试"
+                );
+                self.state().forget(&spec.key);
+                None
+            }
             Err(error) => {
                 tracing::warn!(endpoint = nova_images::endpoint_of(&spec.url), %error, "图片装载失败（不重试）");
                 self.state().failed.insert(spec.key.clone());
@@ -958,6 +987,154 @@ mod tests {
             assert_eq!(again.0, ImageKey::poster("abc"));
             assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
         });
+    }
+
+    /// 本地没有令牌时，图片请求根本没发出去（provider 直接报未认证）。
+    ///
+    /// 以前这一行被当成服务端 401：图片进 `failed` 集合，之后**永远不再重试**，
+    /// 用户重新登录、换了令牌也看不到海报。没有令牌属于「本次跳过」，不是失败。
+    #[test]
+    fn a_missing_token_skips_the_image_instead_of_failing_it() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let server_id = "srv-image-offline";
+            {
+                let db = Database::open(dir.path().join("nova.db")).expect("建库");
+                db.upsert_server(&offline_server_info(server_id), 1)
+                    .expect("写服务器");
+                let mut item =
+                    item_with_images(Some("http://host/Items/m1/Images/Primary?tag=t"), None);
+                item.id = ItemId::new("m1");
+                item.kind = MediaKind::Movie;
+                db.upsert_items(&ServerId::new(server_id), &[item], 1)
+                    .expect("写条目");
+            }
+            let env = crate::env::Env {
+                data_dir: dir.path().to_path_buf(),
+                credentials: crate::env::CredentialMode::Memory,
+            };
+            let local = Arc::new(Local::open(&env, None).expect("打开状态目录"));
+            assert!(
+                matches!(local.status(), crate::status::Status::MissingToken { .. }),
+                "没有令牌应当是 MissingToken：{:?}",
+                local.status()
+            );
+            assert!(
+                local.provider_dyn().is_some(),
+                "provider 的构造不要求有令牌；门控在下载这一层"
+            );
+            let service = ImageService::new(
+                Arc::clone(&local.image_cache),
+                Arc::new(ProviderFetcher::new(local.provider_dyn())),
+            );
+            let key = ImageKey::poster("m1");
+            let spec = local.image_spec(&key).expect("条目有海报");
+
+            assert!(service.load(&spec).await.is_none());
+            assert!(
+                !service.was_requested(&key),
+                "没有令牌不是下载失败：不能记成 failed，否则登录后也不会重试"
+            );
+            assert!(service.load(&spec).await.is_none());
+        });
+    }
+
+    /// 应用内登录成功之后，图片下载器必须能拿到新会话。
+    ///
+    /// 以前 fetcher 是启动时一次性构造的（`NOVA_CREDENTIALS=memory` 启动时没有令牌
+    /// 就永远是 `None`）；现在每次都问 `Local` 的即时状态。
+    #[test]
+    fn the_image_fetcher_follows_the_session_status() {
+        use nova_provider::{Flavor, Provider, ProviderConfig};
+        use nova_secrets::{CredentialStore, MemoryStore, SecretString};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/Items/m1/Images/Primary"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(PNG_1X1.to_vec()))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let dir = tempfile::tempdir().expect("临时目录");
+            let server_id = "srv-image-login";
+            {
+                let db = Database::open(dir.path().join("nova.db")).expect("建库");
+                let mut info = offline_server_info(server_id);
+                info.base_url = server.uri();
+                db.upsert_server(&info, 1).expect("写服务器");
+                let mut item =
+                    item_with_images(Some("http://host/Items/m1/Images/Primary?tag=t"), None);
+                item.id = ItemId::new("m1");
+                item.kind = MediaKind::Movie;
+                db.upsert_items(&ServerId::new(server_id), &[item], 1)
+                    .expect("写条目");
+            }
+            let env = crate::env::Env {
+                data_dir: dir.path().to_path_buf(),
+                credentials: crate::env::CredentialMode::Memory,
+            };
+            let local = Arc::new(Local::open(&env, None).expect("打开状态目录"));
+            let key = ImageKey::poster("m1");
+            let spec = local.image_spec(&key).expect("条目有海报");
+            let service = ImageService::new(
+                Arc::clone(&local.image_cache),
+                Arc::new(ProviderFetcher::from_local(Arc::clone(&local))),
+            );
+
+            assert!(service.load(&spec).await.is_none(), "离线时不应下载");
+
+            // 应用内登录：新 provider 与 Connected 状态一起落地。
+            let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::new());
+            store
+                .set(
+                    &format!("jellyfin/{server_id}/token"),
+                    &SecretString::new("token-image"),
+                )
+                .expect("写令牌");
+            let provider = Provider::new(
+                Flavor::Jellyfin,
+                ProviderConfig::new(ServerId::new(server_id), server.uri()),
+                Arc::clone(&store),
+            )
+            .expect("wiremock 地址合法");
+            let mut info = offline_server_info(server_id);
+            info.base_url = server.uri();
+            info.auth = AuthState::Authorized {
+                user_name: "tester".to_owned(),
+                credential_key: format!("jellyfin/{server_id}/token"),
+            };
+            local.adopt_server(provider, &info).expect("接管新会话");
+            assert!(local.status().is_connected());
+
+            let loaded = service.load(&spec).await.expect("登录后应当能下载海报");
+            assert_eq!(loaded.0, key);
+            assert_eq!((loaded.1.width, loaded.1.height), (1, 1));
+        });
+    }
+
+    fn offline_server_info(id: &str) -> ServerInfo {
+        ServerInfo {
+            id: ServerId::new(id),
+            kind: ServerKind::Jellyfin,
+            name: "离线测试".to_owned(),
+            base_url: "http://127.0.0.1:8096".to_owned(),
+            version: None,
+            user_id: None,
+            auth: AuthState::Unauthorized,
+            metadata_language: Language::undetermined(),
+        }
     }
 
     #[test]

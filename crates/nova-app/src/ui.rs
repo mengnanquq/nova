@@ -107,6 +107,8 @@ enum UiMessage {
     Playback(Message),
     /// 应用内“添加服务器”的结果。
     AddServer(Box<Result<ConnectedServer, AddServerError>>),
+    /// 连接状态变了（例如一次真实 401 刚把会话标成过期）。
+    Status(Status),
 }
 
 /// 挂起的一次窗口自截。
@@ -148,8 +150,6 @@ pub(crate) struct Shell {
     host: Rc<RefCell<player::Host>>,
     /// 挂起的一次自截（`--screenshot` 与调试通道共用）：拿到帧就写到这个路径。
     pending_shot: RefCell<Option<PendingShot>>,
-    /// 图片下载器（登录成功后切换 provider 用；与 `images` 里的 fetcher 同一个）。
-    fetcher: Arc<ProviderFetcher>,
     /// 播放页控制器；只在播放页打开时存在。
     player: RefCell<Option<Player>>,
     /// 播放心跳（8ms）：事件泵、会话 tick、帧 watchdog。
@@ -247,13 +247,21 @@ pub fn run_window(
     app.set_home(&home);
     app.set_banner(status.banner_data());
 
-    let online: Option<Arc<dyn MediaProvider>> = local.provider_dyn();
-    let fetcher = Arc::new(ProviderFetcher::new(online));
+    // 图片下载器每次都按 `Local` 的即时状态取 provider：启动时没有令牌、之后
+    // 应用内登录成功，或者刷新把状态从过期变成已连接，下一张图就能下载。
     let images = Arc::new(ImageService::new(
         Arc::clone(&local.image_cache),
-        fetcher.clone(),
+        Arc::new(ProviderFetcher::from_local(Arc::clone(&local))),
     ));
     let channel = Arc::new(UiChannel::new(app.ui().as_weak()));
+    {
+        // 状态一变就投一条消息：横幅与 `state.status` 立刻跟上（`mark_expired`
+        // 发生在后台任务里，不能等下一次启动或下一次刷新）。
+        let status_channel = Arc::clone(&channel);
+        local.set_status_listener(Arc::new(move |status: &Status| {
+            status_channel.post(UiMessage::Status(status.clone()));
+        }));
+    }
 
     // 引擎与渲染回调：`MpvEngine` 只在 `RenderingSetup` 里创建（那时 GL 上下文 current），
     // 之后所有 GL 调用都发生在同一个线程的 notifier 里。
@@ -271,7 +279,6 @@ pub fn run_window(
         local: Arc::clone(&local),
         runtime: runtime.clone(),
         images,
-        fetcher,
         channel,
         state: RefCell::new(UiState {
             status,
@@ -1339,7 +1346,7 @@ impl Shell {
         // 离线（未登录 / 令牌过期 / 没有服务器）时不发服务端搜索：本地命中就是
         // 最终结果。以前照样发一次注定失败的请求，它的错误页会在几秒后把本地
         // 结果整页替换成“搜索失败”——而本地搜索正是离线时唯一的搜索。
-        let online = server_search_provider(&self.local.status(), self.local.provider_dyn());
+        let online = online_provider(&self.local.status(), self.local.provider_dyn());
         // 1) 本地缓存即时反馈：命中就立刻是一屏结果；本地没有命中时先显示
         //    “搜索中…”，避免先闪一下“没有结果”再被服务端结果替换。
         match self.local.search_view(term, views::SEARCH_LIMIT) {
@@ -1432,6 +1439,11 @@ impl Shell {
                             SearchView::error(&term, "搜索失败，请稍后重试")
                         }
                     }
+                }
+                Err(nova_provider::ProviderError::NoToken) => {
+                    // 门控之后正常走不到这里；即使走到，也只是“本机没有令牌”，
+                    // 不能把会话标成过期。
+                    SearchView::error(&term, "未登录：请先连接服务器")
                 }
                 Err(nova_provider::ProviderError::Unauthorized) => {
                     local.mark_expired();
@@ -1581,10 +1593,9 @@ impl Shell {
                 match self.local.home(None) {
                     Ok(home) => {
                         self.app.set_home(&home);
-                        self.app.set_banner(status.banner_data());
+                        self.apply_status(status);
                         {
                             let mut state = self.state.borrow_mut();
-                            state.status = status;
                             state.home = home.clone();
                             state.library = None;
                         }
@@ -1602,8 +1613,8 @@ impl Shell {
                         BannerLevel::Warning,
                     )));
                 }
-                // 图片下载器切到新会话，然后后台刷新。
-                self.fetcher.set_provider(self.local.provider_dyn());
+                // 图片下载器跟着 `Local` 的即时状态取 provider，不必在这里切换；
+                // 直接后台刷新。
                 self.spawn_refresh();
             }
             Err(error) => {
@@ -1620,7 +1631,7 @@ impl Shell {
         } = payload;
         self.app.set_home(&home);
         // 刷新后的连接状态同步到顶部横幅（过期 / 断开时出现，恢复后消失）。
-        self.app.set_banner(status.banner_data());
+        self.apply_status(status);
         // 库页：按**落地时**打开的库与排序重建（后台刷新期间用户可能切库 / 换排序）。
         // 以前这里直接 `set_library(payload.library)`，而 payload 是“第一个标签 + 默认排序”
         // 建的，于是刷新一完成就把用户所在的库换成「首页」的顶层全量列表、排序条也回到
@@ -1630,7 +1641,6 @@ impl Shell {
         let keys = image_keys(&home, rebuilt.as_ref().or(library.as_ref()), None);
         {
             let mut state = self.state.borrow_mut();
-            state.status = status;
             state.home = home;
             // 只在真的重建过库视图时更新缓存：不在库页时刷新不应当动它。
             if let Some(view) = rebuilt {
@@ -1638,6 +1648,15 @@ impl Shell {
             }
         }
         self.prefetch_images(keys);
+    }
+
+    /// 状态变化落地：横幅与 `state.status` 一起更新。
+    ///
+    /// 令牌过期是后台任务里发现的（`Local::mark_expired`），不经过刷新也会到达这里
+    /// （见 `run_window` 注册的状态监听器）——横幅不必等下一次启动。
+    fn apply_status(&self, status: Status) {
+        self.app.set_banner(status.banner_data());
+        self.state.borrow_mut().status = status;
     }
 
     /// 刷新落地时重建当前媒体库视图（按当前排序）并写进界面。
@@ -1809,7 +1828,10 @@ impl Shell {
 
     /// 详情页按需联网：`item()` + `sources()` 写回缓存后重建详情视图。
     fn spawn_detail(&self, item_id: String) {
-        let Some(provider) = self.local.provider() else {
+        // 门控读 `Local` 的即时状态（不是 `self.state` 里可能更旧的快照）：
+        // 离线时不联网，详情页继续用缓存渲染。
+        let Some(provider) = online_provider(&self.local.status(), self.local.provider_dyn())
+        else {
             return;
         };
         let local = Arc::clone(&self.local);
@@ -1818,6 +1840,10 @@ impl Shell {
             let id = ItemId::new(item_id.clone());
             let item = match provider.item(&id).await {
                 Ok(item) => item,
+                Err(nova_provider::ProviderError::NoToken) => {
+                    tracing::debug!(item = id.as_str(), "本机没有令牌，跳过详情联网刷新");
+                    return;
+                }
                 Err(nova_provider::ProviderError::Unauthorized) => {
                     local.mark_expired();
                     return;
@@ -1829,6 +1855,10 @@ impl Shell {
             };
             let sources = match provider.sources(&id).await {
                 Ok(sources) => sources,
+                Err(nova_provider::ProviderError::NoToken) => {
+                    tracing::debug!(item = id.as_str(), "本机没有令牌，跳过播放源刷新");
+                    return;
+                }
                 Err(nova_provider::ProviderError::Unauthorized) => {
                     local.mark_expired();
                     return;
@@ -2444,6 +2474,7 @@ fn apply_message(message: UiMessage) {
         UiMessage::Image { key, decoded } => shell.apply_images(vec![(key, decoded)]),
         UiMessage::Playback(message) => shell.apply_playback(message),
         UiMessage::AddServer(outcome) => shell.apply_add_server(*outcome),
+        UiMessage::Status(status) => shell.apply_status(status),
     }
 }
 
@@ -2471,12 +2502,16 @@ pub(crate) fn accept_search_result(
         && message_term.trim() == current_input.trim()
 }
 
-/// 这次搜索要不要再打服务端：只有已连接（令牌可用）时才发。
+/// 这次请求要不要真的联网：只有已连接（令牌可用）时才用 provider。
 ///
-/// 离线（未登录 / 令牌过期 / 没有服务器）时本地缓存命中就是最终结果。以前照样
-/// 发一次注定失败的请求，它的错误页会在几秒后把本地结果整页替换成“搜索失败”——
-/// 而本地搜索正是离线时唯一的搜索（也是输入时的即时反馈）。
-pub(crate) fn server_search_provider(
+/// 搜索、详情按需刷新、图片下载共用这一道门。离线（未登录 / 令牌过期 / 没有
+/// 服务器）时 `Local` 里可能仍然有 provider（构造它不要求有令牌），但它只会返回
+/// [`ProviderError::NoToken`]；把这种本地状态当成服务端 401 会误写 `Expired`。
+///
+/// 搜索侧：本地缓存命中就是最终结果。以前照样发一次注定失败的请求，它的错误页
+/// 会在几秒后把本地结果整页替换成“搜索失败”——而本地搜索正是离线时唯一的搜索
+/// （也是输入时的即时反馈）。
+pub(crate) fn online_provider(
     status: &Status,
     provider: Option<Arc<dyn MediaProvider>>,
 ) -> Option<Arc<dyn MediaProvider>> {
@@ -2527,7 +2562,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibraryView, Route, Status, server_search_provider};
+    use super::{LibraryView, Route, Status, online_provider};
     use super::{accept_search_result, debounce_still_current, refresh_library_target};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -2592,6 +2627,85 @@ mod tests {
         )
     }
 
+    /// 内存凭证模式（`NOVA_CREDENTIALS=memory`）下没有令牌，但本地缓存完整：
+    /// 打开详情 / 起播只能读缓存，不能把“本机没令牌”当成服务端 401 写进本地库。
+    #[test]
+    fn offline_detail_and_playback_keep_the_auth_state() {
+        use crate::env::{CredentialMode, Env};
+        use crate::local::Local;
+        use nova_storage::Database;
+
+        let dir = tempfile::tempdir().expect("临时目录");
+        let server_id = "srv-offline-detail";
+        {
+            let db = Database::open(dir.path().join("nova.db")).expect("建库");
+            let mut server = server_info();
+            server.id = ServerId::new(server_id);
+            server.auth = AuthState::Authorized {
+                user_name: "阿明".to_owned(),
+                credential_key: format!("jellyfin/{server_id}/token"),
+            };
+            db.upsert_server(&server, 1).expect("写服务器");
+            db.upsert_items(
+                &ServerId::new(server_id),
+                &[item("m1", "沙丘", "movies")],
+                1,
+            )
+            .expect("写条目");
+            db.upsert_sources(
+                &ServerId::new(server_id),
+                &[nova_core::MediaSource {
+                    id: nova_core::SourceId::new("src-m1"),
+                    item_id: ItemId::new("m1"),
+                    name: None,
+                    container: None,
+                    size: None,
+                    bitrate: None,
+                    runtime: None,
+                    streams: Vec::new(),
+                }],
+            )
+            .expect("写播放源");
+        }
+        let env = Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: CredentialMode::Memory,
+        };
+        let local = Local::open(&env, None).expect("打开状态目录");
+        assert!(
+            matches!(local.status(), Status::MissingToken { .. }),
+            "没有令牌应当是 MissingToken：{:?}",
+            local.status()
+        );
+        assert!(
+            local.provider_dyn().is_some(),
+            "provider 允许没有令牌（否则应用内登录也没法复用）"
+        );
+
+        // 打开详情 / 起播时的那道门：没有已连接状态就不应该拿到 provider。
+        assert!(
+            online_provider(&local.status(), local.provider_dyn()).is_none(),
+            "离线时详情 / 起播不能联网"
+        );
+        // 缓存仍然能渲染出详情与播放页（离线浏览是设计目标）。
+        let detail = local.detail("m1").expect("读详情缓存").expect("有详情");
+        assert_eq!(detail.item_id, "m1");
+        let player = local.player("m1").expect("读播放页缓存").expect("有播放页");
+        assert_eq!(player.title, "沙丘");
+
+        // 一次假 401 都不应该发生：数据库里的授权状态原样保留。
+        let stored = local
+            .db
+            .server(&ServerId::new(server_id))
+            .expect("读服务器")
+            .expect("服务器还在");
+        assert!(
+            stored.info.auth.is_authorized(),
+            "离线浏览不能把会话写成 Expired：{:?}",
+            stored.info.auth
+        );
+    }
+
     /// 离线时不再发服务端搜索：否则它的错误页会把本地命中整页替换掉
     /// （本地搜索是离线时唯一的搜索）。
     #[test]
@@ -2612,7 +2726,7 @@ mod tests {
             },
         ] {
             assert!(
-                server_search_provider(&status, Some(Arc::clone(&provider))).is_none(),
+                online_provider(&status, Some(Arc::clone(&provider))).is_none(),
                 "{status:?} 不该发起服务端搜索"
             );
         }
@@ -2621,11 +2735,11 @@ mod tests {
             base_url: "http://127.0.0.1:8096".to_owned(),
         };
         assert!(
-            server_search_provider(&connected, Some(provider)).is_some(),
+            online_provider(&connected, Some(provider)).is_some(),
             "已连接时才发服务端搜索"
         );
         assert!(
-            server_search_provider(&connected, None).is_none(),
+            online_provider(&connected, None).is_none(),
             "没有 provider 时也不发"
         );
     }
