@@ -149,6 +149,7 @@ async fn full_playback_flow_through_public_api() {
         seen: std::sync::Mutex::new(Vec::new()),
     };
     let progress = PlaybackProgress {
+        session_seq: 0,
         item_id: ItemId::new("1"),
         source_id: SourceId::new("s"),
         position: session.position(),

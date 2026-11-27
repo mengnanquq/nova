@@ -129,6 +129,14 @@ pub enum PlayMethod {
 /// 要向服务端提交的播放进度。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackProgress {
+    /// 会话代号：player 每次起播（`begin`）递增，用来区分"同一部片重播"与"同一次会话"。
+    ///
+    /// `0` 表示**不知道**（旧版补发文件里的条目）：上报器不会把它和新会话混为一谈，
+    /// sink 也不会为它补发 `Started`——那个会话早就结束了。
+    ///
+    /// 带 `#[serde(default)]`：新增字段之前落盘的待发文件仍然能读回。
+    #[serde(default)]
+    pub session_seq: u64,
     /// 条目。
     pub item_id: ItemId,
     /// 资源。
@@ -153,6 +161,7 @@ impl PlaybackProgress {
             None => session.position,
         };
         Self {
+            session_seq: 0,
             item_id: session.item_id.clone(),
             source_id: session.source_id.clone(),
             position,

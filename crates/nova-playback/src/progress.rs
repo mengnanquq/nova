@@ -9,6 +9,9 @@
 //! - 暂停 / 切轨 / seek / 退出立即上报（[`ProgressTrigger`]）；
 //! - 位置与状态都没变的重复上报会被去重掉——但 [`ProgressTrigger::Exit`] 例外，
 //!   规范要求"退出前必须提交一次进度"，宁可多一条请求。
+//! - 会话身份是 `(代号 + 条目 + 资源)`：代号（[`PlaybackProgress::session_seq`]）由
+//!   player 每次起播递增，所以**同一部片重播也是新会话**——队列里上一会话的待发项
+//!   不会把新会话的第一次上报压成 `refresh_pending`。
 //!
 //! # 失败
 //!
@@ -31,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use nova_core::{PlaybackProgress, UserPreferences};
+use nova_core::{ItemId, PlaybackProgress, SourceId, UserPreferences};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
@@ -164,11 +167,12 @@ pub struct ProgressReporter {
     queue: Vec<PendingEntry>,
     next_retry_at: Option<Instant>,
     last_attempt: Option<Fingerprint>,
-    /// 上一次尝试上报的会话（条目 + 资源）。
+    /// 上一次尝试上报的会话（代号 + 条目 + 资源）。
     ///
     /// 队列与去重都是跨条目共用的，换片后 B 的第一条上报不能因为"位置和状态跟
-    /// A 的最后一模一样"被去重掉，所以按会话记录。
-    last_target: Option<(nova_core::ItemId, nova_core::SourceId)>,
+    /// A 的最后一模一样"被去重掉，所以按会话记录。同一部片重播也是一个新会话
+    /// （代号变了），上一会话的待发项不会把新会话的第一条上报压成 `refresh_pending`。
+    last_target: Option<SessionKey>,
     last_report_at: Option<Instant>,
 }
 
@@ -221,7 +225,7 @@ impl ProgressReporter {
     /// 这一次要不要真的上报。
     ///
     /// 去重规则：位置与状态都没变就不重复上报（`Exit` 除外），且只在**同一个会话**
-    /// 内比较——换片后新条目的第一条上报一定放行。定时驱动还要额外满足上报间隔。
+    /// 内比较——换片或重播后新会话的第一条上报一定放行。定时驱动还要额外满足上报间隔。
     pub fn should_report(&self, trigger: ProgressTrigger, progress: &PlaybackProgress) -> bool {
         if trigger == ProgressTrigger::Exit {
             return true;
@@ -247,6 +251,8 @@ impl ProgressReporter {
     /// 同一条进度额外打请求，只把队列里的位置更新成最新的；退出（[`ProgressTrigger::Exit`]）
     /// 例外：它总是尽力再发一次。队列是跨条目共用的，别的条目（换片后的新片）不受
     /// 这个压制影响——否则 A 的 `Exit` 一直失败会把 B 的进度静默吞掉整整一个退避周期。
+    /// "同一会话"包含会话代号（[`PlaybackProgress::session_seq`]）：同一部片重播时
+    /// 上一会话的待发项不会被当成"这一次"更新掉，新会话的第一条上报照常进 sink。
     pub async fn submit(
         &mut self,
         sink: &dyn ProgressSink,
@@ -269,7 +275,7 @@ impl ProgressReporter {
         let same_pending = self
             .queue
             .iter()
-            .any(|entry| same_target(&entry.progress, progress));
+            .any(|entry| same_session(&entry.progress, progress));
         if same_pending && trigger != ProgressTrigger::Exit {
             self.refresh_pending(progress);
             return match drained {
@@ -320,12 +326,17 @@ impl ProgressReporter {
         let file: PendingFile = serde_json::from_slice(&bytes)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let loaded = file.pending.len();
-        for entry in file.pending {
-            // 同一目标（条目 + 资源）只留一条：内存里已有的更新，优先保留。
+        for mut entry in file.pending {
+            // 能落盘的都是**上一个进程**的会话：那个会话早已结束（`Exit` / `stop` 都发不出去
+            // 才会留下来），代号在这里已经失效。清零既让没有代号字段的旧格式文件照常读回，
+            // 也保证补发时 sink 不会再发 `Started`——再发一次服务端会把已结束的会话记成在播，
+            // 而之后再也没人 `stop` 它。
+            entry.progress.session_seq = 0;
+            // 同一会话只留一条：内存里已有的更新，优先保留。
             if !self
                 .queue
                 .iter()
-                .any(|existing| same_target(&existing.progress, &entry.progress))
+                .any(|existing| same_session(&existing.progress, &entry.progress))
             {
                 self.queue.push(entry);
             }
@@ -385,12 +396,12 @@ impl ProgressReporter {
         }
     }
 
-    /// 队列里已有同一目标的进度时，把它更新成最新位置（不发请求）。
+    /// 队列里已有同一会话的进度时，把它更新成最新位置（不发请求）。
     fn refresh_pending(&mut self, progress: &PlaybackProgress) {
         if let Some(entry) = self
             .queue
             .iter_mut()
-            .find(|entry| same_target(&entry.progress, progress))
+            .find(|entry| same_session(&entry.progress, progress))
         {
             entry.progress = progress.clone();
         }
@@ -400,14 +411,18 @@ impl ProgressReporter {
     fn mark_attempt(&mut self, progress: &PlaybackProgress) {
         self.last_attempt = Some(Fingerprint::of(progress));
         if !self.same_session(progress) {
-            self.last_target = Some((progress.item_id.clone(), progress.source_id.clone()));
+            self.last_target = Some(SessionKey::of(progress));
         }
     }
 
     /// 当前进度是不是 `last_target` 那个会话的。
     fn same_session(&self, progress: &PlaybackProgress) -> bool {
         match &self.last_target {
-            Some((item, source)) => item == &progress.item_id && source == &progress.source_id,
+            Some(key) => {
+                key.seq == progress.session_seq
+                    && key.item == progress.item_id
+                    && key.source == progress.source_id
+            }
             None => false,
         }
     }
@@ -417,7 +432,7 @@ impl ProgressReporter {
         self.last_report_at = Some(self.clock.now());
         // 已经报上去的位置比队列里的旧位置更新，旧的没必要再发。
         self.queue
-            .retain(|entry| !same_target(&entry.progress, progress));
+            .retain(|entry| !same_session(&entry.progress, progress));
         if self.queue.is_empty() {
             self.next_retry_at = None;
         }
@@ -427,7 +442,7 @@ impl ProgressReporter {
         let attempts = match self
             .queue
             .iter_mut()
-            .find(|entry| same_target(&entry.progress, progress))
+            .find(|entry| same_session(&entry.progress, progress))
         {
             Some(entry) => {
                 entry.progress = progress.clone();
@@ -505,8 +520,33 @@ fn backoff(attempts: u32) -> Duration {
     RETRY_BASE.saturating_mul(1u32 << shift).min(RETRY_MAX)
 }
 
-fn same_target(left: &PlaybackProgress, right: &PlaybackProgress) -> bool {
-    left.item_id == right.item_id && left.source_id == right.source_id
+/// 会话身份：代号 + 条目 + 资源。
+///
+/// 只用 `(item, source)` 分不清"同一部片重播"：上一会话留在队列里的待发项会被当成
+/// "这一次"的进度更新掉，新会话的第一次上报因而被压成 `refresh_pending`（复审 🟡）。
+/// 代号由 player 每次 `begin()` 递增，所以重播也是两个会话。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionKey {
+    seq: u64,
+    item: ItemId,
+    source: SourceId,
+}
+
+impl SessionKey {
+    fn of(progress: &PlaybackProgress) -> Self {
+        Self {
+            seq: progress.session_seq,
+            item: progress.item_id.clone(),
+            source: progress.source_id.clone(),
+        }
+    }
+}
+
+/// 两条进度是不是同一个会话的（代号 + 条目 + 资源）。
+fn same_session(left: &PlaybackProgress, right: &PlaybackProgress) -> bool {
+    left.item_id == right.item_id
+        && left.source_id == right.source_id
+        && left.session_seq == right.session_seq
 }
 
 #[cfg(test)]
@@ -594,6 +634,7 @@ mod tests {
 
     fn progress(secs: u64, paused: bool) -> PlaybackProgress {
         PlaybackProgress {
+            session_seq: 0,
             item_id: ItemId::new("item-1"),
             source_id: SourceId::new("source-1"),
             position: Duration::from_secs(secs),
@@ -610,6 +651,14 @@ mod tests {
             item_id: ItemId::new(item),
             source_id: SourceId::new(format!("source-{item}")),
             ..progress(secs, paused)
+        }
+    }
+
+    /// 同一个条目（`item-1`）、指定会话代号的进度（模拟重播）。
+    fn session_progress(seq: u64, secs: u64) -> PlaybackProgress {
+        PlaybackProgress {
+            session_seq: seq,
+            ..progress(secs, false)
         }
     }
 
@@ -816,7 +865,7 @@ mod tests {
     /// 复审 🟡3：队列是跨条目共用的。条目 A 的 `Exit` 一直 transient 失败时，
     /// 换片后 B 的进度不能被静默吞掉直到退避结束（最长 60s）。
     ///
-    /// 压制只针对**同一个 `(item_id, source_id)`**：A 自己照旧被压住，B 照常上报。
+    /// 压制只针对**同一个会话**（代号 + 条目 + 资源）：A 自己照旧被压住，B 照常上报。
     #[tokio::test]
     async fn failing_entry_does_not_swallow_another_items_progress() {
         let (mut reporter, clock) = reporter();
@@ -901,6 +950,126 @@ mod tests {
         );
         assert_eq!(sink.count(), 2);
         assert_eq!(sink.reported()[1].item_id.as_str(), "item-2");
+    }
+
+    /// 复审 🟡1：会话身份只看 `(item, source)` 时，同一部片重播会被上一会话的待发项
+    /// 压成 `refresh_pending`：新会话的第一条上报不进 sink（Started 要等到 drain，
+    /// 最长 60s），旧待发项的位置反而被改写成新会话刚开始的位置。
+    #[tokio::test]
+    async fn replaying_the_same_item_is_not_suppressed_by_a_stale_pending_entry() {
+        let (mut reporter, _clock) = reporter();
+        let failing = RecordingSink::always_failing_for("item-1", ReportError::Transient);
+
+        // 上一个会话（代号 1）：上报失败，待发项留在队列里，位置停在 600s。
+        let first = session_progress(1, 600);
+        assert!(matches!(
+            reporter
+                .submit(&failing, ProgressTrigger::Tick, &first)
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        assert_eq!(reporter.queued(), 1);
+
+        // 重播同一部片：新会话（代号 2）从 0 开始，队列里还留着代号 1 的待发项。
+        let sink = RecordingSink::new();
+        let replay = session_progress(2, 0);
+        assert_eq!(
+            reporter.submit(&sink, ProgressTrigger::Tick, &replay).await,
+            ReportOutcome::Sent,
+            "新会话的第一条上报不能被上一会话的待发项吞掉"
+        );
+        assert_eq!(sink.reported(), vec![replay], "新会话必须真的进 sink");
+
+        // 旧待发项的位置不能被改写成新会话刚开始的位置：补发时仍然报 600s。
+        let outcome = reporter.flush(&sink).await;
+        assert_eq!(outcome.sent, 1);
+        let drained = &sink.reported()[1];
+        assert_eq!(drained.position, Duration::from_secs(600));
+        assert_eq!(drained.session_seq, 1, "补发的是上一个会话的进度");
+    }
+
+    /// 落盘兼容：加会话代号之前写下的待发文件没有 `session_seq`，仍然要能读回并补发；
+    /// 这种条目没有代号（0），sink 不会为它补发 `Started`（见 `sink` 的用例）。
+    #[tokio::test]
+    async fn legacy_pending_file_without_session_seq_still_loads() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let path = dir.path().join("pending-progress.json");
+        let legacy = r#"{
+  "version": 1,
+  "pending": [
+    {
+      "progress": {
+        "item_id": "item-legacy",
+        "source_id": "source-legacy",
+        "position": { "secs": 42, "nanos": 0 },
+        "duration": null,
+        "played": false,
+        "paused": true,
+        "method": "direct_play"
+      },
+      "attempts": 2
+    }
+  ]
+}"#;
+        std::fs::write(&path, legacy).unwrap_or_else(|e| panic!("写入旧格式补发文件: {e}"));
+
+        let clock = Arc::new(ManualClock::new());
+        let mut reporter =
+            ProgressReporter::new(&UserPreferences::default(), clock).with_pending_path(&path);
+        assert_eq!(
+            reporter.load_pending().unwrap_or(0),
+            1,
+            "旧格式文件必须能读回"
+        );
+        assert_eq!(reporter.queued(), 1);
+
+        let sink = RecordingSink::new();
+        let outcome = reporter.flush(&sink).await;
+        assert_eq!(outcome.sent, 1);
+        let sent = &sink.reported()[0];
+        assert_eq!(sent.item_id.as_str(), "item-legacy");
+        assert_eq!(sent.position, Duration::from_secs(42));
+        assert_eq!(sent.session_seq, 0, "旧条目没有会话代号");
+    }
+
+    /// 落盘的新格式条目也带着**上个进程**的代号。读回时清零：那个会话已经结束，
+    /// 补发时不能再让 sink 发 `Started`（否则服务端一直把它记成在播）。
+    #[tokio::test]
+    async fn loaded_entries_lose_their_expired_session_seq() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let path = dir.path().join("pending-progress.json");
+        let persisted = r#"{
+  "version": 1,
+  "pending": [
+    {
+      "progress": {
+        "session_seq": 7,
+        "item_id": "item-1",
+        "source_id": "source-1",
+        "position": { "secs": 9, "nanos": 0 },
+        "duration": { "secs": 600, "nanos": 0 },
+        "played": false,
+        "paused": true,
+        "method": "direct_play"
+      },
+      "attempts": 1
+    }
+  ]
+}"#;
+        std::fs::write(&path, persisted).unwrap_or_else(|e| panic!("写入补发文件: {e}"));
+
+        let clock = Arc::new(ManualClock::new());
+        let mut reporter =
+            ProgressReporter::new(&UserPreferences::default(), clock).with_pending_path(&path);
+        assert_eq!(reporter.load_pending().unwrap_or(0), 1);
+
+        let sink = RecordingSink::new();
+        assert_eq!(reporter.flush(&sink).await.sent, 1);
+        assert_eq!(
+            sink.reported()[0].session_seq,
+            0,
+            "上个进程的代号已失效，补发时清零（sink 因此不会再发 Started）"
+        );
     }
 
     #[tokio::test]

@@ -688,6 +688,12 @@ pub(crate) struct Player {
     error: Option<String>,
     /// 取直链的代数（丢弃过期结果）。
     generation: u64,
+    /// 播放会话代号：每次 [`Player::begin`] 递增，随每条 [`PlaybackProgress`] 上报。
+    ///
+    /// 上报器与 sink 靠它区分"同一部片重播"与"同一个会话"；有它才能保证重播时
+    /// 队列里上一会话的待发项不把新会话的第一条上报吞掉，补发旧 `Exit` 时也不会
+    /// 给已经 `stop` 的会话再发一次 `Started`。
+    session_seq: u64,
     /// 捕获（`--capture`）。
     capture: Option<capture::Capture>,
     /// 首帧是否已经到过（捕获计时起点）。
@@ -752,6 +758,7 @@ impl Player {
             selected_subtitle: SubtitleSelection::Off,
             error: None,
             generation: 0,
+            session_seq: 0,
             capture: capture_options.map(capture::Capture::new),
             saw_first_frame: false,
             post: None,
@@ -792,6 +799,9 @@ impl Player {
         }
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        // 换片 / 重播：旧会话的 `Exit` 已在上面用**旧代号**交出去了，这里再递增。
+        // 代号 `0` 留给"没有代号"的旧数据，所以从 1 开始。
+        self.session_seq = self.session_seq.saturating_add(1).max(1);
         self.error = None;
         self.saw_first_frame = false;
         self.request = None;
@@ -1575,6 +1585,7 @@ impl Player {
             })
             .unwrap_or(false);
         Some(PlaybackProgress {
+            session_seq: self.session_seq,
             item_id: target.item_id.clone(),
             source_id: target.source_id.clone(),
             position,
@@ -2356,6 +2367,18 @@ mod tests {
         fn stops(&self) -> Vec<(String, Duration)> {
             freeze(&self.stops)
         }
+
+        /// `stop` 收到的（条目, 会话代号）：用来看旧会话的 `Exit` 有没有用旧代号。
+        fn exit_seqs(&self) -> Vec<(String, u64)> {
+            let calls = self
+                .stops
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            calls
+                .iter()
+                .map(|progress| (progress.item_id.as_str().to_owned(), progress.session_seq))
+                .collect()
+        }
     }
 
     fn freeze(calls: &std::sync::Mutex<Vec<PlaybackProgress>>) -> Vec<(String, Duration)> {
@@ -2539,6 +2562,55 @@ mod tests {
             player.session.position(),
             Duration::ZERO,
             "B 从头开始（不是 A 的 10:00）"
+        );
+    }
+
+    /// 复审 🟡：会话身份必须带上代号。`begin()` 每次（含同一部片重播）都要递增，
+    /// 旧会话的 `Exit` 则用**旧代号**交出去——否则上报器与 sink 分不清"重播"与
+    /// "同一个会话"：新会话的第一条上报会被上一会话的待发项吞掉，补发旧 `Exit`
+    /// 时又会被当成新会话重新发一次 `Started`。
+    #[test]
+    fn replaying_the_same_item_bumps_the_session_seq() {
+        let (_dir, local, mut player, runtime) = switch_fixture();
+        let recorder = Arc::new(RecordingSink::default());
+        player.progress = sink::Progress::for_test(
+            &local,
+            runtime.handle(),
+            Arc::clone(&recorder) as Arc<dyn ProgressSink>,
+        );
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.advance_position(Duration::from_secs(600));
+        let first = player
+            .build_progress()
+            .expect("A 出画后可以上报")
+            .session_seq;
+        assert!(first > 0, "代号 0 留给旧数据，真会话从 1 开始");
+
+        // 重播同一部片：旧会话的 `Exit` 带旧代号交给 worker，新会话拿新代号。
+        player.begin("a", None, None, &post);
+        assert!(
+            wait_until(|| recorder.stops().len() == 1),
+            "worker 应在期限内交出旧会话的 Exit"
+        );
+        assert_eq!(
+            recorder.exit_seqs(),
+            vec![("a".to_owned(), first)],
+            "旧会话的 Exit 必须用旧代号"
+        );
+
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        let second = player
+            .build_progress()
+            .expect("重播出画后可以上报")
+            .session_seq;
+        assert!(
+            second > first,
+            "同一部片重播也是新会话（代号 {second} 应大于 {first}）"
         );
     }
 

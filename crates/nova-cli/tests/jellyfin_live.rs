@@ -437,6 +437,7 @@ async fn live_jellyfin_end_to_end() {
     // 6. 上报进度（新增 `paused` 与 `method`）
     // ------------------------------------------------------------------
     let paused = PlaybackProgress {
+        session_seq: 0,
         item_id: playable.id.clone(),
         source_id: source.id.clone(),
         position: Duration::from_secs(1),
@@ -452,6 +453,7 @@ async fn live_jellyfin_end_to_end() {
     tracing::info!(item = %paused.item_id, "暂停进度上报成功");
 
     let finished = PlaybackProgress {
+        session_seq: 0,
         item_id: playable.id.clone(),
         source_id: source.id.clone(),
         position: Duration::from_secs(2),

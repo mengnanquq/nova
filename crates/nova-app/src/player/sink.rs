@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nova_core::{ItemId, PlaybackProgress, SourceId, UserPreferences};
+use nova_core::{PlaybackProgress, UserPreferences};
 use nova_playback::{
     FlushOutcome, ProgressReporter, ProgressSink, ProgressTrigger, ReportError, SystemClock,
 };
@@ -28,15 +28,49 @@ use crate::local::Local;
 /// 退出时等待 `flush` 的上限：宁可少补一次进度，也不能让"退出播放页"卡住。
 const FLUSH_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// 同一个会话最多尝试几次 `Started`（含第一次）。
+///
+/// 起播注册失败不该葬送这个会话：后续每一次进度上报都可以顺手重试（不阻塞、不多等），
+/// 但也不能没完没了——服务端真的不可用时，多打一个请求也只是多一个失败。
+const STARTED_MAX_ATTEMPTS: u32 = 3;
+
+/// "已发过 Started"的记录。
+///
+/// 会话代号（[`PlaybackProgress::session_seq`]）由 player 每次 `begin()` 递增，所以
+/// "比见过的最新代号大"就是"从没见过的新会话"；比它小的都是队列里补发的旧会话——
+/// 那些会话（或更新的会话）已经 `stop` 过，绝不能再补 `Started`，否则服务端会把
+/// 已经结束的会话一直记成在播（复审 🟡）。
+#[derive(Clone, Copy, Debug, Default)]
+struct SessionMark {
+    /// 处理过的最新代号（发过 `Started` 或 `stop` 过）。
+    latest: u64,
+    /// 当前代号已尝试发 `Started` 的次数（包含失败）。
+    attempts: u32,
+    /// 当前代号的 `Started` 是否已经成功。
+    started: bool,
+}
+
+impl SessionMark {
+    /// 收到一个新代号时清空上一个会话的 `Started` 记录。
+    fn observe(&mut self, seq: u64) {
+        if seq > self.latest {
+            self.latest = seq;
+            self.attempts = 0;
+            self.started = false;
+        }
+    }
+}
+
 /// 把 `MediaProvider::report_progress` 包成 [`ProgressSink`]。
 pub(crate) struct ProviderSink {
     provider: Arc<dyn MediaProvider>,
-    /// 最近一次已发过"开始播放"的会话（条目 + 资源）。
+    /// 最近见过的会话代号与本会话的 `Started` 进度。
     ///
     /// 不能是进程级的 `bool`：换片后是新会话，服务端要重新收到 `Started`
-    /// 才会把接下来的进度算进会话（否则 B 的续播点永远不更新）。`stop`（`Exit`）
-    /// 时清掉，所以同一条目重播也会重新发。
-    started: Mutex<Option<(ItemId, SourceId)>>,
+    /// 才会把接下来的进度算进会话（否则 B 的续播点永远不更新）。也不能只记最近
+    /// 一条会话：队列补发的旧 `Exit` 跑到新会话之后，不能再把旧会话"开始"一次
+    /// （以前只记最近一条 + `stop` 后清空，就会重新发 `Started` 且再也没人 `stop`）。
+    session: Mutex<SessionMark>,
 }
 
 impl ProviderSink {
@@ -44,28 +78,51 @@ impl ProviderSink {
     pub(crate) fn new(provider: Arc<dyn MediaProvider>) -> Self {
         Self {
             provider,
-            started: Mutex::new(None),
+            session: Mutex::new(SessionMark::default()),
         }
     }
 
-    /// 这个会话是否还需要先发 `Started`；需要时顺手记下来（先记再发：
-    /// 请求失败也不会把后面的每次上报都变成一次 `Started`）。
+    /// 这一次要不要先发 `Started`；需要时顺手记下尝试次数。
+    ///
+    /// 规则：只对**从没见过的代号**发；已经 `stop` 过、比最新代号旧的会话（队列补发）
+    /// 永远不发；代号 `0` 是旧版补发文件里的条目，那个会话早就结束了，也不发。
     fn begin_session(&self, progress: &PlaybackProgress) -> bool {
-        let mut started = self.started_sessions();
-        if started.as_ref() == Some(&(progress.item_id.clone(), progress.source_id.clone())) {
+        let seq = progress.session_seq;
+        if seq == 0 {
             return false;
         }
-        *started = Some((progress.item_id.clone(), progress.source_id.clone()));
+        let mut mark = self.mark();
+        mark.observe(seq);
+        if seq < mark.latest || mark.started || mark.attempts >= STARTED_MAX_ATTEMPTS {
+            return false;
+        }
+        mark.attempts = mark.attempts.saturating_add(1);
         true
     }
 
-    /// 当前会话已开始（`Exit` / `stop` 之后复位）。
-    fn end_session(&self) {
-        *self.started_sessions() = None;
+    /// `Started` 已经发出去（服务端收下了）。
+    fn note_started(&self, seq: u64) {
+        let mut mark = self.mark();
+        if mark.latest == seq {
+            mark.started = true;
+        }
     }
 
-    fn started_sessions(&self) -> MutexGuard<'_, Option<(ItemId, SourceId)>> {
-        match self.started.lock() {
+    /// `Started` 失败且重试没意义（认证失效 / 被拒）：这个会话不再试。
+    fn give_up_started(&self, seq: u64) {
+        let mut mark = self.mark();
+        if mark.latest == seq {
+            mark.attempts = STARTED_MAX_ATTEMPTS;
+        }
+    }
+
+    /// 会话结束：记下这个代号，之后（晚到的补发项）不再为它发 `Started`。
+    fn end_session(&self, progress: &PlaybackProgress) {
+        self.mark().observe(progress.session_seq);
+    }
+
+    fn mark(&self) -> MutexGuard<'_, SessionMark> {
+        match self.session.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -76,9 +133,16 @@ impl ProviderSink {
 impl ProgressSink for ProviderSink {
     async fn report(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
         if self.begin_session(progress) {
-            // 起播注册失败不阻塞进度：下一次 Progress 仍可能被服务端接受。
-            if let Err(error) = self.provider.report_started(progress).await {
-                tracing::debug!(%error, "起播上报失败（不影响后续进度上报）");
+            // 起播注册失败不阻塞进度：下一次 Progress 会再试（本会话最多
+            // `STARTED_MAX_ATTEMPTS` 次），成功前进度照常上报。
+            match self.provider.report_started(progress).await {
+                Ok(()) => self.note_started(progress.session_seq),
+                Err(error) => {
+                    tracing::debug!(%error, "起播上报失败（下一次进度上报时再试）");
+                    if !is_transient(&error) {
+                        self.give_up_started(progress.session_seq);
+                    }
+                }
             }
         }
         match self.provider.report_progress(progress).await {
@@ -93,9 +157,10 @@ impl ProgressSink for ProviderSink {
 
     /// 结束会话：服务端只在收到这条时持久化续播点。
     ///
-    /// 顺带复位"已发 Started"：下一次上报（同一部片重播也是）算新会话。
+    /// 顺带记下这个代号：之后晚到的补发项不会再为它发 `Started`；同一部片重播是
+    /// 一个新代号，会正常重新发 `Started`。
     async fn stop(&self, progress: &PlaybackProgress) -> Result<(), ReportError> {
-        self.end_session();
+        self.end_session(progress);
         match self.provider.report_stopped(progress).await {
             Ok(()) => Ok(()),
             // 同上：本机没有令牌不是服务端拒了这次上报。
@@ -272,7 +337,7 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nova_core::{MediaItem, MediaSource, ServerInfo, ServerKind};
+    use nova_core::{ItemId, MediaItem, MediaSource, ServerInfo, ServerKind, SourceId};
     use nova_provider::{ImageRequest, ItemQuery, Library, Page, StreamTarget};
 
     #[test]
@@ -291,9 +356,30 @@ mod tests {
         started: Mutex<Vec<String>>,
         stopped: Mutex<Vec<String>>,
         progress: Mutex<Vec<String>>,
+        /// 接下来几次 `report_started` 要失败（模拟 transient）。
+        start_failures: Mutex<u32>,
+        /// `report_started` 一共被调用了几次（含失败）。
+        start_attempts: Mutex<u32>,
     }
 
     impl FakeProvider {
+        /// 前 `times` 次起播注册失败（`Network`，transient）。
+        fn failing_starts(times: u32) -> Self {
+            let provider = Self::default();
+            match provider.start_failures.lock() {
+                Ok(mut guard) => *guard = times,
+                Err(poisoned) => *poisoned.into_inner() = times,
+            }
+            provider
+        }
+
+        fn start_attempts(&self) -> u32 {
+            match self.start_attempts.lock() {
+                Ok(guard) => *guard,
+                Err(poisoned) => *poisoned.into_inner(),
+            }
+        }
+
         fn calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
             match calls.lock() {
                 Ok(guard) => guard.clone(),
@@ -307,6 +393,10 @@ mod tests {
 
         fn stopped(&self) -> Vec<String> {
             Self::calls(&self.stopped)
+        }
+
+        fn progress_count(&self) -> usize {
+            Self::calls(&self.progress).len()
         }
 
         fn recorded(calls: &Mutex<Vec<String>>, progress: &PlaybackProgress) {
@@ -376,6 +466,19 @@ mod tests {
         }
 
         async fn report_started(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
+            match self.start_attempts.lock() {
+                Ok(mut attempts) => *attempts += 1,
+                Err(poisoned) => *poisoned.into_inner() += 1,
+            }
+            let mut failures = match self.start_failures.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(ProviderError::Network("timeout".into()));
+            }
+            drop(failures);
             Self::recorded(&self.started, progress);
             Ok(())
         }
@@ -399,8 +502,9 @@ mod tests {
         }
     }
 
-    fn progress(item: &str, secs: u64) -> PlaybackProgress {
+    fn progress_at(item: &str, seq: u64, secs: u64) -> PlaybackProgress {
         PlaybackProgress {
+            session_seq: seq,
             item_id: ItemId::new(item),
             source_id: SourceId::new(format!("source-{item}")),
             position: Duration::from_secs(secs),
@@ -411,14 +515,19 @@ mod tests {
         }
     }
 
-    async fn report(sink: &ProviderSink, item: &str, secs: u64) {
-        sink.report(&progress(item, secs))
+    /// 旧版补发文件里的进度：没有会话代号（`0`）。
+    fn legacy_progress(item: &str, secs: u64) -> PlaybackProgress {
+        progress_at(item, 0, secs)
+    }
+
+    async fn report(sink: &ProviderSink, item: &str, seq: u64, secs: u64) {
+        sink.report(&progress_at(item, seq, secs))
             .await
             .unwrap_or_else(|error| panic!("上报失败：{error:?}"));
     }
 
-    async fn stop(sink: &ProviderSink, item: &str, secs: u64) {
-        sink.stop(&progress(item, secs))
+    async fn stop(sink: &ProviderSink, item: &str, seq: u64, secs: u64) {
+        sink.stop(&progress_at(item, seq, secs))
             .await
             .unwrap_or_else(|error| panic!("结束会话失败：{error:?}"));
     }
@@ -426,34 +535,108 @@ mod tests {
     /// 复审 🟡4：`started` 曾经是进程级的 `AtomicBool`，换片后 B 永远不会再发
     /// `Started`（`Sessions/Playing`），服务端于是不把 B 的进度算进会话。
     ///
-    /// 现在按会话（条目 + 资源）记录，`stop`（`Exit`）后复位。
+    /// 现在按会话代号记录（`0` 除外）。
     #[tokio::test]
     async fn every_new_session_reports_started() {
         let provider = Arc::new(FakeProvider::default());
         let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
 
-        // A 的会话：第一条上报先发 Started，后续不重复。
-        report(&sink, "a", 10).await;
+        // A 的会话（代号 1）：第一条上报先发 Started，后续不重复。
+        report(&sink, "a", 1, 10).await;
         assert_eq!(provider.started(), ["a"], "A 的第一条上报必须是 Started");
-        report(&sink, "a", 20).await;
+        report(&sink, "a", 1, 20).await;
         assert_eq!(provider.started(), ["a"], "同一会话不重复发 Started");
 
         // A 退出：`stop` 之后会话结束。
-        report(&sink, "a", 30).await;
-        stop(&sink, "a", 30).await;
+        report(&sink, "a", 1, 30).await;
+        stop(&sink, "a", 1, 30).await;
         assert_eq!(provider.stopped(), ["a"]);
 
-        // 换片 B：第一条上报仍然要是 Started（旧实现这里是空的）。
-        report(&sink, "b", 1).await;
+        // 换片 B（代号 2）：第一条上报仍然要是 Started。
+        report(&sink, "b", 2, 1).await;
         assert_eq!(
             provider.started(),
             ["a", "b"],
             "换片后新会话必须重新发 Started"
         );
 
-        // 同一部片重播（stop 之后）也算新会话。
-        stop(&sink, "b", 1).await;
-        report(&sink, "b", 2).await;
+        // 同一部片重播（stop 之后、新代号）也算新会话。
+        stop(&sink, "b", 2, 1).await;
+        report(&sink, "b", 3, 2).await;
         assert_eq!(provider.started(), ["a", "b", "b"]);
+    }
+
+    /// 复审 🟡2：drain 补发一个已经 `stop` 过的会话的 `Exit` 时，不能再发 `Started`——
+    /// 否则那个会话（服务端刚收到 `stop`）又被记成在播，而之后再也没人 `stop` 它。
+    #[tokio::test]
+    async fn drained_exit_does_not_restart_a_stopped_session() {
+        let provider = Arc::new(FakeProvider::default());
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        // A 播放中（代号 1）：Started 已发。
+        report(&sink, "a", 1, 30).await;
+        assert_eq!(provider.started(), ["a"]);
+
+        // A 退出：`stop` 先到（失败的那条 `Exit` 留在队列里，稍后补发）。
+        stop(&sink, "a", 1, 30).await;
+        assert_eq!(provider.stopped(), ["a"]);
+
+        // 补发旧 `Exit`：进度照发，但绝不能再发 Started。
+        report(&sink, "a", 1, 31).await;
+        assert_eq!(
+            provider.started(),
+            ["a"],
+            "已经 stop 的会话不得再发 Started"
+        );
+
+        // 重播（代号 2）仍然是新会话：正常重新发 Started。
+        report(&sink, "a", 2, 0).await;
+        assert_eq!(provider.started(), ["a", "a"]);
+    }
+
+    /// 💡：Started 遇到 transient 失败时，在下一次 report 里重试（不阻塞），
+    /// 但同一个会话最多试 `STARTED_MAX_ATTEMPTS` 次。
+    #[tokio::test]
+    async fn transient_started_failure_is_retried_on_the_next_report() {
+        let provider = Arc::new(FakeProvider::failing_starts(1));
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        // 第一次：Started 失败，进度照常上报。
+        report(&sink, "a", 1, 10).await;
+        assert!(provider.started().is_empty(), "失败那次不算已发");
+        assert_eq!(provider.progress_count(), 1);
+
+        // 下一次 report 顺手重试：成功，只补发一次。
+        report(&sink, "a", 1, 20).await;
+        assert_eq!(provider.started(), ["a"], "transient 失败要重试并成功");
+        report(&sink, "a", 1, 30).await;
+        assert_eq!(provider.started(), ["a"], "成功之后不再重复");
+    }
+
+    /// 起播注册一直失败时，本会话最多试 `STARTED_MAX_ATTEMPTS` 次，不会变成每次都发。
+    #[tokio::test]
+    async fn started_retries_are_capped_per_session() {
+        let provider = Arc::new(FakeProvider::failing_starts(u32::MAX));
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        for secs in 0..10 {
+            report(&sink, "a", 1, secs).await;
+        }
+        assert_eq!(provider.start_attempts(), STARTED_MAX_ATTEMPTS);
+        assert!(provider.started().is_empty());
+    }
+
+    /// 落盘兼容：旧版补发文件里的条目没有会话代号（`0`），那个会话早就结束了，
+    /// 补发它时绝不能再发 Started。
+    #[tokio::test]
+    async fn legacy_progress_never_starts_a_session() {
+        let provider = Arc::new(FakeProvider::default());
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        sink.report(&legacy_progress("a", 30))
+            .await
+            .unwrap_or_else(|error| panic!("上报失败：{error:?}"));
+        assert!(provider.started().is_empty(), "没有代号就不补 Started");
+        assert_eq!(provider.progress_count(), 1);
     }
 }

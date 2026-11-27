@@ -231,6 +231,7 @@ async fn jellyfin_flow_from_login_to_progress() {
 
     provider
         .report_progress(&PlaybackProgress {
+            session_seq: 0,
             item_id: ItemId::new(ITEM_ID),
             source_id: SourceId::new(SOURCE_ID),
             position: Duration::from_millis(490_800),
@@ -332,6 +333,7 @@ async fn sub_items_and_played_progress_stop_the_session() {
         .await;
 
     let progress = PlaybackProgress {
+        session_seq: 0,
         item_id: ItemId::new(ITEM_ID),
         source_id: SourceId::new(SOURCE_ID),
         position: Duration::from_secs(9816),
@@ -595,6 +597,7 @@ async fn progress_report_carries_pause_state_and_play_method() {
 
     provider
         .report_progress(&PlaybackProgress {
+            session_seq: 0,
             item_id: ItemId::new(ITEM_ID),
             source_id: SourceId::new(SOURCE_ID),
             position: Duration::from_secs(6000),
@@ -620,6 +623,7 @@ async fn progress_report_carries_pause_state_and_play_method() {
 
     provider
         .report_progress(&PlaybackProgress {
+            session_seq: 0,
             item_id: ItemId::new(ITEM_ID),
             source_id: SourceId::new(SOURCE_ID),
             position: Duration::from_secs(6100),
