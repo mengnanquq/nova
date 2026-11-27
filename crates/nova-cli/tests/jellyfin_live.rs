@@ -438,6 +438,7 @@ async fn live_jellyfin_end_to_end() {
     // ------------------------------------------------------------------
     let paused = PlaybackProgress {
         session_seq: 0,
+        play_session_id: None,
         item_id: playable.id.clone(),
         source_id: source.id.clone(),
         position: Duration::from_secs(1),
@@ -454,6 +455,7 @@ async fn live_jellyfin_end_to_end() {
 
     let finished = PlaybackProgress {
         session_seq: 0,
+        play_session_id: None,
         item_id: playable.id.clone(),
         source_id: source.id.clone(),
         position: Duration::from_secs(2),

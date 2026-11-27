@@ -210,6 +210,12 @@ enum Command {
 pub(crate) struct Progress {
     commands: Option<UnboundedSender<Command>>,
     runtime: Handle,
+    /// 入队时给进度盖会话标识的 provider（未登录 / 离线时为 `None`）。
+    ///
+    /// 为什么盖章要在这里（入队）而不是 worker 发送时去查：见
+    /// [`PlaybackProgress::play_session_id`]。同一部片重播时，新会话的
+    /// `PlaybackInfo` 会在旧会话的 `stop` 发出之前就把条目上的记录覆盖掉。
+    provider: Option<Arc<dyn MediaProvider>>,
     /// 测试：调用过几次**阻塞式**补发（`flush()`）。
     ///
     /// 换片路径绝不能碰到它：那里面有 `block_on` + 1500ms 上限，跑在界面线程上。
@@ -227,11 +233,13 @@ impl Progress {
             return Self {
                 commands: None,
                 runtime: runtime.clone(),
+                provider: None,
                 #[cfg(test)]
                 flushes: Arc::new(AtomicUsize::new(0)),
             };
         };
-        Self::with_sink(local, runtime, Arc::new(ProviderSink::new(provider)))
+        let sink = Arc::new(ProviderSink::new(Arc::clone(&provider)));
+        Self::with_sink(local, runtime, sink, Some(provider))
     }
 
     /// 用测试注入的 sink 起 worker（与 [`Progress::start`] 同一条路径）。
@@ -244,10 +252,15 @@ impl Progress {
         runtime: &Handle,
         sink: Arc<dyn ProgressSink>,
     ) -> Self {
-        Self::with_sink(local, runtime, sink)
+        Self::with_sink(local, runtime, sink, None)
     }
 
-    fn with_sink(local: &Arc<Local>, runtime: &Handle, sink: Arc<dyn ProgressSink>) -> Self {
+    fn with_sink(
+        local: &Arc<Local>,
+        runtime: &Handle,
+        sink: Arc<dyn ProgressSink>,
+        provider: Option<Arc<dyn MediaProvider>>,
+    ) -> Self {
         let prefs: UserPreferences = local.preferences.clone();
         let pending_path = local.data_dir.join("pending-progress.json");
         let (commands, mut receiver) = unbounded_channel();
@@ -297,9 +310,23 @@ impl Progress {
         Self {
             commands: Some(commands),
             runtime: runtime.clone(),
+            provider,
             #[cfg(test)]
             flushes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// 把**此刻**（入队那一刻）的服务端会话标识盖进进度。
+    ///
+    /// 进度里已经带了标识就不动：补发重试时用的一直是入队那一刻的快照，
+    /// 不能被期间又取过的 `PlaybackInfo`（新会话的标识）改写成新会话的。
+    fn stamp(&self, mut progress: PlaybackProgress) -> PlaybackProgress {
+        if progress.play_session_id.is_none() {
+            if let Some(provider) = &self.provider {
+                progress.play_session_id = provider.play_session_id(&progress.item_id);
+            }
+        }
+        progress
     }
 
     /// 提交一次进度（非阻塞）。返回是否**真的排进了**上报队列：`false` 表示
@@ -308,7 +335,9 @@ impl Progress {
         let Some(commands) = &self.commands else {
             return false;
         };
-        commands.send(Command::Submit(trigger, progress)).is_ok()
+        commands
+            .send(Command::Submit(trigger, self.stamp(progress)))
+            .is_ok()
     }
 
     /// 退出前尽力补发；最多等 [`FLUSH_TIMEOUT`]。
@@ -376,9 +405,30 @@ mod tests {
         start_failures: Mutex<u32>,
         /// `report_started` 一共被调用了几次（含失败）。
         start_attempts: Mutex<u32>,
+        /// 条目"最近一次 `PlaybackInfo`"给出的会话标识。
+        ///
+        /// 模拟真 provider 的 `play_sessions`：每次取 `PlaybackInfo` 都会覆盖它。
+        session: Mutex<Option<String>>,
+        /// 每次 `report_stopped` **发送那一刻**实际解析到的会话标识。
+        stopped_sessions: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeProvider {
+        /// 换掉"最近一次 `PlaybackInfo` 的会话标识"（模拟重播时又取了一次）。
+        fn set_session(&self, session: &str) {
+            match self.session.lock() {
+                Ok(mut guard) => *guard = Some(session.to_owned()),
+                Err(poisoned) => *poisoned.into_inner() = Some(session.to_owned()),
+            }
+        }
+
+        fn stopped_sessions(&self) -> Vec<Option<String>> {
+            match self.stopped_sessions.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
         /// 前 `times` 次起播注册失败（`Network`，transient）。
         fn failing_starts(times: u32) -> Self {
             let provider = Self::default();
@@ -427,6 +477,13 @@ mod tests {
     impl MediaProvider for FakeProvider {
         fn kind(&self) -> ServerKind {
             ServerKind::Jellyfin
+        }
+
+        fn play_session_id(&self, _item: &ItemId) -> Option<String> {
+            match self.session.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
         }
 
         fn base_url(&self) -> &str {
@@ -501,6 +558,16 @@ mod tests {
 
         async fn report_stopped(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
             Self::recorded(&self.stopped, progress);
+            // 和真 provider 一样：**发送这一刻**才解析会话标识（进度里带了就用它，
+            // 没带才退回"这个条目最近一次"的记录）。
+            let session = progress
+                .play_session_id
+                .clone()
+                .or_else(|| MediaProvider::play_session_id(self, &progress.item_id));
+            match self.stopped_sessions.lock() {
+                Ok(mut guard) => guard.push(session),
+                Err(poisoned) => poisoned.into_inner().push(session),
+            }
             Ok(())
         }
 
@@ -521,6 +588,8 @@ mod tests {
     fn progress_at(item: &str, seq: u64, secs: u64) -> PlaybackProgress {
         PlaybackProgress {
             session_seq: seq,
+            // 默认不盖会话标识：需要它的用例自己调 `Progress::stamp`。
+            play_session_id: None,
             item_id: ItemId::new(item),
             source_id: SourceId::new(format!("source-{item}")),
             position: Duration::from_secs(secs),
@@ -691,5 +760,83 @@ mod tests {
             .unwrap_or_else(|error| panic!("上报失败：{error:?}"));
         assert!(provider.started().is_empty(), "没有代号就不补 Started");
         assert_eq!(provider.progress_count(), 1);
+    }
+
+    /// 审查 🟡4：同一部片重播时，旧会话的 `stop` 必须带**旧会话**的 `PlaySessionId`。
+    ///
+    /// 以前 provider 只在条目上记"最近一次 `PlaybackInfo` 的会话标识"，worker 真正
+    /// 发送时才去查：重播时新会话的 `PlaybackInfo`（`refresh_before_play`）会在旧会话的
+    /// `stop` 发出之前把它覆盖掉，于是 `stop` 带上新会话的标识——服务端关掉的是新会话，
+    /// 旧会话一直留着（服务端界面上两条会话，一条僵尸、一条被踢）。
+    ///
+    /// 修法：进度**入队那一刻**（[`Progress::stamp`]，界面线程上、还没回 `begin`）就把
+    /// 标识盖进进度，随进度一路带到发送。
+    #[tokio::test]
+    async fn replayed_item_stops_the_old_session_with_its_own_play_session_id() {
+        let provider = Arc::new(FakeProvider::default());
+        provider.set_session("sess-old");
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+        let handle = Progress {
+            commands: None,
+            runtime: Handle::current(),
+            provider: Some(Arc::clone(&provider) as Arc<dyn MediaProvider>),
+            flushes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        // 旧会话退出：`Exit` 在入队那一刻盖章（这时条目上的记录还是旧会话的）。
+        let leaving = handle.stamp(progress_at("a", 1, 30));
+        assert_eq!(leaving.play_session_id.as_deref(), Some("sess-old"));
+
+        // 同一部片重播：新会话的 `PlaybackInfo` 覆盖了条目上的记录。
+        provider.set_session("sess-new");
+
+        // worker 晚一步才真发出旧会话的 `stop`：必须带旧标识。
+        sink.stop(&leaving)
+            .await
+            .unwrap_or_else(|error| panic!("结束会话失败：{error:?}"));
+        assert_eq!(
+            provider.stopped_sessions(),
+            [Some("sess-old".to_owned())],
+            "重播后旧会话的 stop 不能带新会话的 PlaySessionId"
+        );
+
+        // 新会话自己的上报带新标识（盖章的时机是它自己的入队）。
+        let replaying = handle.stamp(progress_at("a", 2, 0));
+        sink.stop(&replaying)
+            .await
+            .unwrap_or_else(|error| panic!("结束会话失败：{error:?}"));
+        assert_eq!(
+            provider.stopped_sessions(),
+            [Some("sess-old".to_owned()), Some("sess-new".to_owned())]
+        );
+    }
+
+    /// 兼容：旧版本落盘的待发项没有会话标识（`None`，`session_seq` 也是 `0`），
+    /// 也没有 provider 可盖——上报退回"按条目查最近一次"的老行为，不报错。
+    #[tokio::test]
+    async fn legacy_progress_without_a_session_id_falls_back_to_the_latest() {
+        let provider = Arc::new(FakeProvider::default());
+        provider.set_session("sess-latest");
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+        let handle = Progress {
+            commands: None,
+            runtime: Handle::current(),
+            provider: None,
+            flushes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let legacy = handle.stamp(legacy_progress("a", 30));
+        assert!(
+            legacy.play_session_id.is_none(),
+            "没有 provider 就不能盖出标识"
+        );
+        sink.stop(&legacy)
+            .await
+            .unwrap_or_else(|error| panic!("结束会话失败：{error:?}"));
+        assert_eq!(
+            provider.stopped_sessions(),
+            [Some("sess-latest".to_owned())],
+            "没有标识的旧条目要退回按条目查最近一次"
+        );
     }
 }

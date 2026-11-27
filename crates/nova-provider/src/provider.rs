@@ -105,6 +105,19 @@ pub trait MediaProvider: Send + Sync {
     /// 取条目的可播放资源（同一部片的多个版本各算一个）。
     async fn sources(&self, id: &ItemId) -> Result<Vec<MediaSource>, ProviderError>;
 
+    /// 条目最近一次 `PlaybackInfo` 给出的服务端会话标识（`PlaySessionId`）。
+    ///
+    /// 调用方在进度**入队那一刻**把它快照进
+    /// [`PlaybackProgress::play_session_id`]，上报时原样带回。不能等到发送时再查：
+    /// 同一部片重播（或重试）时会再取一次 `PlaybackInfo`，条目上的记录已被新会话
+    /// 覆盖，旧会话的 `stop` 就会带上新会话的标识。
+    ///
+    /// 默认 `None`：不记会话的实现（测试假 provider、离线方言）上报时退回老行为。
+    fn play_session_id(&self, item: &ItemId) -> Option<String> {
+        let _ = item;
+        None
+    }
+
     /// 构造可播放直链。
     ///
     /// 返回值的查询串里带令牌，`Debug` 已做脱敏；需要在别处传递时

@@ -1586,6 +1586,10 @@ impl Player {
             .unwrap_or(false);
         Some(PlaybackProgress {
             session_seq: self.session_seq,
+            // 服务端会话标识（`PlaySessionId`）由上报句柄在**入队那一刻**盖进去
+            // （`sink::Progress::stamp`）：同一部片重播时，新会话的 `PlaybackInfo`
+            // 会在旧会话的 `stop` 发出之前就覆盖掉条目上的记录。
+            play_session_id: None,
             item_id: target.item_id.clone(),
             source_id: target.source_id.clone(),
             position,

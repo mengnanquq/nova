@@ -332,6 +332,9 @@ impl ProgressReporter {
             // 也保证补发时 sink 不会再发 `Started`——再发一次服务端会把已结束的会话记成在播，
             // 而之后再也没人 `stop` 它。
             entry.progress.session_seq = 0;
+            // 但服务端会话标识（`play_session_id`）**不**清：它绑的是"这条进度属于哪个
+            // 会话"。上个进程的会话已经死了，带着它补发最多是服务端忽略这一条；清掉反而
+            // 让 provider 退回"按条目查最近一次"，可能把旧位置记到一个还活着的新会话上。
             // 同一会话只留一条：内存里已有的更新，优先保留。
             if !self
                 .queue
@@ -652,6 +655,7 @@ mod tests {
     fn progress(secs: u64, paused: bool) -> PlaybackProgress {
         PlaybackProgress {
             session_seq: 0,
+            play_session_id: None,
             item_id: ItemId::new("item-1"),
             source_id: SourceId::new("source-1"),
             position: Duration::from_secs(secs),

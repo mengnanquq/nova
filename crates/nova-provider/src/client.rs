@@ -198,7 +198,8 @@ pub struct Provider {
     /// 每个条目最近一次 `PlaybackInfo` 给出的 `PlaySessionId`。
     ///
     /// 上报进度必须带它，否则服务端把上报当成"无媒体信息的会话"直接忽略（实测）。
-    /// 由 `sources()` 写入、`report_progress()` 读取；按条目覆盖即可。
+    /// 由 `sources()` 写入；上报时只当作**兼容兜底**：进度里已经带着入队那一刻的
+    /// 标识（见 `PlaybackProgress::play_session_id`），这里只给没有标识的旧条目用。
     play_sessions: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
@@ -597,6 +598,19 @@ impl Provider {
             .cloned()
     }
 
+    /// 上报要带的会话标识。
+    ///
+    /// 优先用进度里携带的那一个：它是**入队那一刻**按会话快照的，同一部片重播时
+    /// 新会话的 `PlaybackInfo` 不会把它改成新会话的标识（旧会话的 `stop` 带新标识，
+    /// 服务端关掉的就是新会话，旧会话一直留着）。没有携带（旧版本落盘的待发文件、
+    /// 没取过 `PlaybackInfo`）才退回"这个条目最近一次"的老行为。
+    fn report_play_session(&self, progress: &PlaybackProgress) -> Option<String> {
+        progress
+            .play_session_id
+            .clone()
+            .or_else(|| self.play_session_for(progress.item_id.as_str()))
+    }
+
     fn url(&self, segments: &[&str], query: &[(&str, &str)]) -> Result<Url, ProviderError> {
         build_url(&self.base, segments, query)
     }
@@ -989,6 +1003,11 @@ impl MediaProvider for Provider {
         Ok(map_sources(&detail.media_sources, id, &self.base))
     }
 
+    /// 上报前快照用：这个条目最近一次 `PlaybackInfo` 给出的会话标识。
+    fn play_session_id(&self, item: &ItemId) -> Option<String> {
+        self.play_session_for(item.as_str())
+    }
+
     async fn stream_target(
         &self,
         item: &ItemId,
@@ -1015,7 +1034,7 @@ impl MediaProvider for Provider {
     async fn report_started(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
         let position_ticks = duration_to_ticks(progress.position);
         let body = ProgressReport {
-            play_session_id: self.play_session_for(progress.item_id.as_str()),
+            play_session_id: self.report_play_session(progress),
             item_id: progress.item_id.as_str().to_owned(),
             media_source_id: progress.source_id.as_str().to_owned(),
             position_ticks,
@@ -1030,7 +1049,7 @@ impl MediaProvider for Provider {
 
     async fn report_stopped(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
         let body = ProgressReport {
-            play_session_id: self.play_session_for(progress.item_id.as_str()),
+            play_session_id: self.report_play_session(progress),
             item_id: progress.item_id.as_str().to_owned(),
             media_source_id: progress.source_id.as_str().to_owned(),
             position_ticks: duration_to_ticks(progress.position),
@@ -1045,7 +1064,7 @@ impl MediaProvider for Provider {
 
     async fn report_progress(&self, progress: &PlaybackProgress) -> Result<(), ProviderError> {
         let body = ProgressReport {
-            play_session_id: self.play_session_for(progress.item_id.as_str()),
+            play_session_id: self.report_play_session(progress),
             item_id: progress.item_id.as_str().to_owned(),
             media_source_id: progress.source_id.as_str().to_owned(),
             position_ticks: duration_to_ticks(progress.position),

@@ -845,6 +845,7 @@ impl App {
 
         let progress = PlaybackProgress {
             session_seq: 0,
+            play_session_id: None,
             item_id: item_id.clone(),
             source_id: source.id.clone(),
             position,

@@ -756,6 +756,7 @@ mod tests {
         session.handle(EngineEvent::FirstFrame);
         let progress = PlaybackProgress {
             session_seq: 0,
+            play_session_id: None,
             item_id: ItemId::new("i"),
             source_id: SourceId::new("s"),
             position: session.position(),

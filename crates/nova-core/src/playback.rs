@@ -137,6 +137,17 @@ pub struct PlaybackProgress {
     /// 带 `#[serde(default)]`：新增字段之前落盘的待发文件仍然能读回。
     #[serde(default)]
     pub session_seq: u64,
+    /// 服务端会话标识（`PlaybackInfo` 给的 `PlaySessionId`），上报时原样带回。
+    ///
+    /// 它必须绑在**这一次会话**上：在进度入队那一刻快照进来，随进度一起走，而不是
+    /// 发送时再去查「这个条目最近一次的会话标识」——同一部片重播时，新会话的
+    /// `PlaybackInfo` 会在旧会话的 `stop` 发出之前就把那个「最近一次」覆盖掉，
+    /// 旧会话的 `stop` 于是带上了新会话的标识，服务端关掉的是新会话、旧会话一直留着。
+    ///
+    /// `None` 表示**不知道**（旧版本落盘的待发文件、测试构造的进度）：provider 退回
+    /// 「按条目查最近一次」的老行为。`#[serde(default)]` 保证旧文件仍能读回。
+    #[serde(default)]
+    pub play_session_id: Option<String>,
     /// 条目。
     pub item_id: ItemId,
     /// 资源。
@@ -166,6 +177,7 @@ impl PlaybackProgress {
         };
         Self {
             session_seq: 0,
+            play_session_id: None,
             item_id: session.item_id.clone(),
             source_id: session.source_id.clone(),
             position,

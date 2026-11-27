@@ -150,6 +150,7 @@ async fn full_playback_flow_through_public_api() {
     };
     let progress = PlaybackProgress {
         session_seq: 0,
+        play_session_id: None,
         item_id: ItemId::new("1"),
         source_id: SourceId::new("s"),
         position: session.position(),

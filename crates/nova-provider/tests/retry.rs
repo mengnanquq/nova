@@ -217,6 +217,7 @@ async fn post_is_never_retried() {
     let error = provider
         .report_progress(&PlaybackProgress {
             session_seq: 0,
+            play_session_id: None,
             item_id: ItemId::new("item"),
             source_id: SourceId::new("source"),
             position: Duration::from_secs(60),
@@ -432,6 +433,7 @@ async fn retry_after_on_a_post_is_ignored() {
     let error = provider
         .report_progress(&PlaybackProgress {
             session_seq: 0,
+            play_session_id: None,
             item_id: ItemId::new("item"),
             source_id: SourceId::new("source"),
             position: Duration::from_secs(60),
