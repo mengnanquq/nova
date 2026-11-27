@@ -1651,9 +1651,15 @@ mod tests {
                 let _ = prefetch_sender.send(key);
             });
             // 等预取真正开始：第 1 张被 gate 拦住，其余在预取名额上排队。
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let in_flight = fetcher.prefetch_calls.load(Ordering::SeqCst);
-            assert!(in_flight >= 1, "预取应当已经开始（实际 {in_flight} 张）");
+            // 轮询而非固定 sleep：负载高时 150ms 内预取可能还没被调度到。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while fetcher.prefetch_calls.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "10 秒内预取一张都没发起：request_prefetch 没有把任务交给 runtime"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
 
             let visible = ImageKey::poster("visible");
             let visible_sender = sender.clone();

@@ -16,7 +16,7 @@ name = "nova_cli"
 path = "src/lib.rs"
 
 [dependencies]
-# 工作区里有 nova-core / nova-secrets 的 workspace 依赖，另外两个只有 path，
+# 工作区里有 nova-core / nova-secrets 的 workspace 依赖，其余几个只有 path，
 # 这里统一写 path（允许本 crate 自己声明，避免改动根 Cargo.toml）。
 nova-core = { path = "../nova-core" }
 nova-playback = { path = "../nova-playback" }
