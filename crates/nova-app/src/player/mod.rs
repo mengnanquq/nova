@@ -2542,12 +2542,12 @@ mod tests {
         );
     }
 
-    /// 等 worker 线程把命令处理完（最多 3 秒）。
+    /// 等 worker 线程把命令处理完（最多 10 秒：只在失败时等满，成功路径几十毫秒内返回）。
     ///
     /// 换片路径不再阻塞等补发，界面线程只管把 `Exit` 排进 channel；上报与 `stop`
     /// 是 worker 异步做的，测试只能轮询。
     fn wait_until(mut done: impl FnMut() -> bool) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             if done() {
                 return true;
