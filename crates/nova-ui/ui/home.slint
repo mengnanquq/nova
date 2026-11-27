@@ -850,6 +850,9 @@ export component HomePage inherits Rectangle {
     out property <length> zoom-rect-w: row0.zoom-rect-w;
     out property <length> zoom-rect-h: row0.zoom-rect-h;
     out property <bool> row0-zoom-on: row0.zoom-on;
+    // 最近添加（row1）的放大层是否打开。回归用：焦点之前的行缩量时指针已离开，
+    // 第 1 行不能还亮着放大（见 `App::set_home` 的悬停硬清）。
+    out property <bool> row1-zoom-on: row1.zoom-on;
     out property <length> row0-arrow-y: row0.arrow-y + row0.y - flick.content-y;
     // 测试用：行标题下沿 / 图高 / 卡片总高（验收"放大卡不遮盖行标题"与
     // "卡片总高 = 图高 + 卡下标题"两条）。

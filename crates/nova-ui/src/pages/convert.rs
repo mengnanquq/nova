@@ -38,10 +38,12 @@ fn reuse_model<T: Clone + PartialEq + 'static>(
     existing: Option<&slint::ModelRc<T>>,
     items: Vec<T>,
 ) -> slint::ModelRc<T> {
-    let Some(vec_model) =
-        existing.and_then(|existing| existing.as_any().downcast_ref::<slint::VecModel<T>>())
-    else {
-        // 首次（或 model 不是我们建的 `VecModel`）：只能新建。
+    let Some(existing) = existing else {
+        // 首次填充：没有可复用的 model。
+        return model(items);
+    };
+    let Some(vec_model) = existing.as_any().downcast_ref::<slint::VecModel<T>>() else {
+        // 不是我们建的 `VecModel`（外部塞进来的 / `ModelRc::default()`）：只能新建。
         return model(items);
     };
     // 多的从尾部删（保留下标稳定的那些实例），少的补在尾部。
@@ -60,7 +62,7 @@ fn reuse_model<T: Clone + PartialEq + 'static>(
             vec_model.push(item);
         }
     }
-    existing.cloned().unwrap_or_default()
+    existing.clone()
 }
 
 fn hero_image(card: &CardView, images: &ImageStore) -> slint::Image {
@@ -114,8 +116,9 @@ pub fn home_data(view: &HomeView, images: &ImageStore, previous: Option<&HomeDat
     });
     let has_hero = hero.is_some();
     // 库行自己的 `cards` model 也要复用：`RowData` 是外层重复元素的数据，`cards`
-    // 换成新 model 会让该行的卡片实例整体重建。按行号对应上一轮的模型（行的
-    // 身份由 `library_id` / `title` 表达，model 只是个容器）。
+    // 换成新 model 会让该行的卡片实例整体重建。按 `library_id` 对应上一轮的模型：
+    // 库增删 / 重排时行号会跟着挪，按行号借会把**别的库**的实例状态（悬停、行内
+    // 滚动）错接到这一行上。找不到同一个库就新建。
     let previous_rows: Vec<RowData> = previous
         .map(|previous| {
             (0..previous.library_rows.row_count())
@@ -126,17 +129,22 @@ pub fn home_data(view: &HomeView, images: &ImageStore, previous: Option<&HomeDat
     let library_rows: Vec<RowData> = view
         .library_rows
         .iter()
-        .enumerate()
-        .map(|(index, row)| RowData {
-            library_id: row.library_id.clone().into(),
-            title: row.title.clone().into(),
-            cards: reuse_model(
-                previous_rows.get(index).map(|previous| &previous.cards),
-                row.items
-                    .iter()
-                    .map(|card| card_data(card, images))
-                    .collect(),
-            ),
+        .map(|row| {
+            let previous_cards = previous_rows
+                .iter()
+                .find(|previous| previous.library_id.as_str() == row.library_id.as_str())
+                .map(|previous| &previous.cards);
+            RowData {
+                library_id: row.library_id.clone().into(),
+                title: row.title.clone().into(),
+                cards: reuse_model(
+                    previous_cards,
+                    row.items
+                        .iter()
+                        .map(|card| card_data(card, images))
+                        .collect(),
+                ),
+            }
         })
         .collect();
     // 库行在扁平焦点索引里的起点（`.slint` 用它把页面级焦点换算成行内下标）。
@@ -358,7 +366,14 @@ pub fn player_data(view: &PlayerView, images: &ImageStore, item_id: &str) -> Pla
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::viewmodel::{CardView, SearchView};
+    use crate::viewmodel::{CardView, LibraryRowView, SearchView};
+
+    /// `ModelRc` 里的条目（测试里读回来比对）。
+    fn rows<T: Clone + 'static>(model: &slint::ModelRc<T>) -> Vec<T> {
+        (0..model.row_count())
+            .filter_map(|index| model.row_data(index))
+            .collect()
+    }
 
     /// 搜索页命中数被上限截断时，文案必须说出「显示前 N 部」（R6-10）。
     #[test]
@@ -382,5 +397,125 @@ mod tests {
         let data = search_data(&view, &[], -1, &images);
         assert_eq!(data.current_tab, -1, "−1 = 顶栏无高亮");
         assert_eq!(data.count_text.as_str(), "共 2 部");
+    }
+
+    // ---- `reuse_model`：model 实例身份必须保留（否则整行卡片实例重建）----
+
+    /// 0 → n：空 model 也要原地补满，实例身份不变。
+    #[test]
+    fn reuse_model_fills_an_empty_model_in_place() {
+        let previous = model(Vec::<i32>::new());
+        let next = reuse_model(Some(&previous), vec![1, 2, 3]);
+        assert_eq!(next, previous, "空 model 也要原地复用（实例身份不变）");
+        assert_eq!(rows(&next), vec![1, 2, 3]);
+    }
+
+    /// n → 0：多余的行从尾部删掉，仍是同一个实例。
+    #[test]
+    fn reuse_model_shrinks_to_empty_in_place() {
+        let previous = model(vec![1, 2, 3]);
+        let next = reuse_model(Some(&previous), Vec::new());
+        assert_eq!(next, previous, "清空也要原地复用");
+        assert!(rows(&next).is_empty());
+    }
+
+    /// n → m：变短、变长都原地写，实例身份不变。
+    #[test]
+    fn reuse_model_rewrites_in_place_when_the_length_changes() {
+        let previous = model(vec![1, 2, 3, 4, 5]);
+
+        let shorter = reuse_model(Some(&previous), vec![1, 2, 3]);
+        assert_eq!(shorter, previous, "变短也必须原地复用");
+        assert_eq!(rows(&shorter), vec![1, 2, 3]);
+
+        let longer = reuse_model(Some(&shorter), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(longer, previous, "变长也必须原地复用");
+        assert_eq!(rows(&longer), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    /// 条数不变、内容整体替换：仍返回同一个 model（Slint 才会原地 `update` 实例）。
+    #[test]
+    fn reuse_model_keeps_the_instance_when_the_content_is_replaced() {
+        let previous = model(vec![1, 2, 3]);
+        let next = reuse_model(Some(&previous), vec![4, 5, 6]);
+        assert_eq!(next, previous, "内容替换不代表换 model");
+        assert_eq!(rows(&next), vec![4, 5, 6]);
+    }
+
+    /// 传进来的不是我们建的 `VecModel` 时回退新建，且不动原 model。
+    #[test]
+    fn reuse_model_falls_back_to_a_fresh_model_for_foreign_models() {
+        // `ModelRc::default()`（里面没有 model）。
+        let empty = slint::ModelRc::<i32>::default();
+        let next = reuse_model(Some(&empty), vec![7, 8]);
+        assert_ne!(next, empty, "无内层 model 时必须新建一个");
+        assert_eq!(rows(&next), vec![7, 8]);
+        assert!(rows(&empty).is_empty());
+
+        // 自定义（非 `VecModel`）model：同样新建，原 model 保留自己的内容。
+        struct Fixed(Vec<i32>);
+        impl slint::Model for Fixed {
+            type Data = i32;
+            fn row_count(&self) -> usize {
+                self.0.len()
+            }
+            fn row_data(&self, row: usize) -> Option<i32> {
+                self.0.get(row).copied()
+            }
+            fn model_tracker(&self) -> &dyn slint::ModelTracker {
+                &()
+            }
+        }
+        let foreign = slint::ModelRc::new(Fixed(vec![1]));
+        let next = reuse_model(Some(&foreign), vec![2, 3]);
+        assert_ne!(next, foreign, "非 VecModel 时必须新建");
+        assert_eq!(rows(&next), vec![2, 3]);
+        assert_eq!(rows(&foreign), vec![1], "原 model 不能被写");
+    }
+
+    // ---- 库行的 `cards` model：按 `library_id` 复用 ----
+
+    fn home_with_rows(library_ids: &[&str]) -> HomeView {
+        HomeView {
+            library_rows: library_ids
+                .iter()
+                .map(|library_id| LibraryRowView {
+                    library_id: (*library_id).to_string(),
+                    title: (*library_id).to_string(),
+                    items: vec![CardView::new(format!("{library_id}-1"), "卡片")],
+                })
+                .collect(),
+            ..HomeView::new()
+        }
+    }
+
+    fn cards_of(data: &HomeData, library_id: &str) -> slint::ModelRc<CardData> {
+        (0..data.library_rows.row_count())
+            .filter_map(|index| data.library_rows.row_data(index))
+            .find(|row| row.library_id.as_str() == library_id)
+            .unwrap_or_else(|| panic!("没有库行 {library_id}"))
+            .cards
+    }
+
+    /// 中间删掉一个库：后面那个库必须拿到**自己**原来的 `cards` model。
+    ///
+    /// 按行号复用会把被删库的 model 借给下一个库（实例状态串行）。
+    #[test]
+    fn library_rows_reuse_their_cards_model_by_library_id() {
+        let images = ImageStore::new();
+        let before = home_data(&home_with_rows(&["lib-a", "lib-b", "lib-c"]), &images, None);
+        let c_before = cards_of(&before, "lib-c");
+        let b_before = cards_of(&before, "lib-b");
+        assert_ne!(c_before, b_before, "前提：两个库原本各用自己的 model");
+
+        // 删掉中间的 lib-b：lib-c 从第 3 行变成第 2 行。
+        let after = home_data(&home_with_rows(&["lib-a", "lib-c"]), &images, Some(&before));
+        let c_after = cards_of(&after, "lib-c");
+        assert_ne!(c_after, b_before, "lib-c 不能借到被删掉的 lib-b 的 model");
+        assert_eq!(c_after, c_before, "lib-c 必须继续用自己原来的 model");
+        // 顺序也按 `library_id` 对应：重排后仍各自复用。
+        let reordered = home_data(&home_with_rows(&["lib-c", "lib-a"]), &images, Some(&after));
+        assert_eq!(cards_of(&reordered, "lib-c"), c_before);
+        assert_eq!(cards_of(&reordered, "lib-a"), cards_of(&after, "lib-a"));
     }
 }

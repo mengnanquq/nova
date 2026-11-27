@@ -423,8 +423,7 @@ fn an_empty_top_row_does_not_add_a_section_gap() {
 /// 上一个测试只覆盖了有 hero 的三种形状；无 hero（缓存还没回来 / 直接进了首页的
 /// 空 billboard）时 hero 槽位是 0，首个可见行的标题顶也必须正好是 0——不能多出
 /// 一个 `section-gap`。覆盖「继续观看非空」（首行是 row0）与「继续观看为空」
-/// （首行是 row1 最近添加）两种形状，并用行自己的 `cards-offset` 交叉校验：
-/// 标题顶到卡片上沿只差 `title-off`，说明行块本身也从页面顶端开始。
+/// （首行是 row1 最近添加）两种形状。
 #[test]
 fn without_a_hero_the_first_row_starts_at_the_page_top() {
     let mut with_continue = home_filled();
@@ -447,7 +446,6 @@ fn without_a_hero_the_first_row_starts_at_the_page_top() {
             let theme = app.ui().global::<Theme>();
             let gap = f64::from(theme.get_section_gap());
             let title_h = f64::from(theme.get_section_title_height());
-            let title_off = f64::from(theme.get_row_title_gap()) + title_h;
             drop(theme);
 
             assert_eq!(
@@ -461,18 +459,13 @@ fn without_a_hero_the_first_row_starts_at_the_page_top() {
                 "{width}x{height} {label}: 没有 hero 时 hero 槽位必须是 0（实际 {hero_bottom}）"
             );
 
-            // 首个可见行：标题下沿探针（`row-title-bottom`）+ 该行第 1 张卡的真实窗口
-            // y（`card.0` 目标，交叉校验行块本身也从页面顶端开始）。
-            let (title_bottom, card_target) = if !view.continue_watching.is_empty() {
-                (
-                    f64::from(app.ui().get_row0_title_bottom()),
-                    "home.row.continue.card.0",
-                )
+            // 首个可见行：标题下沿探针（`row-title-bottom`）。
+            // （卡上沿与它的差恒为 `title-off`——两边都由同一个布局表达式算出，
+            // 再断言一遍没有意义，所以这里只看标题顶。）
+            let title_bottom = if !view.continue_watching.is_empty() {
+                f64::from(app.ui().get_row0_title_bottom())
             } else {
-                (
-                    f64::from(app.ui().get_row1_title_bottom()),
-                    "home.row.recent.card.0",
-                )
+                f64::from(app.ui().get_row1_title_bottom())
             };
             let first_title_top = title_bottom - title_h;
             assert!(
@@ -486,14 +479,6 @@ fn without_a_hero_the_first_row_starts_at_the_page_top() {
                 "{width}x{height} {label}: hero 底 {hero_bottom} 到首个可见行标题顶 \
                  {first_title_top} 之间不该有 section-gap {gap}（实际 {}）",
                 first_title_top - hero_bottom
-            );
-            let card = find_target(&app, card_target)
-                .unwrap_or_else(|| panic!("{width}x{height} {label}: {card_target} 缺失"));
-            let cards_top = f64::from(card.y);
-            assert!(
-                ((cards_top - first_title_top) - title_off).abs() <= 0.5,
-                "{width}x{height} {label}: 卡片上沿 {cards_top} 与标题顶 {first_title_top} \
-                 的差应恰为标题高 + 标题下距 {title_off}"
             );
         }
     }

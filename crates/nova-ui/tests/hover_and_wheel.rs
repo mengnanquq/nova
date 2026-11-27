@@ -197,3 +197,36 @@ fn pointer_move_zooms_a_library_grid_card_without_keyboard_navigation() {
     i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
     assert!(!app.ui().get_library_zoom_on(), "指针移开后放大层应收起");
 }
+
+/// 回归：焦点**之前**的行缩量（「继续观看」被清空）时，下面的行整体上移，
+/// 指针已经不在原来那张卡上——放大效果必须一起熄灭。
+///
+/// 这条以前会掉进 `hover-reset` 分支：焦点（最近添加里的第 3 张）仍然合法，行按
+/// 每张卡**旧的** `has-hover` 重算，把放大又点回指针已经离开的卡上。
+#[test]
+fn shrinking_a_row_above_clears_the_zoom_of_the_row_the_pointer_left() {
+    let app = app_of(1280.0, 800.0);
+    let mut view = home_filled();
+    app.set_home(&view);
+    app.ui().set_billboard_ratio(0.2);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+    assert!(!app.ui().get_row1_zoom_on(), "没悬停时不该有放大层");
+
+    // 指针停在「最近添加」第 3 张卡上（悬停同时把焦点也落在这里）。
+    let targets = settled_targets(&app);
+    let (x, y) = target(&targets, "home.row.recent.card.2").center();
+    move_pointer(&app, x, y);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+    assert!(app.ui().get_row1_zoom_on(), "悬停后最近添加行应进入放大态");
+
+    // 清空「继续观看」：最近添加整行上移一块，指针底下已经不是那张卡。
+    view.continue_watching.clear();
+    app.set_home(&view);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+    assert!(
+        !app.ui().get_row1_zoom_on(),
+        "继续观看被清空后行整体上移、指针已离开，放大效果必须熄灭（不能按旧的 has-hover 重算点亮）"
+    );
+}
