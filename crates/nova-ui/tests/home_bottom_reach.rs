@@ -347,3 +347,73 @@ fn empty_continue_and_recent_rows_do_not_reserve_a_full_block() {
         );
     }
 }
+
+/// R7-空白：空的继续观看 / 最近添加行**不占间距**。
+///
+/// Slint 的 `VerticalLayout` 对 0 高的子项照样算 `spacing`，于是空行高 0 却仍然
+/// 吃掉一个 `section-gap`：两行都空时 hero 底到首个可见行标题顶是 3 个 gap，
+/// 单行空时是 2 个。修法是把间距挪进每行自己的上边距（空行高 0 ⇒ 间距一起消失）。
+///
+/// 判据：hero 底（`billboard-slot`，hero 块就是这个高度）到首个可见行标题顶的
+/// 距离恒等于**一个** `section-gap`——三种形状（都不空 / 单行空 / 两行都空）都断言。
+/// 行标题顶取自真实布局：继续观看 / 最近添加用行自己的 `*-title-bottom` 探针减标题高，
+/// 库行用「查看全部 ›」目标的窗口 y（`more` 就压在标题行上）。
+#[test]
+fn an_empty_top_row_does_not_add_a_section_gap() {
+    let mut neither = home_filled();
+    neither.continue_watching.clear();
+    neither.recently_added.clear();
+
+    let mut no_continue = home_filled();
+    no_continue.continue_watching.clear();
+
+    let mut no_recent = home_filled();
+    no_recent.recently_added.clear();
+
+    let cases: [(&str, HomeView); 4] = [
+        ("都不空", home_filled()),
+        ("继续观看为空", no_continue),
+        ("最近添加为空", no_recent),
+        ("两行都空", neither),
+    ];
+
+    for (width, height) in [(1920.0f32, 1080.0f32), (800.0, 600.0)] {
+        for (label, view) in &cases {
+            let app = setup(view, width, height);
+            // 行入场动画（`CardRow.rise`，`Theme.motion-row` = 540ms）跑完再量：
+            // `row-title-bottom` 含 `rise`，动画未完会少报几像素。
+            for _ in 0..4 {
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+            }
+            app.refresh_targets();
+            assert_eq!(
+                app.ui().get_home_scroll_y(),
+                0.0,
+                "{width}x{height} {label}: 前提是页面停在顶部"
+            );
+            let theme = app.ui().global::<Theme>();
+            let gap = f64::from(theme.get_section_gap());
+            let title_h = f64::from(theme.get_section_title_height());
+            drop(theme);
+
+            let hero_bottom = f64::from(app.ui().get_hero_bottom());
+            let first_title_top = if !view.continue_watching.is_empty() {
+                f64::from(app.ui().get_row0_title_bottom()) - title_h
+            } else if !view.recently_added.is_empty() {
+                f64::from(app.ui().get_row1_title_bottom()) - title_h
+            } else {
+                let more = find_target(&app, "home.row.lib.0.more").unwrap_or_else(|| {
+                    panic!("{width}x{height} {label}: 首个库行的「查看全部」缺失")
+                });
+                f64::from(more.y)
+            };
+
+            assert!(
+                ((first_title_top - hero_bottom) - gap).abs() <= 0.5,
+                "{width}x{height} {label}: hero 底 {hero_bottom} 到首个可见行标题顶 \
+                 {first_title_top} 应恰为一个 section-gap {gap}（实际 {}）",
+                first_title_top - hero_bottom
+            );
+        }
+    }
+}

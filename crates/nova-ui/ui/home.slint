@@ -37,6 +37,13 @@ component CardRow inherits Rectangle {
     in property <[CardData]> cards;
     // 2:3 海报行（最近添加）；默认 16:9 横版行。
     in property <bool> portrait: false;
+    // 本行与上一块之间的间距（`HomePage` 把纵向布局的 `spacing` 归 0 后逐行下发）。
+    //
+    // 为什么不用布局的 `spacing`：Slint 的 `VerticalLayout` 对 **0 高的子项照样算
+    // 间距**，于是空的继续观看 / 最近添加行会白占一个 `section-gap`（两行都空时
+    // hero 到首行叠出 3 个，单行空时 2 个）。空行高 0、间距又在自己块内时，空行
+    // 自然一个间距也不占（见 `CardRow.height`）。
+    in property <length> gap-above: 0px;
     in property <int> focused-index: -1;
     // 用户是否已开始导航（见 `HomePage.nav-active`）：未激活时不放大焦点卡。
     in property <bool> nav-active: false;
@@ -113,8 +120,15 @@ component CardRow inherits Rectangle {
     // 页面要求清掉悬停锁存（数据变少、焦点被钳回 0）：指针位置没变也不会再点亮
     // 旧卡（`has-hover` 的边沿事件不会自己重发）。
     changed hover-reset => {
-        root.hot = -1;
-        root.latch = -1;
+        // 只清掉**已经不存在**的下标：数据变少但指针仍停在一张还在的卡上时，
+        // 放大效果必须留着（以前无条件清零，指针不动就再也点不亮——`has-hover`
+        // 的边沿事件不会自己重发）。
+        if (root.hot >= root.cards.length) {
+            root.hot = -1;
+        }
+        if (root.latch >= root.cards.length) {
+            root.latch = -1;
+        }
     }
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
@@ -167,16 +181,17 @@ component CardRow inherits Rectangle {
     // 不需要额外的放大预留：1.05 最多向上溢出 10px（1.05×368 的一半），标题下距 12px 兜住；
     // 向下溢出落在 40px 的 `section-gap` 里。
     //
-    // **空行不占一整块**（R7-C2）：`visible: false` 的元素在 `VerticalLayout` 里照样
-    // 占位，以前继续观看 / 最近添加为空时会在页面上留下一整块纯黑（真机半屏）。
-    // 这里把空行的高度直接算成 0；`HomePage` 的 `content-total` 与 `library-card-top`
-    // 都读这个 `height`，保持一致（只保留布局的块间距）。
-    height: root.cards.length > 0 ? root.title-off + root.card-height : 0px;
+    // **空行不占一整块，也不占间距**（R7-C2 / R7-空白）：`visible: false` 的元素在
+    // `VerticalLayout` 里照样占位，以前继续观看 / 最近添加为空时会在页面上留下一整块
+    // 纯黑（真机半屏）。这里把空行的高度直接算成 0，而块间距 `gap-above` 也算在
+    // `height` 里——空行高 0 就连它自己的间距一起消失。`HomePage` 的 `content-total`
+    // 与 `library-card-top` 都读这些 `height` / `cards-top`，保持一致。
+    height: root.cards.length > 0 ? root.cards-top + root.card-height : 0px;
 
     // 行标题 + 查看全部（与卡同起于 content-gutter）。
     HorizontalLayout {
         x: Theme.content-gutter;
-        y: root.rise;
+        y: root.gap-above + root.rise;
         width: parent.width - Theme.content-gutter * 2;
         height: Theme.section-title-height;
         spacing: Theme.space-3;
@@ -266,7 +281,7 @@ component CardRow inherits Rectangle {
     // 滚动时卡片只在窗口边缘被裁掉（外层纵向视口即遮罩）。
     flick := Flickable {
         x: 0;
-        y: title-off + root.rise;
+        y: root.cards-top + root.rise;
         width: parent.width;
         height: root.card-height;
         interactive: true;
@@ -318,7 +333,7 @@ component CardRow inherits Rectangle {
             + root.poster-width / 2 - flick.content-x;
         // 放大卡可以穿出左右留白（钳到窗口边缘）；纵向对齐卡片总高的中心。
         x: clamp(center-x - zw / 2, 0px, parent.width - zw);
-        y: title-off + root.rise + root.card-height / 2 - zh / 2;
+        y: root.cards-top + root.rise + root.card-height / 2 - zh / 2;
         width: zw;
         visible: root.cards.length > 0 && root.zoom-index >= 0
             && root.zoom-index < root.cards.length;
@@ -348,8 +363,10 @@ component CardRow inherits Rectangle {
     out property <length> arrow-y: arrow-left.y;
     // 卡区上沿 / 卡片总高（行内容坐标，不含行标题）：首页纵向滚动按
     // "它 + 卡片总高"算焦点行。
-    out property <length> cards-top: root.title-off;
+    out property <length> cards-top: root.gap-above + root.title-off;
     out property <length> cards-height: root.card-height;
+    // 卡片区上沿（**不含**块间距）：页面反推库行卡片上沿时用（`cards-top` 含块间距）。
+    out property <length> cards-offset: root.title-off;
     // 探针：焦点卡在行内容坐标里的左右沿 + 行自己的横向滚动偏移 / 视口宽。
     // 测试据此断言"焦点卡横向完全可见"（网格的对应探针在 `PosterGrid`）。
     out property <length> probe-focus-left: root.focused-index >= 0
@@ -360,7 +377,7 @@ component CardRow inherits Rectangle {
     out property <length> probe-content-x: flick.content-x;
     out property <length> probe-viewport-w: flick.width;
     // 测试探针：卡下标题的下沿（放大卡上沿必须不低于它 = 不遮挡行标题）。
-    out property <length> row-title-bottom: root.rise + Theme.section-title-height;
+    out property <length> row-title-bottom: root.gap-above + root.rise + Theme.section-title-height;
     // 把本轮 `targets` 与左右箭头登记到总线（箭头只在悬停/有焦点时可见，
     // 隐藏时点击没有意义，所以按可见性登记）。
     for target in root.targets : Rectangle {
@@ -453,7 +470,7 @@ component CardRow inherits Rectangle {
     // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
     arrow-left := Rectangle {
         x: 0;
-        y: title-off + root.rise + (root.poster-height - Theme.arrow-height) / 2;
+        y: root.cards-top + root.rise + (root.poster-height - Theme.arrow-height) / 2;
         width: Theme.arrow-width;
         height: Theme.arrow-height;
         border-radius: Theme.radius-pill;
@@ -638,12 +655,12 @@ export component HomePage inherits Rectangle {
     /// 页面里不再抄一份“标题 + 卡片高”的公式（A4：以前 `library-card-top` 与
     /// `continue/recent/library-row-h` 是同一公式的三份拷贝）。
     function library-card-top(ri: int) -> length {
-        let rows-top = root.data.has-hero ? root.billboard-slot + Theme.section-gap : 0px;
-        return rows-top
-            + row0.height + Theme.section-gap
-            + row1.height + Theme.section-gap
-            + ri * (root.library-row-h + Theme.section-gap)
-            + row0.cards-top;
+        // 块间距已经挪进各块自己的上边距（空行不占间距），所以这里按“块高含间距”
+        // 一路累加：`row0` / `row1` 的 `height` 与 `library-block-h` 都含 `gap-above`。
+        return root.billboard-slot
+            + row0.height + row1.height
+            + ri * root.library-block-h
+            + root.library-gap + row0.cards-offset;
     }
 
     /// 下发键盘滚动：本行横向跟随；`local` 是行内下标（非本行时为 -1）。
@@ -686,10 +703,9 @@ export component HomePage inherits Rectangle {
     // 当前纵向滚动偏移（测试 / 调试用）。
     out property <length> scroll-y: flick.content-y;
 
-    // 内容总高度：显式计算（不用 preferred-height —— 无头渲染器布局中途
-    // 会把未决的 preferred 读成 0，Flickable 会把 content-y 钳回 0）。
+    // billboard 槽位：hero 块占的高度（内容坐标里 hero 的底边）。
     //
-    // billboard 槽位比 88vh 少 16px：块间距 40px，补回后首行标题正好
+    // 比 88vh 少 16px：块间距 40px，补回后首行标题正好
     // 落在 billboard（88vh）底 24px 处。
     property <length> billboard-slot: root.data.has-hero ? billboard-height - 16px : 0px;
     // 行高 = 行标题（`section-title-height`）+ 标题下距（`row-title-gap`）
@@ -698,22 +714,26 @@ export component HomePage inherits Rectangle {
     //
     // 这些值不再在页面里重写：真正的高度读 `row0.height` / `row1.height`（空行是 0，
     // 见 `CardRow.height`，R7-C2）；库行与继续观看同一种横版行，用 `row0` 报的
-    // `cards-top + cards-height`（空行时它仍然是完整块的几何）。
-    property <length> library-row-h: row0.cards-top + row0.cards-height;
-    // 布局块数 = 真正参与纵向布局的块数。
+    // `cards-offset + cards-height`（空行时它仍然是完整块的几何）。
+    property <length> library-row-h: row0.cards-offset + row0.cards-height;
+    // 库行块高 = 库行间距 + 行高（与 `CardRow.height` 同源）。
+    property <length> library-block-h: root.library-gap + root.library-row-h;
+    // 各块的**上边距**：布局的 `spacing` 已归 0（见 `row0` 处的注释），间距单独下发，
+    // 空行时随 `CardRow.height = 0` 一起消失。
+    property <length> gap-above-row0: root.data.has-hero ? Theme.section-gap : 0px;
+    property <length> gap-above-row1: root.data.has-hero || root.continue-count > 0
+        ? Theme.section-gap : 0px;
+    property <length> library-gap: root.data.has-hero || root.continue-count > 0
+        || root.recent-count > 0 ? Theme.section-gap : 0px;
+    // 内容总高度：显式计算（不用 preferred-height —— 无头渲染器布局中途
+    // 会把未决的 preferred 读成 0，Flickable 会把 content-y 钳回 0）。
     //
-    // 关键：`visible: false` **不**让块从布局里消失——`row0` / `row1` 是常驻实例，
-    // 即使继续观看 / 最近添加为空，它们照样是布局里的两个块（只是高度为 0，见
-    // `CardRow.height`）。库行同理（`for` 的每项都会占位）。以前这里按“非空行数”
-    // 算，只要有一行是空的，内容总高就少一整行，最后一个库行永远滚不进视口
-    // （体检 R7-1）。现在按**实例化的块数**算：hero 是 `if` 子树（没有就不实例化），
-    // 其余两块 + 每条库行都算。
-    property <int> layout-blocks: (root.data.has-hero ? 1 : 0) + 2
-        + root.data.library-rows.length;
+    // 每一块的高度都含自己的上边距（`gap-above`），所以这里不再单独加
+    // `(块数 - 1) × section-gap`：空行高 0 = 连间距一起消失，hero 底到首个
+    // 可见行标题顶恒是一个 `section-gap`（以前空行高 0 但布局照样给它算间距）。
     property <length> content-total: root.billboard-slot
         + row0.height + row1.height
-        + root.data.library-rows.length * root.library-row-h
-        + (root.layout-blocks - 1) * Theme.section-gap
+        + root.data.library-rows.length * root.library-block-h
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
 
@@ -800,6 +820,10 @@ export component HomePage inherits Rectangle {
     out property <length> row1-poster-width: row1.poster-width-probe;
     out property <length> row1-poster-height: row1.poster-height-probe;
     out property <length> row1-card-height: row1.card-total-height;
+    // 探针：hero 底边（内容坐标）。与首个可见行标题顶一起校验“空行不占间距”：
+    // 两者的差恒为一个 `section-gap`（块间距已挪进各行自己的 `gap-above`）。
+    out property <length> hero-bottom: root.billboard-slot;
+    out property <length> row1-title-bottom: row1.row-title-bottom + row1.y - flick.content-y;
 
     // 注意：这里**不用** `visible` 门控，改成 opacity 驱动（`reveal`）。
     // 原因：Slint 对"属性第一次求值"不播动画，若用 `visible: false` 藏起来，
@@ -819,7 +843,10 @@ export component HomePage inherits Rectangle {
         content := VerticalLayout {
             width: parent.width;
             height: root.content-total;
-            spacing: Theme.section-gap;
+            // 块间距**不**交给布局：`VerticalLayout` 对 0 高的子项照样算 `spacing`，
+            // 空的继续观看 / 最近添加行会白占一个 `section-gap`（两行都空时 hero
+            // 到首行叠出 3 个）。间距改成每行自己的 `gap-above`（含在行高里）。
+            spacing: 0px;
             padding-bottom: Theme.space-8;
 
             // ---- Billboard ----
@@ -1128,10 +1155,12 @@ export component HomePage inherits Rectangle {
             // 纵向布局里消失（行高照算）。所以 `content-total` 必须把这两行**无条件**
             // 算进去（体检 R7-1：当时按“非空行数”算，空行一出现内容总高就少一整行，
             // 最后一个库行永远滚不进视口）。
+            // 块间距走 `gap-above`（布局 `spacing` 已归 0），空行高 0 ⇒ 连间距一起消失。
             // 好处是测试 / 探针能稳定读到行几何（行总是实例化的）。
             row0 := CardRow {
                 width: parent.width;
                 visible: root.continue-count > 0;
+                gap-above: root.gap-above-row0;
                 target-prefix: "home.row.continue.";
                 targets-visible: root.visible;
                 title: "继续观看";
@@ -1162,6 +1191,7 @@ export component HomePage inherits Rectangle {
             row1 := CardRow {
                 width: parent.width;
                 visible: root.recent-count > 0;
+                gap-above: root.gap-above-row1;
                 target-prefix: "home.row.recent.";
                 targets-visible: root.visible;
                 title: "最近添加";
@@ -1201,6 +1231,7 @@ export component HomePage inherits Rectangle {
                         - root.data.library-row-starts[ri];
                     width: parent.width;
                     visible: row-data.cards.length > 0;
+                    gap-above: root.library-gap;
                     target-prefix: "home.row.lib." + ri + ".";
                     targets-visible: root.visible;
                     title: row-data.title;

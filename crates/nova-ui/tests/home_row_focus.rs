@@ -514,3 +514,113 @@ fn focus_follows_the_item_when_the_home_view_is_reordered() {
         "焦点应按 item id 跟着 b 落到新下标 0，而不是留在旧下标 1（c）"
     );
 }
+
+/// R7-焦点：同一部作品同时出现在「继续观看」和某个库行里时，重贴视图不能把焦点
+/// 从库行那张静默挪回「继续观看」。
+///
+/// 修复前 `rebase_home_focus` 用 `find` 取第一个同 id 的位置；每批海报到达时
+/// `apply_images` 都会用**同一份**视图重贴，于是只要焦点停在库行那张 dup 上，
+/// 就会被挪回「继续观看」（下标 1）。
+#[test]
+fn refocusing_the_home_keeps_the_focus_on_the_library_duplicate() {
+    let app = app_1920x1080();
+    let mut view = home();
+    view.continue_watching = vec![
+        CardView::new("c0", "C0"),
+        CardView::new("dup", "DUP"),
+        CardView::new("c1", "C1"),
+    ];
+    view.recently_added.clear();
+    view.library_rows = vec![LibraryRowView {
+        library_id: "lib-dup".to_owned(),
+        title: "库".to_owned(),
+        items: vec![CardView::new("dup", "DUP"), CardView::new("x", "X")],
+    }];
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    // 扁平下标：c0=0、dup(继续观看)=1、c1=2、dup(库行)=3、x=4。
+    app.ui().set_home_focus(3);
+    app.ui().set_nav_active(true);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+    assert_eq!(app.ui().get_home_focus(), 3, "前提：焦点停在库行那张 dup");
+
+    // 海报批次到达：用同一份视图重贴。
+    app.set_home(&view);
+    settle(&app);
+    assert_eq!(
+        app.ui().get_home_focus(),
+        3,
+        "同一份视图重贴不能把焦点从库行那张挪回「继续观看」"
+    );
+
+    // 轻微重排：继续观看换序，dup 变成下标 0，库里那张仍是 3。
+    let mut reordered = view.clone();
+    reordered.continue_watching = vec![
+        CardView::new("dup", "DUP"),
+        CardView::new("c0", "C0"),
+        CardView::new("c1", "C1"),
+    ];
+    app.set_home(&reordered);
+    settle(&app);
+    assert_eq!(
+        app.ui().get_home_focus(),
+        3,
+        "重排后焦点仍应留在库行那张（离旧下标最近的同 id 位置）"
+    );
+}
+
+/// R7-悬停：数据变少、但指针仍停在一张**还存在的**卡上时，放大效果不能熄灭。
+///
+/// 修复前 `CardRow.changed hover-reset` 无条件把 `hot` / `latch` 清成 -1：清空
+/// 「继续观看」让焦点下标越界（页面于是要求清悬停锁存）时，指针明明还停在
+/// 「最近添加」第 6 张上，那一行的放大与左右箭头却一起消失了——而 `has-hover`
+/// 的边沿事件不会自己重发，指针不动就再也点不亮。
+#[test]
+fn shrinking_the_data_keeps_the_zoom_of_a_card_that_still_exists() {
+    let app = app_1920x1080();
+    let mut view = home();
+    view.hero = None;
+    view.continue_watching = vec![CardView::new("c0", "C0"), CardView::new("c1", "C1")];
+    view.recently_added = (0..6)
+        .map(|index| CardView::new(format!("r{index}"), format!("最近 {index}")))
+        .collect();
+    view.library_rows.clear();
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    let card = app
+        .target("home.row.recent.card.5")
+        .expect("「最近添加」第 6 张应在窗口里");
+    let (x, y) = card.center();
+    app.ui()
+        .window()
+        .dispatch_event_with_result(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        })
+        .expect("派发 PointerMoved");
+    settle(&app);
+    assert_eq!(
+        app.ui().get_home_focus(),
+        2 + 5,
+        "悬停应把焦点对齐到第 6 张"
+    );
+    assert!(
+        app.target("home.row.recent.left").is_some(),
+        "前提：悬停让这一行出现左右箭头（放大已点亮）"
+    );
+
+    // 数据变少：清空「继续观看」→ 焦点 7 越界，页面要求清悬停锁存；指针仍停在
+    // 「最近添加」第 6 张上，而这一行的 cards.length 仍是 6（那张卡还在）。
+    let mut shrunk = view.clone();
+    shrunk.continue_watching.clear();
+    app.set_home(&shrunk);
+    settle(&app);
+    assert_eq!(app.ui().get_home_focus(), 0, "越界焦点必须钳回第 1 张");
+    assert!(
+        app.target("home.row.recent.left").is_some(),
+        "指针仍停在一张还存在的卡上，放大与左右箭头必须留着"
+    );
+}

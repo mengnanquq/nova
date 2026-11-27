@@ -194,6 +194,15 @@ impl HomeView {
     }
 }
 
+/// 首页扁平焦点顺序里的条目 id（继续观看 → 最近添加 → 各库行）。
+fn home_focus_ids(view: &HomeView) -> impl Iterator<Item = &str> {
+    view.continue_watching
+        .iter()
+        .chain(view.recently_added.iter())
+        .chain(view.library_rows.iter().flat_map(|row| row.items.iter()))
+        .map(|card| card.item_id.as_str())
+}
+
 /// 视图整体替换（刷新 / 重新排序）后，首页焦点下标该落在哪里。
 ///
 /// 与媒体库的 [`crate::viewmodel::rebase_focus`] 同一口彿：焦点按**条目 id**
@@ -201,7 +210,10 @@ impl HomeView {
 /// 「最近添加」按加入时间排序，同一个下标指向的往往是另一部作品；沿用旧下标会让
 /// 焦点惄惄地飘到另一张卡上（键盘用户看到的高亮不在了）。
 ///
-/// - 旧焦点卡的 `item_id` 在新视图里还在 → 用它新的下标；
+/// - 条目序列没变（每批海报到达都会用**同一份**视图重贴，见 `apply_images`）→
+///   完全保留旧下标，不做 rebase。同一部作品常常既在「继续观看」又在某个库行里，
+///   按 id 取第一个命中会把焦点静默挪回「继续观看」；
+/// - 序列变了 → 在所有同 `item_id` 的候选里取**离旧下标最近**的那个；
 /// - 找不到（条目被移除 / 换了数据源）→ 退回旧下标并夹到新卡片范围内；
 /// - 新视图为空 → `0`。
 pub fn rebase_home_focus(old: &HomeView, old_focus: usize, next: &HomeView) -> usize {
@@ -210,8 +222,13 @@ pub fn rebase_home_focus(old: &HomeView, old_focus: usize, next: &HomeView) -> u
     let Some(id) = old.card_at(old_focus).map(|card| card.item_id.as_str()) else {
         return fallback;
     };
+    // 序列相同 ⇒ 每个 id 的位置都不变（含重复 id 的相对次序），旧下标就是正确位置。
+    if old_focus < total && home_focus_ids(old).eq(home_focus_ids(next)) {
+        return old_focus;
+    }
     (0..total)
-        .find(|index| next.card_at(*index).is_some_and(|card| card.item_id == id))
+        .filter(|index| next.card_at(*index).is_some_and(|card| card.item_id == id))
+        .min_by_key(|index| index.abs_diff(old_focus))
         .unwrap_or(fallback)
 }
 
@@ -396,5 +413,65 @@ mod tests {
 
         // 新视图为空：0（不 panic、不越界）。
         assert_eq!(rebase_home_focus(&old, 2, &HomeView::new()), 0);
+    }
+
+    /// R7-焦点：条目序列没变时不做 rebase（否则同一部作品在「继续观看」和库行里
+    /// 各有一张时，按 id 取第一个会把焦点从库行静默挪回「继续观看」）。
+    #[test]
+    fn rebase_home_focus_keeps_the_index_when_the_item_sequence_is_unchanged() {
+        let mut home = HomeView::new();
+        home.continue_watching = vec![CardView::new("dup", "DUP")];
+        home.library_rows = vec![LibraryRowView {
+            library_id: "lib".to_owned(),
+            title: "库".to_owned(),
+            items: vec![CardView::new("dup", "DUP"), CardView::new("x", "X")],
+        }];
+        // 库里那张 dup 是扁平下标 1；第一张同 id 在下标 0。
+        assert_eq!(
+            home.card_at(1).map(|card| card.item_id.as_str()),
+            Some("dup")
+        );
+        assert_eq!(
+            rebase_home_focus(&home, 1, &home),
+            1,
+            "序列没变就不该动下标"
+        );
+    }
+
+    /// 序列真的变了才 rebase：同 id 的候选里取**离旧下标最近**的那个。
+    #[test]
+    fn rebase_home_focus_picks_the_nearest_duplicate() {
+        let mut old = HomeView::new();
+        old.continue_watching = (0..5)
+            .map(|index| CardView::new(format!("c{index}"), "C"))
+            .chain(std::iter::once(CardView::new("dup", "DUP")))
+            .chain(std::iter::once(CardView::new("d", "D")))
+            .collect();
+        // 旧焦点在下标 5（dup）。
+        assert_eq!(
+            old.card_at(5).map(|card| card.item_id.as_str()),
+            Some("dup")
+        );
+
+        let mut next = old.clone();
+        next.continue_watching = std::iter::once(CardView::new("dup", "DUP"))
+            .chain((0..5).map(|index| CardView::new(format!("c{index}"), "C")))
+            .chain(std::iter::once(CardView::new("d", "D")))
+            .collect();
+        next.library_rows = vec![LibraryRowView {
+            library_id: "lib".to_owned(),
+            title: "库".to_owned(),
+            items: vec![CardView::new("dup", "DUP"), CardView::new("y", "Y")],
+        }];
+        // next 里 dup 在下标 0（继续观看）与 7（库行）。
+        assert_eq!(
+            next.card_at(7).map(|card| card.item_id.as_str()),
+            Some("dup")
+        );
+        assert_eq!(
+            rebase_home_focus(&old, 5, &next),
+            7,
+            "应取离旧下标 5 最近的 7，而不是第一个命中的 0"
+        );
     }
 }
