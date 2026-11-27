@@ -134,9 +134,50 @@ impl Database {
         term: &str,
         limit: usize,
     ) -> Result<Vec<MediaItem>> {
+        let (items, _) = self.search_scan(server_id, kinds, term, limit)?;
+        Ok(items)
+    }
+
+    /// 跨库按标题匹配：只扫一遍，同时给出前 `limit` 条与**精确总数**（R6-10）。
+    ///
+    /// 超出 `limit` 之后只数标题、不再解码 payload：搜索页只展示前 60 条，但结果头
+    /// 要说真实总数。以前 `search_items` + `search_item_count` 会各自跑一遍
+    /// `LIKE '%词%'` 全表扫（宽泛词“的”在大库上每次按键多花一份扫描时间）。
+    pub fn search_items_with_count(
+        &self,
+        server_id: &ServerId,
+        kinds: &[MediaKind],
+        term: &str,
+        limit: usize,
+    ) -> Result<(Vec<MediaItem>, usize)> {
+        self.search_scan(server_id, kinds, term, limit)
+    }
+
+    /// 跨库按标题匹配的**精确总数**（不受 `limit` 截断，R6-10）。
+    ///
+    /// 与 [`Self::search_items`] 共用同一个扫描函数（`limit = 0` 时不解码任何
+    /// payload），两者的匹配口径因此必然一致。
+    pub fn search_item_count(
+        &self,
+        server_id: &ServerId,
+        kinds: &[MediaKind],
+        term: &str,
+    ) -> Result<usize> {
+        let (_, count) = self.search_scan(server_id, kinds, term, 0)?;
+        Ok(count)
+    }
+
+    /// 搜索的单次遍历：前 `limit` 条解码成条目，其余只计数（不解码）。
+    fn search_scan(
+        &self,
+        server_id: &ServerId,
+        kinds: &[MediaKind],
+        term: &str,
+        limit: usize,
+    ) -> Result<(Vec<MediaItem>, usize)> {
         let needle = term.trim().to_lowercase();
-        if needle.is_empty() || limit == 0 {
-            return Ok(Vec::new());
+        if needle.is_empty() {
+            return Ok((Vec::new(), 0));
         }
         let wanted = kind_texts(kinds)?;
         let pattern = like_pattern(&needle);
@@ -144,26 +185,30 @@ impl Database {
         let mut stmt = conn.prepare(schema::SQL_SELECT_SEARCH)?;
         let mut rows = stmt.query(params![server_id.as_str(), pattern])?;
         let mut out = Vec::new();
+        let mut count = 0usize;
         while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
             let kind: String = row.get(1)?;
             if !wanted.is_empty() && !wanted.iter().any(|candidate| candidate == &kind) {
                 continue;
             }
-            let payload: String = row.get(2)?;
-            let item: MediaItem =
-                codec::decode("items", codec::item_key(server_id.as_str(), &id), &payload)?;
-            // SQL 的 `LIKE` 只是预筛（ASCII 大小写不敏感）；最终语义以这里为准，
-            // 与首页 / 媒体库 / 搜索页共用的 `matches` 完全一致。
-            if !item.title.to_lowercase().contains(&needle) {
+            // SQL 的 `LIKE` 只是预筛（ASCII 大小写不敏感）；最终语义以
+            // `to_lowercase().contains` 为准（与首页 / 媒体库共用）。
+            let title: String = row.get(2)?;
+            if !title.to_lowercase().contains(&needle) {
                 continue;
             }
-            out.push(item);
+            count += 1;
             if out.len() >= limit {
-                break;
+                // 超出展示上限：只要计数，不再解码 payload。
+                continue;
             }
+            let id: String = row.get(0)?;
+            let payload: String = row.get(3)?;
+            let item: MediaItem =
+                codec::decode("items", codec::item_key(server_id.as_str(), &id), &payload)?;
+            out.push(item);
         }
-        Ok(out)
+        Ok((out, count))
     }
 
     /// "继续观看"：未看完、有进度、且不接近片尾。

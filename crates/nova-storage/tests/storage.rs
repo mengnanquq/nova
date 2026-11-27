@@ -482,7 +482,7 @@ fn migration_is_idempotent_across_opens() {
 
     for _ in 0..3 {
         let db = Database::open(&path).expect("打开");
-        assert_eq!(db.schema_version().expect("版本"), 3);
+        assert_eq!(db.schema_version().expect("版本"), 4);
         db.upsert_server(&server_info(), 1).expect("写入");
     }
 
@@ -491,7 +491,7 @@ fn migration_is_idempotent_across_opens() {
     let version: i64 = conn
         .pragma_query_one(None, "user_version")
         .expect("读取版本");
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     // 文件库必须走 WAL。
     let journal: String = conn
@@ -517,7 +517,7 @@ fn schema_newer_than_supported_is_rejected() {
             error,
             StorageError::SchemaTooNew {
                 found: 99,
-                supported: 3
+                supported: 4
             }
         ),
         "错误的变体：{error:?}"
@@ -538,7 +538,7 @@ fn migration_failure_rolls_back() {
 
     let error = Database::open(&path).expect_err("迁移应失败");
     assert!(
-        matches!(error, StorageError::Migrate { from: 0, to: 3, .. }),
+        matches!(error, StorageError::Migrate { from: 0, to: 4, .. }),
         "错误的变体：{error:?}"
     );
 
@@ -1026,6 +1026,222 @@ fn search_escapes_like_wildcards() {
         .expect("搜索");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id.as_str(), "slash");
+}
+
+/// `search_items` 与 `search_item_count` 的匹配口径必须完全一致（R6-10）：
+/// 两者现在是同一个扫描函数的两半（`search_scan`），超出 `limit` 的部分只计数、
+/// 不再解码 payload，所以总数与命中条目不能对不上。
+#[test]
+fn search_items_and_count_share_the_same_match_semantics() {
+    let db = Database::open_in_memory().expect("内存库");
+    db.upsert_server(&server_info(), 1).expect("写服务器");
+    let mut entries = Vec::new();
+    for (index, title) in [
+        "Dune",
+        "DUNE 第二部",
+        "dune 的传说",
+        "100% 纯爱",
+        "A_B 计划",
+        "大饭店",
+        "普通片",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut hit = movie(&format!("m{index}"), Duration::ZERO, false);
+        hit.title = title.into();
+        hit.sort_title = hit.title.clone();
+        entries.push(hit);
+    }
+    // 季 / 集永远不参与搜索：计数与条目都要把它们排除。
+    let mut episode = item("ep", MediaKind::Episode, Some("show"), Some(1));
+    episode.title = "Dune 第 1 集".into();
+    episode.sort_title = episode.title.clone();
+    entries.push(episode);
+    db.upsert_items(&server_id(), &entries, 10).expect("写条目");
+
+    let kinds = [MediaKind::Movie, MediaKind::Series];
+    for term in ["dune", "DUNE", "山", "%", "_", "第 1 集", "不存在"] {
+        let all = db
+            .search_items(&server_id(), &kinds, term, 1000)
+            .expect("搜索");
+        let count = db
+            .search_item_count(&server_id(), &kinds, term)
+            .expect("计数");
+        assert_eq!(all.len(), count, "term={term:?}: 条目数与计数必须一致");
+
+        let (limited, counted) = db
+            .search_items_with_count(&server_id(), &kinds, term, 1)
+            .expect("单次扫描");
+        assert_eq!(
+            limited.len(),
+            count.min(1),
+            "term={term:?}: limit=1 只回 1 条"
+        );
+        assert_eq!(counted, count, "term={term:?}: 计数不受 limit 截断");
+        assert_eq!(
+            limited.first().map(|item| item.id.clone()),
+            all.first().map(|item| item.id.clone()),
+            "term={term:?}: 截断时返回的必须是同一批的前几条"
+        );
+    }
+}
+
+/// 真机基准（不跑在 CI）：宽泛词的单次遍历 vs 旧的两遍扫描。
+///
+/// 先备份一份临时副本库，**不要直接读写真实库**：
+///
+/// ```text
+/// sqlite3 ~/.local/share/nova/nova.db ".backup /tmp/nova-bench.db"
+/// NOVA_BENCH_DB=/tmp/nova-bench.db cargo test -p nova-storage --test storage \
+///     -- --ignored bench_broad_search --nocapture
+/// ```
+#[test]
+#[ignore = "需要 NOVA_BENCH_DB 指向真实库的临时副本"]
+fn bench_broad_search_against_a_real_library() {
+    let Some(path) = std::env::var("NOVA_BENCH_DB").ok() else {
+        eprintln!("跳过：未设置 NOVA_BENCH_DB");
+        return;
+    };
+    let db = Database::open(std::path::Path::new(&path)).expect("打开基准库");
+    let server = db
+        .servers()
+        .expect("读服务器")
+        .into_iter()
+        .next()
+        .expect("基准库里没有服务器")
+        .info
+        .id;
+    // 旧实现（修复前）的两遍扫描用原始 SQL 复现，否则 `search_items` 已经被改成
+    // 单次遍历，拿它当“旧遍一”会把旧成本算高（它现在也会数到底）。
+    let conn = Connection::open(&path).expect("打开基准库（旧实现复现）");
+    let kinds = [MediaKind::Movie, MediaKind::Series];
+    for term in ["的", "大", "a"] {
+        // 预热（文件系统 / SQLite 页缓存）。
+        let _ = db.search_items(&server, &kinds, term, 60).expect("预热");
+        let _ = db.search_item_count(&server, &kinds, term).expect("预热");
+
+        let started = Instant::now();
+        let (items, total) = db
+            .search_items_with_count(&server, &kinds, term, 60)
+            .expect("单次遍历");
+        let single = started.elapsed();
+
+        // 旧实现 = `search_items`（解码到底、命中 60 就 break）+ `search_item_count`
+        // （只读 kind/title 再扫一遍）。
+        let started = Instant::now();
+        let old_items = old_search_items(&conn, &server, &kinds, term, 60);
+        let old_items_time = started.elapsed();
+        let started = Instant::now();
+        let old_total = old_search_item_count(&conn, &server, &kinds, term);
+        let old_count_time = started.elapsed();
+        let old_total_time = old_items_time + old_count_time;
+
+        eprintln!(
+            "term={term:?} 命中={total}（旧计数={old_total}） 返回={}（旧返回={old_items}） \
+             单次={single:?} 旧两遍={old_total_time:?}（items={old_items_time:?} + \
+             count={old_count_time:?}）",
+            items.len()
+        );
+    }
+}
+
+/// 修复前 `Database::search_items` 的等价复现（解码 payload，命中 `limit` 就 break）。
+fn old_search_items(
+    conn: &Connection,
+    server: &ServerId,
+    kinds: &[MediaKind],
+    term: &str,
+    limit: usize,
+) -> usize {
+    let needle = term.trim().to_lowercase();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, payload FROM items \
+             WHERE server_id = ?1 AND title LIKE ?2 ESCAPE '\\' \
+             ORDER BY updated_at DESC, sort_title, id",
+        )
+        .expect("准备旧搜索语句");
+    let mut rows = stmt
+        .query(rusqlite::params![server.as_str(), like_pattern(&needle)])
+        .expect("查询旧搜索");
+    let mut count = 0usize;
+    while let Some(row) = rows.next().expect("旧搜索结果行") {
+        let kind: String = row.get(1).expect("kind");
+        if !kinds.iter().any(|candidate| {
+            let text = match candidate {
+                MediaKind::Movie => "movie",
+                MediaKind::Series => "series",
+                _ => "",
+            };
+            text == kind
+        }) {
+            continue;
+        }
+        let id: String = row.get(0).expect("id");
+        let payload: String = row.get(2).expect("payload");
+        let item: MediaItem = serde_json::from_str(&payload).expect("payload 解码");
+        assert!(item.id.as_str() == id);
+        if !item.title.to_lowercase().contains(&needle) {
+            continue;
+        }
+        count += 1;
+        if count >= limit {
+            break;
+        }
+    }
+    count
+}
+
+/// 修复前 `Database::search_item_count` 的等价复现（只读 kind/title）。
+fn old_search_item_count(
+    conn: &Connection,
+    server: &ServerId,
+    kinds: &[MediaKind],
+    term: &str,
+) -> usize {
+    let needle = term.trim().to_lowercase();
+    let mut stmt = conn
+        .prepare(
+            "SELECT kind, title FROM items \
+             WHERE server_id = ?1 AND title LIKE ?2 ESCAPE '\\'",
+        )
+        .expect("准备旧计数语句");
+    let mut rows = stmt
+        .query(rusqlite::params![server.as_str(), like_pattern(&needle)])
+        .expect("查询旧计数");
+    let mut count = 0usize;
+    while let Some(row) = rows.next().expect("旧计数行") {
+        let kind: String = row.get(0).expect("kind");
+        if !kinds.iter().any(|candidate| {
+            let text = match candidate {
+                MediaKind::Movie => "movie",
+                MediaKind::Series => "series",
+                _ => "",
+            };
+            text == kind
+        }) {
+            continue;
+        }
+        let title: String = row.get(1).expect("title");
+        if title.to_lowercase().contains(&needle) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn like_pattern(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for character in needle.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
 }
 
 /// 库归属规则只有一份（`nova_storage::library_items`）：电影 / 剧集的父项一律

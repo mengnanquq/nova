@@ -10,7 +10,7 @@
 //! - 本模块的语句都是静态字面量，不存在运行期拼装。
 
 /// 当前 schema 版本，写入 `PRAGMA user_version`。
-pub(crate) const SCHEMA_VERSION: i64 = 3;
+pub(crate) const SCHEMA_VERSION: i64 = 4;
 
 /// `preferences` 表里 [`nova_core::UserPreferences`] 的键名。
 pub(crate) const PREFERENCES_KEY: &str = "user_preferences";
@@ -190,11 +190,14 @@ ORDER BY index_number IS NULL, index_number, sort_title
 /// [`Database::search_items`](../items/struct.Database.html#method.search_items)），
 /// 这里的 `ESCAPE '\\'` 只是告诉 SQLite 用反斜杠做转义符。
 ///
+/// 同时下发 `title` 列：匹配超出 `limit` 之后只用它计数、不再解码 `payload`
+/// （[`Database::search_items_with_count`]）。
+///
 /// 类型过滤仍在 Rust 侧（`MediaKind` 是 `nova-core` 的枚举），索引不需要额外
 /// 加：`LIKE '%词%'` 前缀是通配符，任何索引都用不上，扫 `(server_id)` 这一段
 /// 已经是最省的读法。
 pub(crate) const SQL_SELECT_SEARCH: &str = "
-SELECT id, kind, payload FROM items
+SELECT id, kind, title, payload FROM items
 WHERE server_id = ?1
   AND title LIKE ?2 ESCAPE '\\'
 ORDER BY updated_at DESC, sort_title, id
@@ -439,6 +442,29 @@ CREATE TABLE libraries (
 );
 ";
 
+/// v4：媒体库保存**服务端顺序**。
+///
+/// v3 按 `name` 排序读回，而服务端的 `/Users/{id}/Views` 是另一种顺序：离线启动
+/// （读回持久化列表）与在线刷新后的顶栏标签顺序不一致，用户刚形成的肌肉记忆
+/// 会被一次后台刷新打乱（真机 R6-8）。`position` 是服务端返回顺序（0 起）。
+///
+/// 旧库用 `rowid` 回填：v3 的 `replace_libraries` 是“先删后插”，插入顺序就是
+/// 上一次刷新拿到的服务端顺序，`rowid` 单调递增地记录了它（v3 的 INSERT 带
+/// `ON CONFLICT DO UPDATE`，但前置 DELETE 已经清空同一服务器的行，不会走 UPDATE）。
+/// 因此升级后旧库也能立即保持上一次刷新后的顺序，不用等下一次刷新才对齐。
+///
+/// 之后的顺序以显式 `position` 列为准：新写入由 `replace_libraries` 按切片序号
+/// 赋值（见 `libraries.rs`），不再依赖 `rowid`（插入语句变化 / 分批写入时它不可靠）。
+pub(crate) const MIGRATION_V4: &str = "
+ALTER TABLE libraries ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+
+UPDATE libraries SET position = (
+    SELECT COUNT(*) FROM libraries AS earlier
+    WHERE earlier.server_id = libraries.server_id
+      AND earlier.rowid < libraries.rowid
+);
+";
+
 // ---------------------------------------------------------------------------
 // libraries
 // ---------------------------------------------------------------------------
@@ -446,22 +472,23 @@ CREATE TABLE libraries (
 /// 覆盖一台服务器的媒体库列表（先删后插，调用方负责放进事务）。
 pub(crate) const SQL_DELETE_LIBRARIES: &str = "DELETE FROM libraries WHERE server_id = ?1";
 
-/// 写入一个媒体库。
+/// 写入一个媒体库（`position` = 服务端返回顺序，0 起）。
 pub(crate) const SQL_INSERT_LIBRARY: &str = "
-INSERT INTO libraries (server_id, id, name, kind, collection_type, item_count)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+INSERT INTO libraries (server_id, id, name, kind, collection_type, item_count, position)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 ON CONFLICT(server_id, id) DO UPDATE SET
     name            = excluded.name,
     kind            = excluded.kind,
     collection_type = excluded.collection_type,
-    item_count      = excluded.item_count
+    item_count      = excluded.item_count,
+    position        = excluded.position
 ";
 
-/// 列出一台服务器的媒体库（按显示名排序，与标签顺序一致）。
+/// 列出一台服务器的媒体库（按服务端返回顺序）。
 pub(crate) const SQL_SELECT_LIBRARIES: &str = "
 SELECT id, name, kind, collection_type, item_count FROM libraries
 WHERE server_id = ?1
-ORDER BY name COLLATE NOCASE, id
+ORDER BY position, name COLLATE NOCASE, id
 ";
 
 #[cfg(test)]

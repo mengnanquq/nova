@@ -147,6 +147,10 @@ fn migrate(conn: &mut Connection, path: Option<&Path>) -> Result<()> {
         tx.execute_batch(schema::MIGRATION_V3)
             .map_err(|source| StorageError::Migrate { from, to, source })?;
     }
+    if from < 4 {
+        tx.execute_batch(schema::MIGRATION_V4)
+            .map_err(|source| StorageError::Migrate { from, to, source })?;
+    }
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|source| StorageError::Migrate { from, to, source })?;
     tx.commit()
@@ -167,11 +171,11 @@ mod tests {
     use super::*;
     use crate::codec;
 
-    /// v2 旧库升到 v3：`libraries` 表要建出来，旧数据一条不能丢。
+    /// v2 旧库一路升到最新版本：`libraries` 表要建出来，旧数据一条不能丢。
     ///
     /// 迁移前（`SCHEMA_VERSION == 2`）：这条用例读不到 `libraries` 表，会直接失败。
     #[test]
-    fn v2_database_is_upgraded_to_v3_without_losing_data() {
+    fn v2_database_is_upgraded_to_latest_without_losing_data() {
         let dir = tempfile::tempdir().expect("临时目录");
         let path = dir.path().join("nova.db");
         let item = MediaItem {
@@ -240,7 +244,7 @@ mod tests {
         }
 
         let db = Database::open(&path).expect("打开旧库并升级");
-        assert_eq!(db.schema_version().expect("读版本"), 3);
+        assert_eq!(db.schema_version().expect("读版本"), SCHEMA_VERSION);
         // 旧数据都在。
         let server_id = ServerId::new("srv-old");
         assert!(db.server(&server_id).expect("读服务器").is_some());
@@ -267,7 +271,67 @@ mod tests {
         // 再次打开是幂等的，版本不回退、数据不变。
         drop(db);
         let db = Database::open(&path).expect("再次打开");
-        assert_eq!(db.schema_version().expect("读版本"), 3);
+        assert_eq!(db.schema_version().expect("读版本"), SCHEMA_VERSION);
         assert_eq!(db.item_count(&server_id).expect("条目数"), 1);
+    }
+
+    /// v3 旧库升到 v4：`libraries` 加 `position` 列，已有行一条不丢，顺序保持
+    /// 上一次刷新写入（= 服务端）的顺序。
+    ///
+    /// v4 之前读回是按显示名排序的。迁移用 `rowid` 回填 `position`：v3 的
+    /// `replace_libraries` 先删后插，插入顺序就是服务端顺序。这里故意按
+    /// “电影 → 剧集”写入（按显示名排序则是“剧集 → 电影”），迁移后读回必须
+    /// 仍是写入顺序。
+    #[test]
+    fn v3_database_is_upgraded_to_v4_and_keeps_libraries() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("nova.db");
+        {
+            let conn = Connection::open(&path).expect("建旧库");
+            conn.execute_batch(schema::MIGRATION_V1).expect("建 v1");
+            conn.execute_batch(schema::MIGRATION_V2).expect("建 v2");
+            conn.execute_batch(schema::MIGRATION_V3).expect("建 v3");
+            conn.pragma_update(None, "user_version", 3_i64)
+                .expect("标记 v3");
+            conn.execute(
+                schema::SQL_UPSERT_SERVER,
+                params![
+                    "srv-old",
+                    codec::enum_to_text(&nova_core::ServerKind::Jellyfin).expect("服务器类型文本"),
+                    "旧服务器",
+                    "http://127.0.0.1:8096",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "{\"state\":\"unauthorized\"}",
+                    "zh-CN",
+                    1_i64,
+                ],
+            )
+            .expect("写服务器");
+            // v3 的插入语句（没有 position 列）。
+            conn.execute(
+                "INSERT INTO libraries (server_id, id, name, kind, collection_type, item_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["srv-old", "lib-a", "电影", "movie", "movies", 5_i64],
+            )
+            .expect("写旧库列表 A（先插入）");
+            conn.execute(
+                "INSERT INTO libraries (server_id, id, name, kind, collection_type, item_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params!["srv-old", "lib-b", "剧集", "series", "tvshows", 3_i64],
+            )
+            .expect("写旧库列表 B（后插入）");
+        }
+
+        let db = Database::open(&path).expect("打开旧库并升级");
+        assert_eq!(db.schema_version().expect("读版本"), SCHEMA_VERSION);
+        let libraries = db.libraries(&ServerId::new("srv-old")).expect("读媒体库");
+        assert_eq!(libraries.len(), 2, "旧库列表一条不能丢");
+        // 顺序 = 上一次写入顺序（rowid），而不是显示名序（按名字排会是 lib-b, lib-a）。
+        let ids: Vec<&str> = libraries
+            .iter()
+            .map(|library| library.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["lib-a", "lib-b"]);
     }
 }

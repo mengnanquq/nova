@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Nova contributors
 
-//! 服务端媒体库列表的持久化（schema v3）。
+//! 服务端媒体库列表的持久化（schema v3，v4 起保存服务端顺序）。
 //!
 //! 媒体库本身不是缓存条目（`items` 表里没有库行），但顶部标签与库页的
 //! `ParentId` 都靠它：只放在内存里的话，进程一退、离线一启动，真实库名就消失了，
@@ -35,7 +35,7 @@ pub struct StoredLibrary {
 }
 
 impl Database {
-    /// 读一台服务器持久化的媒体库列表（按显示名排序）。
+    /// 读一台服务器持久化的媒体库列表（按**服务端返回顺序**，见 schema v4）。
     pub fn libraries(&self, server_id: &ServerId) -> Result<Vec<StoredLibrary>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(schema::SQL_SELECT_LIBRARIES)?;
@@ -59,6 +59,10 @@ impl Database {
 
     /// 覆盖一台服务器的媒体库列表（一个事务：先删旧行再写新行）。
     ///
+    /// 切片顺序就是服务端 `/Views` 的顺序：这里把它写成 `position` 列，
+    /// 读回时保持同一顺序（真机 R6-8：以前按显示名读回，后台刷新后顶栏
+    /// 标签会重新排列）。
+    ///
     /// 空切片也是合法调用：新会话还不知道服务端有哪些库时用它清空
     /// （`Local::adopt_server`）。
     pub fn replace_libraries(
@@ -71,7 +75,7 @@ impl Database {
         tx.execute(schema::SQL_DELETE_LIBRARIES, params![server_id.as_str()])?;
         {
             let mut insert = tx.prepare(schema::SQL_INSERT_LIBRARY)?;
-            for library in libraries {
+            for (position, library) in libraries.iter().enumerate() {
                 insert.execute(params![
                     server_id.as_str(),
                     library.id.as_str(),
@@ -79,6 +83,7 @@ impl Database {
                     codec::enum_to_text(&library.kind)?,
                     library.collection_type.as_deref(),
                     library.item_count.map(i64::from),
+                    i64::try_from(position).unwrap_or(i64::MAX),
                 ])?;
             }
         }
@@ -148,7 +153,6 @@ mod tests {
         .expect("写媒体库");
         let stored = db.libraries(&server).expect("读媒体库");
         assert_eq!(stored.len(), 2);
-        // 顺序按显示名（COLLATE NOCASE）稳定；中文没有拼音排序，别假设先后。
         let movies = stored
             .iter()
             .find(|library| library.id.as_str() == "lib-a")
@@ -175,5 +179,50 @@ mod tests {
         // 空切片 = 清空（新会话还没拿到库列表时）。
         db.replace_libraries(&server, &[]).expect("清空");
         assert!(db.libraries(&server).expect("读媒体库").is_empty());
+    }
+
+    /// 读回顺序 == 写入（服务端）顺序，而不是显示名顺序（R6-8）。
+    ///
+    /// 用反字母序的中文 / ASCII 混排：按 `name` 排会得到另一组顺序。
+    #[test]
+    fn libraries_read_back_in_server_order() {
+        let (db, server) = db();
+        let server_order = [
+            library("lib-z", "儿童节目", MediaKind::Movie),
+            library("lib-a", "动画电影", MediaKind::Movie),
+            library("lib-m", "Zebra", MediaKind::Series),
+            library("lib-b", "Aardvark", MediaKind::Series),
+        ];
+        db.replace_libraries(&server, &server_order)
+            .expect("写媒体库");
+
+        let ids: Vec<String> = db
+            .libraries(&server)
+            .expect("读媒体库")
+            .iter()
+            .map(|library| library.id.as_str().to_owned())
+            .collect();
+        let expected: Vec<String> = server_order
+            .iter()
+            .map(|library| library.id.as_str().to_owned())
+            .collect();
+        assert_eq!(ids, expected, "排序必须跟随服务端顺序");
+
+        // 服务端换了顺序（同一批库）：覆盖写之后读回也是新顺序。
+        let mut reversed = server_order.to_vec();
+        reversed.reverse();
+        db.replace_libraries(&server, &reversed)
+            .expect("按新顺序覆盖写");
+        let ids: Vec<String> = db
+            .libraries(&server)
+            .expect("读媒体库")
+            .iter()
+            .map(|library| library.id.as_str().to_owned())
+            .collect();
+        let expected: Vec<String> = reversed
+            .iter()
+            .map(|library| library.id.as_str().to_owned())
+            .collect();
+        assert_eq!(ids, expected);
     }
 }
