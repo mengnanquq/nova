@@ -301,11 +301,13 @@ struct State {
     layer: FocusLayer,
     nav_focus: usize,
     hero_focus: usize,
-    // 离开搜索网格时的焦点位置：`(查询词, 扁平下标)`。
+    // 离开搜索网格时的焦点位置：`(查询词, 条目 id)`。
     //
     // 网格首行 ↑ 回页内输入框后再按 ↓，应该回到原来那张卡（与首页「保持列」一致），
-    // 而不是第 0 张。查询词变了（结果已经换了一批）就丢弃记忆、回 0。
-    search_return: Option<(String, usize)>,
+    // 而不是第 0 张。记 **item id** 而不是下标：结果变少 / 刷新后下标会指向别的卡，
+    // 按 id 找回位置才可靠（找不到就回 0）。查询词变了或**离开搜索页**（Esc 回首页 /
+    // 点卡进详情 / 返回）就作废——下次进网格从 0 开始。
+    search_return: Option<(String, String)>,
     home: HomeView,
     library: LibraryView,
     detail: DetailView,
@@ -406,7 +408,11 @@ pub struct SweepEntry {
     /// 点击前后状态摘要是否不同。
     ///
     /// 行箭头（`home.row.*.left` / `*.right`）是例外：平滑滚动在点击那一刻还没改
-    /// 滚动偏移，所以对它们还要看箭头的点击计数（见 [`HomeRowSnapshot`]）。
+    /// 滚动偏移，所以对它们看的是箭头所在行的点击计数（见 [`HomeRowSnapshot`]）——
+    /// 判据是"这次点击**交出了滚动请求**"，也就是箭头 `clicked` 处理器真的跑了。
+    /// 边界：箭头本身显示不显示已经由 `can-scroll`（`arrow-left-on` /
+    /// `arrow-right-on`）控制，不会登记进 `targets`，所以这一项只能识别出
+    /// "回调断了"那种死，看不到滚动方向 / 距离是否合理。
     pub changed: bool,
     /// 点击后是否成功把应用恢复原状（页面 / 路由 / 对话框）。
     pub restored: bool,
@@ -455,8 +461,42 @@ struct HomeRowSnapshot {
 }
 
 /// 目标 id 是不是首页行的左右滚动箭头（`home.row.*.left` / `*.right`）。
+///
+/// 必须带 `home.row.` 前缀：别处的 `.left` / `.right`（比如将来别的页面上的箭头）
+/// 不该走进行滚动那套判定。
 fn is_row_scroll_target(id: &str) -> bool {
-    id.ends_with(".left") || id.ends_with(".right")
+    id.starts_with("home.row.") && (id.ends_with(".left") || id.ends_with(".right"))
+}
+
+/// 行箭头目标 id → 首页行号（与 `home.slint` 的 `row-key` 同口径）。
+///
+/// 0 = 继续观看、1 = 最近添加、2 + n = 第 n 个库行；id 形如
+/// `home.row.continue.left` / `home.row.recent.right` / `home.row.lib.3.left`。
+fn arrow_row_key(id: &str) -> Option<i32> {
+    let (row, side) = id.strip_prefix("home.row.")?.rsplit_once('.')?;
+    if !matches!(side, "left" | "right") {
+        return None;
+    }
+    match row {
+        "continue" => Some(0),
+        "recent" => Some(1),
+        _ => row.strip_prefix("lib.")?.parse::<i32>().ok().map(|n| 2 + n),
+    }
+}
+
+/// 这次点击是否真的让**箭头所在行**交出了滚动请求。
+///
+/// 只比这一行的点击计数：整张表比起来，别的行在这一轮里涨了（或行组件被模型
+/// 重建、计数凭空出现 / 归零）也会算到这个箭头头上。
+fn arrow_scroll_clicked(
+    after: &BTreeMap<i32, i32>,
+    before: &BTreeMap<i32, i32>,
+    target_id: &str,
+) -> bool {
+    let Some(row) = arrow_row_key(target_id) else {
+        return false;
+    };
+    after.get(&row).copied() != before.get(&row).copied()
 }
 
 /// 扫描开始时的页面视图快照（体检 R8-C2）。
@@ -795,10 +835,13 @@ impl App {
             let after = self.state_digest();
             // 行箭头：平滑滚动在点击那一刻还没改 `content-x`，用点击计数补上"这次
             // 点击真的交了滚动请求"。只在恢复**之前**读（恢复会停掉动画、写回原位）。
+            //
+            // 只比**这一箭头所在行**的计数：整张表比起来，别的行在这一轮里涨了也会
+            // 算到这个箭头头上（例如两行箭头紧挨着扫）。
             let mut scroll_clicked = false;
             if page == Page::Home && is_row_scroll_target(&target.id) {
                 let after_rows = self.snapshot_home_rows();
-                scroll_clicked = after_rows.activity != activity;
+                scroll_clicked = arrow_scroll_clicked(&after_rows.activity, &activity, &target.id);
                 activity = after_rows.activity;
             }
             let changed = before != after || scroll_clicked;
@@ -2575,10 +2618,21 @@ fn move_up(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
         // （见 `focus_search_navbar`），所以标签仍然键盘可达。
         //
         // 离开网格前记住位置：回到输入框后按 ↓ 要回到同一张卡（与首页
-        // 「保持列」一致），而不是第 0 张。查询词变了就作废（见 `focus_search_grid`）。
+        // 「保持列」一致），而不是第 0 张。记 item id：结果变少 / 刷新后下标会
+        // 指向别的卡。查询词变了或离开搜索页就作废（见 `focus_search_grid` /
+        // `set_page`）。
         let index = current_focus(ui, state, page);
-        let term = state.borrow().search.term.clone();
-        state.borrow_mut().search_return = Some((term, index));
+        let record = {
+            let state = state.borrow();
+            state
+                .search
+                .cards
+                .get(index)
+                .map(|card| (state.search.term.clone(), card.item_id.clone()))
+        };
+        if let Some(record) = record {
+            state.borrow_mut().search_return = Some(record);
+        }
         return focus_search_input(ui);
     }
     if page == Page::Home && hero_available(&state.borrow()) {
@@ -2608,15 +2662,17 @@ fn focus_search_grid(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
         return false;
     }
     // 从输入框回到网格时恢复上次离开网格的位置（与首页「保持列」同口径）；
-    // 查询词变了（结果已经换了一批）就回 0：旧下标在新结果里没有意义。
+    // 记住的是 **item id**：按 id 在新结果里找回位置，结果变少 / 换了顺序也不会
+    // 跳到另一张卡上；找不到（条目没了）或查询词变了就回 0。
     let index = {
         let state = state.borrow();
         match state.search_return.as_ref() {
-            Some((term, index))
-                if *term == state.search.term && *index < state.search.cards.len() =>
-            {
-                *index
-            }
+            Some((term, item_id)) if *term == state.search.term => state
+                .search
+                .cards
+                .iter()
+                .position(|card| card.item_id == *item_id)
+                .unwrap_or(0),
             _ => 0,
         }
     };
@@ -2947,6 +3003,11 @@ fn set_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
     let changed = Page::from_index(ui.get_page()) != page;
     ui.set_page(page.index());
     if changed {
+        // 离开搜索页（Esc 回首页 / 点卡进详情 / 返回）就不再记得上次的网格位置：
+        // 回来时应该从第一张卡开始。记住它只在"搜索页内输入框 ↔ 网格"之间有意义。
+        if page != Page::Search {
+            state.borrow_mut().search_return = None;
+        }
         ui.invoke_focus_global();
         set_focus_layer(ui, state, FocusLayer::Content);
         set_nav_focus_index(ui, state, 0);
@@ -3481,4 +3542,58 @@ fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey)
         PlayerKey::Exit => return player_exit_or_close_menus(ui, state),
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{arrow_row_key, arrow_scroll_clicked, is_row_scroll_target};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn row_arrow_ids_map_to_the_home_row_keys() {
+        assert_eq!(arrow_row_key("home.row.continue.left"), Some(0));
+        assert_eq!(arrow_row_key("home.row.recent.right"), Some(1));
+        assert_eq!(arrow_row_key("home.row.lib.0.left"), Some(2));
+        assert_eq!(arrow_row_key("home.row.lib.3.right"), Some(5));
+        // 不是行箭头的东西一律不认。
+        assert_eq!(arrow_row_key("home.row.continue.card.0"), None);
+        assert_eq!(arrow_row_key("library.sort"), None);
+    }
+
+    #[test]
+    fn row_arrow_target_needs_the_home_row_prefix() {
+        assert!(is_row_scroll_target("home.row.continue.left"));
+        assert!(is_row_scroll_target("home.row.lib.2.right"));
+        assert!(!is_row_scroll_target("library.grid.left"));
+        assert!(!is_row_scroll_target("home.row.continue.card.0"));
+    }
+
+    /// 只比较**箭头所在行**的计数：别的行的变化不能算到这个箭头头上。
+    #[test]
+    fn a_change_in_another_row_does_not_mark_this_arrow_changed() {
+        let before: BTreeMap<i32, i32> = [(0, 2), (1, 0)].into_iter().collect();
+        // 继续观看行（0）的计数没变，最近添加行（1）涨了。
+        let after: BTreeMap<i32, i32> = [(0, 2), (1, 5)].into_iter().collect();
+        assert!(!arrow_scroll_clicked(
+            &after,
+            &before,
+            "home.row.continue.left"
+        ));
+        // 它自己涨了才算交出滚动请求（计数是骿增的）。
+        let after: BTreeMap<i32, i32> = [(0, 3), (1, 0)].into_iter().collect();
+        assert!(arrow_scroll_clicked(
+            &after,
+            &before,
+            "home.row.continue.left"
+        ));
+        // 两边的值不同就算（行组件被重建时计数也可能变小）。
+        let after: BTreeMap<i32, i32> = [(0, 0), (1, 0)].into_iter().collect();
+        assert!(arrow_scroll_clicked(
+            &after,
+            &before,
+            "home.row.continue.left"
+        ));
+        // 认不出行号的 id 永远不算。
+        assert!(!arrow_scroll_clicked(&after, &before, "library.sort"));
+    }
 }

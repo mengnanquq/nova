@@ -416,6 +416,95 @@ fn grid_up_then_down_returns_to_the_same_card() {
     );
 }
 
+/// 结果集变了（顺序 / 数量）时按 **item id** 找回位置，不按下标。
+///
+/// 修复前记的是扁平下标：结果变少 / 重排后同一个下标指向另一张卡，↓ 会跳到
+/// 用户没选过的条目上。这里把原来第 4 张（`s04`）换到第 0 位、后面补一张别的：
+/// 按下标会停在 3（`s03`），按 id 应该停在 0（`s04`）；找不到就回 0。
+#[test]
+fn grid_return_follows_the_item_id_when_results_change() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    // ↓ 进网格，右移 3 格到第 4 张（`s04`），再 ↑ 回输入框（记下位置）。
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：焦点在第 4 张卡");
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+
+    // 结果重排：同一查询词，`s04` 到第 0 位，长度还是 4（≥ 旧下标）。
+    let mut reordered = search_view();
+    reordered.cards.swap(0, 3);
+    app.set_search(&reordered);
+    assert_eq!(reordered.cards[0].item_id, "s04", "前提：s04 到了第 0 位");
+
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "应按 item id 找回原来那张卡（按下标会停在另一张卡上）"
+    );
+
+    // 那张卡彻底不见了：回到第 0 张。
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+    let mut shrunk = search_view();
+    shrunk.cards.truncate(2);
+    app.set_search(&shrunk);
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "记下的条目不在新结果里就回第 0 张"
+    );
+}
+
+/// 离开搜索页（Esc / 返回）后不再记得上次的网格位置，回来从第 0 张开始。
+///
+/// 修复前 `search_return` 一直留着：去首页转一圈再进搜索页，↓ 会莫名其妙停在
+/// 上一次的卡片上。
+#[test]
+fn leaving_the_search_page_clears_the_grid_return() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：焦点在第 4 张卡");
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+
+    // 离开搜索页（Esc 的"清空 + 回首页"路径走的是 `show_home` 那一层），再回来。
+    app.show_home();
+    assert_eq!(app.page(), Page::Home, "前提：真的回到了首页");
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "离开搜索页后旧位置作废，应从第 0 张开始"
+    );
+}
+
 /// 输入法组字期间 ↑ / ↓ 交给输入法，不交接焦点。
 ///
 /// 用 Slint 内部的 `UpdateComposition` 事件模拟一次组字（`TextInput.preedit-text`
@@ -455,4 +544,46 @@ fn down_during_ime_composition_stays_in_the_input() {
         "组字期间 ↑ 属于输入法，不能进顶栏"
     );
     assert_eq!(app.focus_layer(), FocusLayer::Content);
+}
+
+/// 输入法异常（`preedit-text` 一直不清空）时，方向键不能被永久拒掉。
+///
+/// 修复前 `key-pressed` 直接看 `TextInput.preedit-text`：输入法异常时它一直非空，
+/// ↑ / ↓ 就永远进不了网格 / 顶栏。现在只看“这一次组字还算不算数”：文本真的被编辑
+/// （`edited`）、`Enter` 提交或 `Esc` 之后就不再依赖 `preedit-text`（`preedit` 回到
+/// 空串时重新信任）。
+///
+/// 这里模拟“组字残留 + 用户直接输入普通字符”（IME 已经不再接管，文本被真的改掉）：
+/// 随后的 ↓ 必须能进结果网格。
+#[test]
+fn arrows_work_again_after_a_stuck_preedit_is_superseded() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+    // 从空文本开始，方便断言“普通字符真的写进去了”。
+    app.set_search_text("");
+
+    // 组字开始，然后输入法“坏了”：`preedit-text` 停在 "sha" 不清。
+    let composition = i_slint_core::input::InternalKeyEvent {
+        event_type: i_slint_core::input::KeyEventType::UpdateComposition,
+        preedit_text: "sha".into(),
+        ..Default::default()
+    };
+    app.ui()
+        .window()
+        .dispatch_event(i_slint_core::platform::WindowEvent::internal(composition));
+    // 用户直接打了一个普通字符：文本被真的编辑，这次组字不再算数。
+    type_text(&app, "沙");
+    assert_eq!(app.search_text(), "沙", "前提：文本真的变了");
+
+    press(&app, Key::DownArrow);
+    assert!(
+        !app.ui().get_search_focused(),
+        "`preedit` 残留不能把 ↓ 永久拒掉（文本已经编辑过）"
+    );
+    assert_eq!(app.ui().get_search_focus(), 0);
 }

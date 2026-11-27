@@ -123,6 +123,17 @@ export component SearchPage inherits Rectangle {
     // 见 `focus-input`：`set-selection-offsets` 用的是 UTF-8 字节偏移。
     property <int> text-end: 2147483647;
 
+    // 本次聚焦期间是否还相信 `preedit-text` 反映“正在组字”（↑ / ↓ 让给输入法的判据）。
+    //
+    // `preedit-text` 是 Slint 的内部、未文档化属性（见 i-slint-compiler 的
+    // `builtin_elements.rs`）；输入法异常时它可能一直不清空，把 ↑ / ↓ 永久拒绝。
+    // 兜底（`changed` 不能挂在内置元素的属性上，只能在事件里判断）：
+    // - 文本真的被编辑（`edited`，含提交）、`Enter` 提交、`Esc` 后置假，
+    //   不再拿 `preedit-text` 拦方向键；
+    // - 之后只要观察到 `preedit-text` 已回到空串（输入法恢复正常）就重新置真，
+    //   真实组字仍然受保护。
+    property <bool> ime-rely-on-preedit: true;
+
     /// 把焦点交给本页的搜索框（Ctrl+F / 从顶栏首次输入时由上层调到这里）。
     public function focus-input() {
         // 已经在本框里打字时不碰光标：否则在中间改字会被强行跳到末尾。
@@ -232,15 +243,26 @@ export component SearchPage inherits Rectangle {
             single-line: true;
 
             edited => {
+                // 文本真的变了：即使输入法没清 `preedit-text`（异常），也说明这次
+                // 组字已被提交 / 被普通输入取代，不再拿它拦方向键。
+                root.ime-rely-on-preedit = false;
                 root.search-changed(root.search-text);
             }
             accepted => {
                 root.search-submit();
+                // 提交后组字一定结束了：`preedit-text` 可能没被输入法清掉，
+                // 不再拿它拦方向键（`preedit-text` 回到空串时自动重新信任）。
+                root.ime-rely-on-preedit = false;
                 // 焦点还给全局键盘：方向键/Enter 才能在结果网格里用。
                 query.clear-focus();
                 root.search-blur();
             }
             key-pressed(event) => {
+                // `preedit-text` 回到空串：输入法（又）正常了，重新信任它。
+                // 只在按键时检查（`changed` 不能挂在内置元素的属性上）。
+                if (query.preedit-text == "") {
+                    root.ime-rely-on-preedit = true;
+                }
                 // Esc：清空并回首页（不需要先进文本框再退聚焦）。
                 //
                 // 清空之后必须**主动交还焦点**：与同文件的 `accepted` 分支同一
@@ -249,17 +271,23 @@ export component SearchPage inherits Rectangle {
                 // 这里以前漏了）。
                 if (event.text == Key.Escape) {
                     root.search-clear();
+                    // 失焦 / 离开搜索页：不再依赖 `preedit-text`（同上，它可能
+                    // 没被输入法清掉）。
+                    root.ime-rely-on-preedit = false;
                     query.clear-focus();
                     root.search-blur();
                     return accept;
                 }
                 // 输入法组字期间：↑ / ↓ 属于输入法（候选上下移 / 组字光标），
                 // **不交接焦点**。`preedit-text` 是 Slint 暴露的预编辑状态
-                // （`TextInput` 的内部、未文档化属性，见 i-slint-core 的
+                // （`TextInput` 的内部、未文档化属性，见 i-slint-compiler 的
                 // `builtin_elements.rs`）；非空 = 正在组字。这里 return reject，
                 // 把键还给 TextInput / 上层输入法处理。
+                //
+                // 还要求 `ime-rely-on-preedit`：输入法异常时 `preedit-text`
+                // 可能一直不清空，不能让它把方向键永久拒掉。
                 if ((event.text == Key.UpArrow || event.text == Key.DownArrow)
-                    && query.preedit-text != "") {
+                    && root.ime-rely-on-preedit && query.preedit-text != "") {
                     return reject;
                 }
                 // ↓：有结果时进结果网格（R7-D1）。以前它被 TextInput 当编辑键

@@ -1230,8 +1230,14 @@ impl Shell {
         // 恢复器写回的是 `nova-ui` 的视图；调试通道 `view.search` 读的是本层镜像。
         // 扫描点到 `search.clear` 时本层镜像被 `clear_search` 清成 `None`，不同步的话
         // 扫描结束明明回到了搜索页，`view.search` 还是 `null`（看不出查询词回来了没有）。
-        let search_view = self.app.search_view();
-        self.state.borrow_mut().search = (!search_view.term.is_empty()).then_some(search_view);
+        //
+        // 只在**仍在搜索页**时回填：离开搜索页（Esc 回首页 / 返回）不会清 `nova-ui`
+        // 的搜索视图，而本层镜像已经被 `clear_search` 清成 `None`；不加路由门控的话，
+        // 在首页 / 详情页跑一次 `sweep` 就会把旧的 SearchView 又写回镜像。
+        if matches!(self.app.current_route(), Some(Route::Search { .. })) {
+            let search_view = self.app.search_view();
+            self.state.borrow_mut().search = (!search_view.term.is_empty()).then_some(search_view);
+        }
         let dead: Vec<serde_json::Value> = report
             .dead()
             .iter()
@@ -3068,6 +3074,80 @@ mod tests {
             view["search"]["count"],
             serde_json::json!(1),
             "恢复后的结果数也要跟视图一致：{view}"
+        );
+    }
+
+    /// 离开搜索页后，在首页跑 `sweep` 不能把旧的 SearchView 写回镜像。
+    ///
+    /// 修复前 `Shell::sweep` 无条件拿 `App::search_view()` 回填
+    /// `UiState.search`：`clear_search`（Esc 回首页）只清本层镜像、不碰
+    /// `nova-ui` 的搜索视图，于是首页扫一次就会把上一次的旧查询又写回
+    /// `view.search`，调试通道看上去像"搜索还开着"。
+    #[test]
+    fn shell_home_sweep_keeps_the_search_summary_empty() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        {
+            let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
+            db.upsert_server(&server_info(), 1).expect("写服务器");
+            db.upsert_items(
+                &ServerId::new("srv-a"),
+                &[item("dune", "沙丘", "lib-movies")],
+                1,
+            )
+            .expect("写条目");
+        }
+        let local = Arc::new(crate::local::Local::open(&env, None).expect("打开本地状态"));
+        local.set_libraries(vec![library("lib-movies", "电影")]);
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        app.ui()
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        app.ui().set_window_w(1280.0);
+        app.ui().set_window_h(800.0);
+        app.set_home(&local.home(None).expect("首页"));
+        let view = local.search_view("沙丘", 60).expect("搜索视图");
+        assert!(!view.cards.is_empty(), "前提：「沙丘」有结果");
+        app.open_search(&view);
+        app.ui().show().expect("显示窗口");
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1200));
+        for _ in 0..2 {
+            app.refresh_targets();
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shell = super::Shell::for_test(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+        );
+
+        // Esc 回首页：本层镜像被清空，`nova-ui` 的搜索视图还留着上一次的结果。
+        shell.clear_search();
+        assert!(
+            !app.search_view().term.is_empty(),
+            "前提：`nova-ui` 还留着旧视图"
+        );
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1200));
+        for _ in 0..2 {
+            app.refresh_targets();
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+        }
+
+        let report = shell.sweep(false);
+        assert_eq!(report["ok"], serde_json::json!(true), "{report}");
+        let view = shell.debug_execute(crate::debug::Command::View);
+        assert_eq!(
+            view["search"],
+            serde_json::json!(null),
+            "离开搜索页后跑 sweep 不能把旧 SearchView 写回镜像：{view}"
         );
     }
 

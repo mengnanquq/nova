@@ -284,10 +284,14 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      的平滑滚动）。代次让“目标值与当前值相同、但动画还没走完”的情况也能写回；整轮
      恢复最多 flush 一次，不再逐行 flush（也不再依赖 `changed` 的合并语义）。
    - 行箭头（`home.row.*.left` / `*.right`）走平滑滚动：点击那一刻 `flick.content-x`
-     还没变（动画要等 tick），所以判定它们是否 dead 时看的是**箭头点击计数**
+     还没变（动画要等 tick），所以判定它们是否 dead 时看的是**箭头所在行的点击计数**
      （`CardRow.scroll-requests`，在箭头的 `clicked` 处理器里同帧 +1，随
-     `home-row-scroll-activity` 上报），而不是恢复后的滚动偏移；计数器点完比点前多 =
-     箭头真的交出了滚动请求，反之为 dead（回调断掉的那种真死）；
+     `home-row-scroll-activity` 上报），而不是恢复后的滚动偏移。判据是“这次点击
+     **交出了滚动请求**”——也就是箭头 `clicked` 处理器真的跑了：该行计数点完比点前
+     多 = `changed:true`，反之 = dead。只比**这一箭头所在行**（按 id 取 `row-key`），
+     别的行的计数变化不会算到它头上。边界：箭头本身显示不显示已经由 `can-scroll`
+     控制（`arrow-left-on` / `arrow-right-on`，不可滚动的箭头不登记进 `targets`），
+     所以这一项只能识别出“回调断了”那种真死，看不到滚动方向 / 距离是否合理；
    - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
      恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
 

@@ -116,16 +116,29 @@ pub struct Navigator { /* 栈 + back() */ }
 键位（与下文「键盘 / 遥控器导航」的键位表同一条实现）：输入框里 `↓` 把焦点交给结果
 网格（`focus_search_grid`；`.slint` 侧识别到方向键后先 `clear-focus()` +
 `search-blur()`，再把意图回调上来）。焦点落点与首页「保持列」同口径：优先回到**上次
-离开网格时那张卡**（`State::search_return` 记住 `(查询词, 下标)`）；查询词变了（结果已经
-换了一批）就回第 0 张；**结果为空时 `↓` 不移动焦点**——留在输入框，不额外反馈
+离开网格时那张卡**（`State::search_return` 记住 `(查询词, item id)`，按 id 在新结果里
+找回位置；结果变少 / 重排不会跳到另一张卡上，找不到就回第 0 张）；查询词变了就回
+第 0 张；**离开搜索页**（Esc 回首页 / 点卡进详情 / 返回）时记录清空，下次进网格从
+第 0 张开始；**结果为空时 `↓` 不移动焦点**——留在输入框，不额外反馈
 （Netflix 同款行为，`search_page.rs` 有回归用例钉住）。网格**首行**再按 `↑` 回到页内输入框
 （`move_up` 的 `Page::Search` 分支，`focus_search_input`）并记下离开时的位置；输入框里
 `↑` 进顶栏（`focus_search_navbar`，标签仍键盘可达）；`Enter` 提交，`Esc` 清空查询并回首页。
 
 **输入法组字（已知限制，推测 / 未验证）**：组字期间 `↑` / `↓` 应该属于输入法
-（候选上下移），`search.slint` 在 `TextInput.key-pressed` 里读 Slint 暴露的预编辑状态
-`TextInput.preedit-text`（`i-slint-core` 的 `builtin_elements.rs` 里声明为内部、未文档化
-属性），非空就 `reject`、不交接焦点。这条只做了无头模拟（`UpdateComposition` 事件）
+（候选上下移），`search.slint` 在 `TextInput.key-pressed` 里看预编辑状态
+`TextInput.preedit-text`：非空就 `reject`、不交接焦点。这个属性是 `i-slint-compiler`
+的 `builtin_elements.rs` 里**内置声明**的（`out property <string> preedit-text`，源码注释
+写明 "Internal, undocumented property, only exposed for IME"）：语言层可见，但属于内部、
+未文档化接口。升级 Slint 时如果它被改名 / 删掉，会在**编译期**报错（`search.slint` 直接
+引用）；如果只是语义变了（例如不再反映组字态），则会**静默失效**。风险评级：中低。
+
+另外加了兜底：方向键的判据多一道 `ime-rely-on-preedit` 开关（`search.slint` 的
+`TextInput.key-pressed`）。因为输入法异常时 `preedit-text` 可能一直不清空，非空会一直
+保留，↑ / ↓ 会被永久拒掉；所以文本真的被编辑（`edited`，含提交）/ `Enter` 提交 / `Esc`
+之后置假，不再拿 `preedit-text` 拦方向键；之后只要观察到 `preedit-text` 已回到空串
+（输入法恢复正常）就重新置真，真实组字仍然受保护。失焦后输入框不再是按键目标，
+箭头本来就拦不到（Slint 1.19 的 `TextInput` 在 `FocusOut` 时也会自己把 `preedit-text`
+清空）。这条同样只做了无头模拟（`UpdateComposition` 事件 + `search_page.rs` 的回归用例）
 验证；真实输入法（ibus / fcitx）在 X11 / Wayland 下是否把方向键交给应用、
 `preedit-text` 是否在同帧可读，**未做真机验证**。
 
@@ -246,7 +259,7 @@ export struct Target {
 | 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
 | 搜索页 `↓`（输入框里） | 有结果时把焦点交给**结果网格**（`R7-D1`：输入框不能把方向键吞掉）；优先回到上次离开网格时那张卡，查询词变了回第 0 张；**结果为空时留在输入框**（无操作，不额外反馈） |
 | 搜索页 `↑`（输入框里） | 进顶栏（标签仍键盘可达；没结果时也一样） |
-| 搜索页 `↑` / `↓`（输入法组字中） | 交给输入法（候选上下移），不交接焦点：`.slint` 读 `TextInput.preedit-text` 判断组字中；**推测 / 未做真机输入法验证** |
+| 搜索页 `↑` / `↓`（输入法组字中） | 交给输入法（候选上下移），不交接焦点：`.slint` 看 `TextInput.preedit-text` + `ime-rely-on-preedit`（编辑 / 提交 / `Esc` 后置假、`preedit` 回空后重新信任）；**推测 / 未做真机输入法验证** |
 | 搜索页 `Esc` | 清空查询并回首页 |
 
 详情页没有顶栏（页内就是 hero + 按钮行），它的按钮与版本行本来就在内容层的扁平焦点
