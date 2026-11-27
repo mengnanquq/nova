@@ -121,10 +121,10 @@ TLS：`reqwest` 使用 `rustls-tls-native-roots`，默认校验证书与主机�
   （库里存着 `AuthState::Expired` 也一样），交给后台刷新去验证；取不到令牌时，库里是
   `AuthState::Expired` 就给 `Status::Expired`，否则 `Status::MissingToken`；
   `build_provider` 失败则 `Status::RefreshFailed`。
-- **刷新成功**：`refresh::run` 调 `Local::persist_info(provider)` 把 `AuthState::Authorized`
+- **刷新成功**：刷新（`refresh::refresh` → 模块内的 `run`）调 `Local::persist_info(provider)` 把 `AuthState::Authorized`
   写回本地库（凭令牌恢复的会话 `user_name` 是空串，不会覆盖登录时存下的名字），
   并把 `Local::status()` 与界面一起置为 `Status::Connected`。
-- **刷新失败**（网络 / 5xx / 响应不合规）：`refresh::failure_status` 把
+- **刷新失败**（网络 / 5xx / 响应不合规）：刷新模块内的 `failure_status` 把
   `Status::RefreshFailed` 回写 `Local`。`Status::is_connected()` 只有 `Connected` 为真，
   所以 `ui::online_provider` 之后不再给搜索 / 详情 / 图片发请求，一律只读缓存
   （搜索失败页也不会再覆盖本地命中结果）。
