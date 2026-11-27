@@ -574,6 +574,21 @@ impl App {
             }
         }
 
+        // “观看”行与桌面端同源：续播位置只认 `resume_position_for_item`（判断
+        // `resume_min_position` / `finished_threshold`，`played` 不参与），偏好读本地库。
+        // 以前这里 `played` 优先：`Played = true` 但带中段续播点的条目显示「已看完」，
+        // 而桌面端从续播点起播——同一个条目两处说法不一致。
+        let prefs = match self.db.preferences() {
+            Ok(prefs) => prefs,
+            Err(error) => {
+                // 与桌面端 `nova_app::views::preferences_or_default` 一致：偏好行损坏
+                // 只影响续播判断，不该让整条 `nova info` 失败。
+                tracing::warn!(%error, "读取用户偏好失败，nova info 退回默认续播偏好");
+                nova_core::UserPreferences::default()
+            }
+        };
+        let resume_at = nova_playback::resume_position_for_item(&media_item, &prefs);
+
         let mut text = format!("条目 {}  {}\n", media_item.id, media_item.title);
         text.push_str(&format!("  数据来源: {}\n", item_origin.text()));
         text.push_str(&format!("  类型    : {}\n", kind_text(media_item.kind)));
@@ -584,20 +599,17 @@ impl App {
         ));
         text.push_str(&format!(
             "  观看    : {}{}\n",
-            if media_item.user_data.played {
-                "已看完"
-            } else if !media_item.user_data.resume_position.is_zero() {
+            if !resume_at.is_zero() {
                 "看到"
+            } else if media_item.user_data.played {
+                "已看完"
             } else {
                 "未看"
             },
-            if media_item.user_data.played || media_item.user_data.resume_position.is_zero() {
+            if resume_at.is_zero() {
                 String::new()
             } else {
-                format!(
-                    " {}",
-                    duration_text(Some(media_item.user_data.resume_position.as_secs()))
-                )
+                format!(" {}", duration_text(Some(resume_at.as_secs())))
             }
         ));
         text.push_str(&format!(

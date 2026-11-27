@@ -56,6 +56,7 @@ nova-app ──┬─> nova-ui
 nova-cli ─┬─> nova-provider ─┬─> nova-core
           │                  └─> nova-secrets
           ├─> nova-storage ─────> nova-core
+          ├─> nova-playback ────> nova-core
           └─> nova-secrets
 ```
 

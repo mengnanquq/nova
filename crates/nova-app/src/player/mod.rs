@@ -2224,14 +2224,16 @@ mod tests {
         }
     }
 
-    /// 轮询等待 `begin()` 投递 `OpenReady`（上限 2s），把结果原样交出去。
+    /// 轮询等待 `begin()` 投递 `OpenReady`（上限 10s），把结果原样交出去。
     ///
     /// 取走队列里的第一条消息（`OpenFailure` 不可 `Clone`：它保留 provider 的错误，
     /// 而 `ProviderError` 不是 `Copy`）。
     fn wait_for_open(
         posted: &Arc<std::sync::Mutex<Vec<Message>>>,
     ) -> Result<Box<OpenRequest>, OpenFailure> {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // 上限要宽松：CI 机器满载时起播前的缓存刷新 + 任务调度可能占掉好几秒。
+        // 以前是 2s，慢机器上会把“还没轮到”误报成“begin() 没投递”。
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             {
                 let mut queue = match posted.lock() {
@@ -2246,7 +2248,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "2 秒内没有等到 OpenReady：begin() 没有把请求交给引擎"
+                "10 秒内没有等到 OpenReady：begin() 没有把请求交给引擎"
             );
             std::thread::sleep(Duration::from_millis(10));
         }

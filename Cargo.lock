@@ -3405,6 +3405,7 @@ name = "nova-cli"
 version = "0.1.0"
 dependencies = [
  "nova-core",
+ "nova-playback",
  "nova-provider",
  "nova-secrets",
  "nova-storage",

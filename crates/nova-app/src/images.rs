@@ -1709,13 +1709,26 @@ mod tests {
             let handle = runtime.handle().clone();
             let keys: Vec<ImageKey> = ids.iter().map(|id| ImageKey::poster(id.clone())).collect();
             service.request_prefetch(&local, keys.clone(), &handle, |_, _| {});
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            assert_eq!(fetcher.prefetch_calls.load(Ordering::SeqCst), 1);
+            // 等第一张预取真正发起（被 gate 拦住，其余在预取名额上排队）：
+            // 固定 sleep 150ms 在负载高的 CI 上会等到“还没开始”，断言于是偶发红灯。
+            let started = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while fetcher.prefetch_calls.load(Ordering::SeqCst) == 0 {
+                assert!(
+                    std::time::Instant::now() < started,
+                    "10 秒内预取一张都没发起：request_prefetch 没有把任务交给 runtime"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                fetcher.prefetch_calls.load(Ordering::SeqCst),
+                1,
+                "预取名额只有 1 个：第一张没放手前不能有第二张开始"
+            );
 
             // 离开首页：排队中的预取必须作废。
             service.cancel_prefetch();
             fetcher.gate.add_permits(MAX_PREFETCH * 2);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 let requested = keys.iter().filter(|key| service.was_requested(key)).count();
                 if requested == 1 {

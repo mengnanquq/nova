@@ -249,12 +249,15 @@ async fn timeouts_are_retried() {
     let provider = Provider::new(Flavor::Jellyfin, config, store as Arc<dyn CredentialStore>)
         .expect("wiremock 地址合法")
         .with_retry_policy(fast_retry(2))
-        .with_request_timeout(Duration::from_millis(120));
+        // 超时与“服务端慢”之间必须是悬殊的倍数：旧用例是 120ms 对 600ms（5 倍），
+        // CI 满载时 tokio 定时器晚触发到 600ms 之后，延迟响应先到，用例就变成
+        // “没有超时”的假阴性。1s 对 10s 留出 10 倍余量。
+        .with_request_timeout(Duration::from_secs(1));
 
     // 用 `image()`：它只需要令牌，不需要 user_id（这里没有走登录流程）。
     Mock::given(method("GET"))
         .and(path(format!("/Items/{ITEM_ID}/Images/Primary")))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(600)))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
         .expect(2)
         .mount(&server)
         .await;
