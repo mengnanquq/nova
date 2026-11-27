@@ -44,6 +44,12 @@ const STARTED_MAX_ATTEMPTS: u32 = 3;
 struct SessionMark {
     /// 处理过的最新代号（发过 `Started` 或 `stop` 过）。
     latest: u64,
+    /// 已经 `stop` 过的最大代号（水位）：`<= closed` 的会话都已结束。
+    ///
+    /// 只靠 `latest` 拦不住"代号相等但已经 stop"的会话：那个会话的 `Started`
+    /// 可能还有重试次数没用完（两次 transient 失败后退出），队列补发它的 `Exit`
+    /// 时会给已结束的会话再发一次 `Started`，而之后再也没人 `stop` 它（复审 🟡）。
+    closed: u64,
     /// 当前代号已尝试发 `Started` 的次数（包含失败）。
     attempts: u32,
     /// 当前代号的 `Started` 是否已经成功。
@@ -92,6 +98,10 @@ impl ProviderSink {
             return false;
         }
         let mut mark = self.mark();
+        // 已结束的会话（哪怕 `Started` 的重试次数还没用完）绝不能再"开始"一次。
+        if seq <= mark.closed {
+            return false;
+        }
         mark.observe(seq);
         if seq < mark.latest || mark.started || mark.attempts >= STARTED_MAX_ATTEMPTS {
             return false;
@@ -117,8 +127,14 @@ impl ProviderSink {
     }
 
     /// 会话结束：记下这个代号，之后（晚到的补发项）不再为它发 `Started`。
+    ///
+    /// `closed` 是水位：`stop` 之后即使队列补发的是同一个代号、`Started` 的重试次数
+    /// 也还没用完，也不会再发（代号的相等拦不住，得有水位）。
     fn end_session(&self, progress: &PlaybackProgress) {
-        self.mark().observe(progress.session_seq);
+        let seq = progress.session_seq;
+        let mut mark = self.mark();
+        mark.observe(seq);
+        mark.closed = mark.closed.max(seq);
     }
 
     fn mark(&self) -> MutexGuard<'_, SessionMark> {
@@ -624,6 +640,43 @@ mod tests {
         }
         assert_eq!(provider.start_attempts(), STARTED_MAX_ATTEMPTS);
         assert!(provider.started().is_empty());
+    }
+
+    /// 复审 🟡：会话 N 的 `Started` 两次 transient 失败（`attempts = 2`，还没到上限），
+    /// `Exit` 的进度也失败进了队列；`stop(N)` 成功之后补发那条 `Exit`——按代号比对
+    /// 拦不住（相等、且重试次数没满），于是给一个已经 stop 的会话又发了一次 `Started`，
+    /// 之后再也没人 `stop` 它，服务端一直把它记成在播。
+    ///
+    /// 修法：`stop` 记下 `closed` 水位，`begin_session` 见到 `seq <= closed` 直接拒绝。
+    #[tokio::test]
+    async fn stopped_session_is_never_started_again_with_attempts_left() {
+        let provider = Arc::new(FakeProvider::failing_starts(2));
+        let sink = ProviderSink::new(Arc::clone(&provider) as Arc<dyn MediaProvider>);
+
+        // 会话 1 的 Started 连着失败两次（attempts = 2 < STARTED_MAX_ATTEMPTS）。
+        report(&sink, "a", 1, 10).await;
+        report(&sink, "a", 1, 20).await;
+        assert_eq!(provider.start_attempts(), 2);
+        assert!(provider.started().is_empty());
+
+        // 退出：Exit 的进度进了队列，stop 成功——这个会话结束了。
+        stop(&sink, "a", 1, 30).await;
+        assert_eq!(provider.stopped(), ["a"]);
+
+        // 队列补发那条 Exit：进度照发，但绝不能再给已 stop 的会话发 Started
+        // （哪怕重试次数还没用完——失败的那两次没让 attempts 到上限）。
+        report(&sink, "a", 1, 30).await;
+        assert_eq!(
+            provider.start_attempts(),
+            2,
+            "已经 stop 的会话不得再尝试 Started"
+        );
+        assert!(provider.started().is_empty());
+        assert_eq!(provider.progress_count(), 3, "进度本身照常补发");
+
+        // 水位只压住"已结束的代号"：重播是新代号，Started 照发。
+        report(&sink, "a", 2, 0).await;
+        assert_eq!(provider.started(), ["a"], "重播的新会话仍然要发 Started");
     }
 
     /// 落盘兼容：旧版补发文件里的条目没有会话代号（`0`），那个会话早就结束了，

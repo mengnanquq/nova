@@ -155,6 +155,10 @@ pub struct PlaybackProgress {
 
 impl PlaybackProgress {
     /// 由会话生成待提交进度。位置会按 `duration` 截断，避免服务端收到越界值。
+    ///
+    /// 代号固定为 `0`（"不知道"）：`PlaybackSession` 自己不带代号，代号由 player
+    /// 起播时递增并写进上报的进度。`0` 的进度**不会**发 `Started`——所以这个方法
+    /// 只给测试或补发用；真要用它上报，调用方必须把 `session_seq` 填成当前会话代号。
     pub fn from_session(session: &PlaybackSession, remaining_threshold: Duration) -> Self {
         let position = match session.duration {
             Some(total) => session.position.min(total),
@@ -236,6 +240,14 @@ mod tests {
 
         assert!(!session(5, Some(120)).should_report_progress(Duration::from_secs(10)));
         assert!(session(60, Some(120)).should_report_progress(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn progress_from_session_has_no_session_id() {
+        let progress =
+            PlaybackProgress::from_session(&session(60, Some(120)), Duration::from_secs(30));
+        // 代号 0 表示"不知道"：sink 不会为它补发 `Started`（见 `player::sink`）。
+        assert_eq!(progress.session_seq, 0);
     }
 
     #[test]

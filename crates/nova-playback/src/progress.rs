@@ -439,23 +439,34 @@ impl ProgressReporter {
     }
 
     fn enqueue(&mut self, progress: &PlaybackProgress) -> Duration {
-        let attempts = match self
+        // 同一个 `(条目, 资源)` 只留最新会话的一条：服务端只关心最终续播点，旧会话的
+        // 进度已经没有意义。离线时反复重播同一部片，队列不能每个会话攒一条。
+        self.queue.retain(|entry| {
+            !same_item(&entry.progress, progress)
+                || entry.progress.session_seq >= progress.session_seq
+        });
+        let attempts = if let Some(entry) = self
             .queue
             .iter_mut()
             .find(|entry| same_session(&entry.progress, progress))
         {
-            Some(entry) => {
-                entry.progress = progress.clone();
-                entry.attempts = entry.attempts.saturating_add(1);
-                entry.attempts
-            }
-            None => {
-                self.queue.push(PendingEntry {
-                    progress: progress.clone(),
-                    attempts: 1,
-                });
-                1
-            }
+            entry.progress = progress.clone();
+            entry.attempts = entry.attempts.saturating_add(1);
+            entry.attempts
+        } else if let Some(entry) = self
+            .queue
+            .iter()
+            .find(|entry| same_item(&entry.progress, progress))
+        {
+            // 只剩这个条目**更新**的会话（上面的保留规则）：这条旧会话的进度
+            // 不必再排队，退避按那条算。
+            entry.attempts
+        } else {
+            self.queue.push(PendingEntry {
+                progress: progress.clone(),
+                attempts: 1,
+            });
+            1
         };
         let retry_in = backoff(attempts);
         self.next_retry_at = Some(self.clock.now() + retry_in);
@@ -544,9 +555,15 @@ impl SessionKey {
 
 /// 两条进度是不是同一个会话的（代号 + 条目 + 资源）。
 fn same_session(left: &PlaybackProgress, right: &PlaybackProgress) -> bool {
-    left.item_id == right.item_id
-        && left.source_id == right.source_id
-        && left.session_seq == right.session_seq
+    same_item(left, right) && left.session_seq == right.session_seq
+}
+
+/// 两条进度是不是同一部片的（条目 + 资源），不看会话代号。
+///
+/// 待发队列按它只保留最新会话的一条：服务端只关心最终续播点，旧会话的进度
+/// 已经没有意义，留着只是把队列越攒越长。
+fn same_item(left: &PlaybackProgress, right: &PlaybackProgress) -> bool {
+    left.item_id == right.item_id && left.source_id == right.source_id
 }
 
 #[cfg(test)]
@@ -986,6 +1003,67 @@ mod tests {
         let drained = &sink.reported()[1];
         assert_eq!(drained.position, Duration::from_secs(600));
         assert_eq!(drained.session_seq, 1, "补发的是上一个会话的进度");
+    }
+
+    /// 💡：待发队列原本没有上限，而离线时反复重播同一部片会给每个会话攒一条待发项。
+    /// 服务端只关心最终续播点，旧会话的进度已经没有意义，所以同一个（条目, 资源）
+    /// 只留最新会话的一条。
+    #[tokio::test]
+    async fn queue_keeps_only_the_newest_session_per_item() {
+        let (mut reporter, _clock) = reporter();
+        let offline = RecordingSink::always_failing_for("item-1", ReportError::Transient);
+
+        // 离线状态下同一部片重播两次：三个会话都上报失败。
+        for (seq, secs) in [(1, 30), (2, 60), (3, 5)] {
+            assert!(matches!(
+                reporter
+                    .submit(
+                        &offline,
+                        ProgressTrigger::Tick,
+                        &session_progress(seq, secs)
+                    )
+                    .await,
+                ReportOutcome::Queued { .. }
+            ));
+        }
+        assert_eq!(
+            reporter.queued(),
+            1,
+            "同一个条目的旧会话待发项应被新会话取代，不能越攒越多"
+        );
+
+        // 恢复后只补发最新会话的那一条。
+        let sink = RecordingSink::new();
+        assert_eq!(reporter.flush(&sink).await.sent, 1);
+        let sent = &sink.reported()[0];
+        assert_eq!(sent.session_seq, 3, "补发的是最新会话");
+        assert_eq!(sent.position, Duration::from_secs(5));
+        assert_eq!(reporter.queued(), 0);
+    }
+
+    /// 另一个条目（`item-2`）的待发项不受上面那条规则影响（不同条目各留一条）。
+    #[tokio::test]
+    async fn old_sessions_of_another_item_stay_queued() {
+        let (mut reporter, _clock) = reporter();
+        let offline = RecordingSink::always_failing(ReportError::Transient);
+
+        assert!(matches!(
+            reporter
+                .submit(&offline, ProgressTrigger::Tick, &session_progress(1, 30))
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        assert!(matches!(
+            reporter
+                .submit(
+                    &offline,
+                    ProgressTrigger::Tick,
+                    &other_progress("item-2", 10, false)
+                )
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        assert_eq!(reporter.queued(), 2, "不同条目各留自己的一条");
     }
 
     /// 落盘兼容：加会话代号之前写下的待发文件没有 `session_seq`，仍然要能读回并补发；
