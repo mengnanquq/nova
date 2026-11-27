@@ -916,9 +916,14 @@ fn enter_on_the_error_card_triggers_retry() {
     );
 }
 
-/// 起播失败停在错误卡上时再按 Enter：必须重新起播（错误卡上的「重试」同理）。
+/// 起播失败停在错误卡上时，从详情页再按一次播放（`App::play` / `play_current`）
+/// 必须真的走起播路径，不能被“已经在播放页”的提前返回吞掉。
+///
+/// 注意与错误卡上的 `Enter` 区分（见 `enter_on_the_error_card_triggers_retry`）：
+/// 出错时 `Enter` = **重试**（`Player::retry`），播完时 `Enter` = **重播**
+/// （新会话、位置 0）。这条用例覆盖的是前者的“重跑起播”兜底。
 #[test]
-fn error_state_playback_replays_the_same_item() {
+fn error_state_starting_the_same_item_again_restarts_it() {
     let app = player_app();
     let played = Rc::new(RefCell::new(Vec::new()));
     let sink = played.clone();
@@ -926,11 +931,11 @@ fn error_state_playback_replays_the_same_item() {
 
     app.set_player(&player_error());
 
-    assert!(app.play("dune"), "重播也算处理掉了");
+    assert!(app.play("dune"), "重新起播也算处理掉了");
     assert_eq!(
         played.borrow().as_slice(),
         ["dune"],
-        "错误态下按 Enter 必须重新起播（不能走提前返回）"
+        "错误态下重新起播必须真的走向起播路径（不能走提前返回）"
     );
 }
 

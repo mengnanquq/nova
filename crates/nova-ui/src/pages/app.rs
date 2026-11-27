@@ -2622,9 +2622,13 @@ fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
         // 播放页按 Enter 走 `play_current` → `play`，以前会把同一个 `Player{A}`
         // 弹了再压一次：播放页闪一下、重新取直链、重开 mpv（连进度位置都重算）。
         //
-        // **例外**：片子自然播完（Ended）或起播失败停在错误卡上时，Enter 就是
-        // “重播”。这两个状态都不是“还在放”，提前返回会让用户只能退出播放页
-        // 再进来才能重新看。
+        // **例外**：两种“看起来在播放页、其实没在放”的状态不能让起播路径提前返回。
+        //
+        // - 片子自然播完（`Ended`）：`Enter` / 控制层播放键＝**重播**（从 0 开始、
+        //   新会话），与详情页的播放键走同一条路径；
+        // - 起播失败停在错误卡上（`player.error` 非空）：`Enter` / 控制层播放键＝
+        //   **重试**（`player_retry` → `Player::retry`，不往导航栈里推新页，也不把
+        //   位置重置成 0），这里只为“从详情页再按一次播放”这条路径放行。
         if matches!(
             state.nav.current(),
             Some(Route::Player { item_id: playing }) if *playing == target

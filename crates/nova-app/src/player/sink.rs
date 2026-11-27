@@ -222,6 +222,9 @@ pub(crate) struct Progress {
     /// 换片路径绝不能碰到它：那里面有 `block_on` + 1500ms 上限，跑在界面线程上。
     #[cfg(test)]
     flushes: Arc<AtomicUsize>,
+    /// 测试：`submit()` 被调用过几次（判「该不该上报」在调用方，sink 看不出来）。
+    #[cfg(test)]
+    submits: Arc<AtomicUsize>,
 }
 
 impl Progress {
@@ -237,6 +240,8 @@ impl Progress {
                 provider: None,
                 #[cfg(test)]
                 flushes: Arc::new(AtomicUsize::new(0)),
+                #[cfg(test)]
+                submits: Arc::new(AtomicUsize::new(0)),
             };
         };
         let sink = Arc::new(ProviderSink::new(Arc::clone(&provider)));
@@ -314,6 +319,8 @@ impl Progress {
             provider,
             #[cfg(test)]
             flushes: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            submits: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -338,6 +345,8 @@ impl Progress {
         let Some(commands) = &self.commands else {
             return false;
         };
+        #[cfg(test)]
+        self.submits.fetch_add(1, Ordering::SeqCst);
         commands
             .send(Command::Submit(trigger, self.stamp(progress)))
             .is_ok()
@@ -379,6 +388,12 @@ impl Progress {
     #[cfg(test)]
     pub(crate) fn flush_count(&self) -> usize {
         self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// 测试：`submit()` 被调用过几次。
+    #[cfg(test)]
+    pub(crate) fn submit_count(&self) -> usize {
+        self.submits.load(Ordering::SeqCst)
     }
 }
 
@@ -784,6 +799,7 @@ mod tests {
             runtime: Handle::current(),
             provider: Some(Arc::clone(&provider) as Arc<dyn MediaProvider>),
             flushes: Arc::new(AtomicUsize::new(0)),
+            submits: Arc::new(AtomicUsize::new(0)),
         };
 
         // 旧会话退出：后台 worker 晚一步才真发出去，进度里带的是它自己的标识。
@@ -826,6 +842,7 @@ mod tests {
             runtime: Handle::current(),
             provider: None,
             flushes: Arc::new(AtomicUsize::new(0)),
+            submits: Arc::new(AtomicUsize::new(0)),
         };
 
         let legacy = handle.stamp(legacy_progress("a", 30));

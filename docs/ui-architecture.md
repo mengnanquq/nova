@@ -206,7 +206,7 @@ export struct Target {
 | `←` `→` | 行内移动焦点（首页是横向行，媒体库是网格）；在 hero 层是播放 / 更多信息；在顶栏是标签 ↔ 搜索按钮 |
 | `↑` | 行/网格之间上移；**内容第一行**再往上：首页先进 hero 按钮行（hero 有简介时），再进顶栏；媒体库首行直接进顶栏；搜索页的结果网格**首行**先进页内搜索框，输入框里再按一次才进顶栏 |
 | `↓` | 行/网格之间下移；顶栏 → 首页先回 hero、其余页回内容层；hero → 内容层 |
-| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情；播放页上是播放 / 暂停，**播完后是从头重播**（见「起播与页面导航」） |
+| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情；播放页上是播放 / 暂停，**播完后是从头重播**、**错误卡上是「重试」**（见「起播与页面导航」） |
 | `Esc` / `Backspace` | 在 chrome 层（顶栏 / hero）**只回内容层**，不返回上一页；在内容层返回上一级（栈空时无动作） |
 | `Ctrl+F` | 聚焦搜索框（首页/媒体库是顶栏胶囊，搜索页是页内大搜索框） |
 | 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
@@ -343,14 +343,16 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
   那份常常还贴在片尾的续播点（体检 R8-B1 / R8-B2 真机上就是「按了播放键，画面还是最后一帧」）。
   重播期间照旧受 `Session::reportable_position` 保护：首帧之前一条进度都不发，所以起播 / 缓冲
   不会产生 `Progress@0` 把续播点清掉。
-- 正常播放时按 `Enter` **不会**重开；只有播完或出错（`Failed`）后才允许重播。`ended` 由
+- 正常播放时按 `Enter` **不会**重开；同一部片重开只发生在两种“看起来在播放页、其实没在放”
+  的状态上，且两个键的语义不同：**播完（`Ended`）时 `Enter` = 重播**（新会话、位置 0，见上），
+  **出错（`Failed`）时 `Enter` = 重试**（重跑一遍起播，不强制把位置重置成 0）。`ended` 由
   `SessionState::Ended` 直传，不靠「位置 ≥ 时长」猜：时长未知时位置永远推不到头，续播点
   贴片尾时位置又会一开始就 ≥ 时长。
 - 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
   与点击按钮同一条路径（`player_retry` → `Player::retry`）。起播（含取直链）失败时
   `request` / `pending` / `target` 已被清空，`retry` 靠最后一次起播目标的快照
-  （`Player::last_start`：条目 + 版本 + 偏好）重跑一遍 `begin`——没有快照时只能静默
-  返回，表现就是“点了没反应”。
+  （`Player::last_start`：条目 + 版本）重跑一遍 `begin`（偏好传 `None`，与重播一样读
+  数据库里的当前值）——没有快照时只能静默返回，表现就是“点了没反应”。
 - 续播判定在 `nova_playback::resume::resume_position`（纯函数）：续播点为空、或
   `resume_position < resume_min_position`（太靠前）、或剩余时长不大于 `finished_threshold`
   （已看完）时从头播，否则从续播点起播。**`played` 不参与判定**：
@@ -372,9 +374,17 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    所以宿主在 seek 之后要补一次 `play`，否则进度条动了、画面仍是最后一帧；
 3. 同一个 session 继续播到片尾会**再报一次** `Ended`，不会卡在「播放中」：worker 的
    `Command::Seek` 分支**无条件**清掉「已报过 Ended」的标记（`worker::EndedGuard::after_seek`），
-   不依赖 mpv 的具体时序——旧实现只靠 `eof-reached` 回到 `false` 来清，拖动后 mpv 不保证
-   送这个翻转，第二次播完就不再产生 `Ended`。`eof-reached=false` 的清除逻辑作为补充保留
-   （`EndedGuard::observe_eof`），两条路径都有单测（`worker::tests::seek_after_end_*`）。
+   不依赖 mpv 的具体时序（实测 mpv 0.42 + `keep-open=yes`：片尾**只有** `eof-reached=true`
+   属性、没有 `end-file` 事件；seek 之后才送 `eof-reached=false` + `playback-restart`）。
+   旧实现只靠 `eof-reached` 回到 `false` 来清，第二次播完就可能不再产生 `Ended`。
+   同时 seek 还要把“seek 之前产生、seek 之后才被处理到”的 `eof-reached=true` 标成旧观察
+   （`EndedGuard::stale_eof`）：主循环**先处理命令再处理事件**，不吞掉它就会在清标记之后
+   立刻误报第二次 `Ended`——界面把状态钉成 `Ended`、位置钉到时长（显示「已看完」），
+   引擎其实还在播，这时按 `Enter` 会从 0 重播，位置就丢了。旧观察在 `playback-restart` /
+   `eof-reached=false` / 新的 `end-file` 处失效（即“seek 已生效”或“这是一次新片尾”）。
+   已经停在 `Ended` 时重复收到的 `Ended` 也不再补报一条 `Pause` 进度（`Player::pump_events`）。
+   三条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
+   `player::tests::duplicate_ended_does_not_report_again`）。
 
 ## 控制层
 
@@ -416,7 +426,7 @@ hero 上那种深色圆钮（`rgba(22,22,22,.7)` + 描边）**不用于播放器
 
 | 键 | 行为 |
 |---|---|
-| `Space` / `K` | 播放 / 暂停（播完后是**从头重播**，`Enter` 同义） |
+| `Space` / `K` | 播放 / 暂停（播完后是**从头重播**，出错时是错误卡上的**重试**，`Enter` 同义） |
 | `←` / `→` | -15s / +15s（与 Infuse 一致） |
 | `Shift+←` / `Shift+→` | -60s / +60s |
 | `↑` / `↓` | 音量 ±5%（控制层**隐藏时**第一下只唤醒、不改音量：这两个键同时是唤醒键） |

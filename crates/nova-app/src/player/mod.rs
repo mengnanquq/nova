@@ -684,7 +684,7 @@ pub(crate) struct Player {
     target: Option<Target>,
     /// 待播放的条目 / 资源（取直链期间就有）。
     pending: Option<Target>,
-    /// 最后一次起播目标的快照（条目 + 版本 + 偏好），取直链之前就记下。
+    /// 最后一次起播目标的快照（条目 + 版本），取直链之前就记下。
     ///
     /// 重试必须能用它重跑一遍 [`Player::begin`]：取直链失败的路径会把
     /// `request` / `pending` / `target` 全部清空，没有快照时错误卡上的「重试」
@@ -753,13 +753,13 @@ struct Target {
 
 /// 最后一次起播的参数（重试用）。
 ///
-/// 只存 [`Player::begin`] 需要的三样东西：条目、版本（`None` = 自动挑）与偏好快照
-/// （`None` = 重试用数据库里的当前值，这也是 `begin` 原来的行为）。
+/// 只存 [`Player::begin`] 需要的两样东西：条目与版本（`None` = 自动挑）。
+/// 偏好**不存快照**：重试与重播一样传 `None`，由 `begin` 读数据库里的当前值——
+/// 运行中改过的偏好（续播阈值、轨道语言）不能因为一次重试就退回启动时间的快照。
 #[derive(Clone, Debug)]
 struct StartPoint {
     item_id: String,
     source_id: Option<String>,
-    prefs: Option<UserPreferences>,
 }
 
 impl Player {
@@ -855,7 +855,6 @@ impl Player {
         self.last_start = Some(StartPoint {
             item_id: item_id.to_owned(),
             source_id: source_id.clone(),
-            prefs: prefs.clone(),
         });
         // 换片 / 重播：旧会话的 `Exit` 已在上面用**旧代号**交出去了，这里再递增。
         // 代号 `0` 留给"没有代号"的旧数据，所以从 1 开始。
@@ -1267,8 +1266,14 @@ impl Player {
                     self.dirty = true;
                 }
                 EngineEvent::Ended => {
+                    // 已经停在 `Ended` 时又收到一次播完（引擎重复上报 / 两条信号都到）：
+                    // 不再顺手报一次 `Pause`——位置已经被钉在时长，多报一条只会给上报
+                    // 队列多塞一条同位置的记录，上报文案也从「播完」变成「暂停」。
+                    let already_ended = self.session.state() == SessionState::Ended;
                     self.session.handle(event);
-                    self.report(ProgressTrigger::Pause);
+                    if !already_ended {
+                        self.report(ProgressTrigger::Pause);
+                    }
                     self.dirty = true;
                 }
                 _ => self.session.handle(event),
@@ -1500,7 +1505,9 @@ impl Player {
             self.begin(
                 start.item_id.as_str(),
                 start.source_id.clone(),
-                start.prefs.clone(),
+                // 偏好传 `None`（与 `replay` 一致）：读数据库里的当前值，
+                // 不用起播那一刻的快照。
+                None,
                 &post,
             );
             return;
@@ -2065,33 +2072,6 @@ mod tests {
     /// `with_token` 为 `false` 时**不写令牌**：起播会在 `stream_target` 拿到
     /// [`nova_provider::ProviderError::NoToken`]，`OpenReady` 带着错误回来。
     /// 无令牌的用例用另一个服务器标识，避免蹭到进程内共享凭证存储里别的用例写的令牌。
-    /// 同一份本地数据里的第二个条目：`Played = true`，续播点在 30:00。
-    ///
-    /// 用来验“播完 A 之后起播 B”不能被当成重播 A（否则试播位置会被钉成 0）。
-    fn second_item() -> nova_core::MediaItem {
-        nova_core::MediaItem {
-            id: ItemId::new("item-2"),
-            kind: nova_core::MediaKind::Movie,
-            title: "第二部".to_owned(),
-            sort_title: String::new(),
-            original_title: None,
-            year: None,
-            overview: None,
-            genres: Vec::new(),
-            runtime: Some(Duration::from_secs(5483)),
-            parent_id: None,
-            index_number: None,
-            index_number_end: None,
-            child_count: None,
-            images: nova_core::ImageSet::default(),
-            user_data: nova_core::UserData {
-                played: true,
-                resume_position: Duration::from_secs(1800),
-                ..nova_core::UserData::default()
-            },
-        }
-    }
-
     fn resume_fixture(with_token: bool) -> ResumeFixture {
         init_test_backend();
         let dir = tempfile::tempdir().expect("临时目录");
@@ -2186,6 +2166,33 @@ mod tests {
         let posted: Arc<std::sync::Mutex<Vec<Message>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         (dir, local, player, runtime, posted)
+    }
+
+    /// 同一份本地数据里的第二个条目：`Played = true`，续播点在 30:00。
+    ///
+    /// 用来验“播完 A 之后起播 B”不能被当成重播 A（否则试播位置会被钉成 0）。
+    fn second_item() -> nova_core::MediaItem {
+        nova_core::MediaItem {
+            id: ItemId::new("item-2"),
+            kind: nova_core::MediaKind::Movie,
+            title: "第二部".to_owned(),
+            sort_title: String::new(),
+            original_title: None,
+            year: None,
+            overview: None,
+            genres: Vec::new(),
+            runtime: Some(Duration::from_secs(5483)),
+            parent_id: None,
+            index_number: None,
+            index_number_end: None,
+            child_count: None,
+            images: nova_core::ImageSet::default(),
+            user_data: nova_core::UserData {
+                played: true,
+                resume_position: Duration::from_secs(1800),
+                ..nova_core::UserData::default()
+            },
+        }
     }
 
     fn post_to(posted: &Arc<std::sync::Mutex<Vec<Message>>>) -> Post {
@@ -2605,6 +2612,47 @@ mod tests {
         assert!(ended.ended, "Ended 必须传到视图：{ended:?}");
         assert!(ended.duration.is_none(), "用例前提：时长未知");
         assert!(!ended.playing, "播完后不再算播放中");
+    }
+
+    /// 复审 💡：已经停在 `Ended` 时又收到一次 `Ended`，不能再补报一条 `Pause`。
+    ///
+    /// 重复的播完（引擎两条信号都到 / 重连后重发）会把位置再钉一次时长，并给上报
+    /// 队列多塞一条“暂停”——上报层的指纹去重只是巧合地接下它，语义仍然是错的。
+    #[test]
+    fn duplicate_ended_does_not_report_again() {
+        let (_dir, local, mut player, runtime) = switch_fixture();
+        let recorder = Arc::new(RecordingSink::default());
+        player.progress = sink::Progress::for_test(
+            &local,
+            runtime.handle(),
+            Arc::clone(&recorder) as Arc<dyn ProgressSink>,
+        );
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+        player.target = player.pending.take();
+        player.request = Some(OpenRequest::new("http://127.0.0.1:1/Videos/a/stream"));
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.advance_position(Duration::from_secs(600));
+
+        player.host.borrow_mut().push_event(EngineEvent::Ended);
+        player.pump_events();
+        assert_eq!(player.session.state(), SessionState::Ended);
+        assert_eq!(
+            player.progress.submit_count(),
+            1,
+            "第一次播完要上报一条进度"
+        );
+
+        // 已经停在 Ended 时再来一次：位置不会变、状态不会变，也不该再上报。
+        player.host.borrow_mut().push_event(EngineEvent::Ended);
+        player.pump_events();
+        assert_eq!(player.session.state(), SessionState::Ended);
+        assert_eq!(
+            player.progress.submit_count(),
+            1,
+            "重复的 Ended 不能再补报一条进度"
+        );
     }
 
     /// 记录上报调用的假 sink（换片收尾必须能被观测到）。
