@@ -119,6 +119,13 @@ component CardRow inherits Rectangle {
     // `row-key` 与页面 / Rust 的行号一致：0 = 继续观看、1 = 最近添加、2 + n = 第 n 个库行。
     in property <int> row-key: -1;
     in property <int> scroll-report-seq: 0;
+    // 左右箭头的累计点击次数（`sweep` 判定滚动目标有反应的依据）。
+    //
+    // 箭头走平滑滚动：`clicked` 当刻 `flick.content-x` 还没变（要等动画 tick），
+    // 只看偏移会把箭头误记成 dead。这个计数在同帧递增，随 `scroll-report-seq`
+    // 一起上报；点击处理器没接上（真死）时它不会动。
+    property <int> scroll-requests: 0;
+    callback scroll-activity(int, int);
     // 写回目标（内容坐标，与 `flick.content-x` 同口径）与代次：页面一次写整份
     // 数组后推一档代次。值相同也要执行（平滑滚动没走完时快照值可能就是当前值，
     // 只有代次能触发），所以两个 `changed` 都走同一个 `apply-scroll-target`。
@@ -345,6 +352,7 @@ component CardRow inherits Rectangle {
     // 调试扫描的上行报告：页面推一档序号，本行把自己当前的 `content-x` 报上去。
     changed scroll-report-seq => {
         root.scroll-reported(root.row-key, flick.content-x);
+        root.scroll-activity(root.row-key, root.scroll-requests);
     }
 
     // 调试扫描的下行写回：整份数组由页面一次写好，本行按 `row-key` 取自己那一格。
@@ -594,6 +602,9 @@ component CardRow inherits Rectangle {
 
         arrow-left-area := TouchArea {
             clicked => {
+                // 计数在 `scroll-to` 之前递增：`sweep` 以它为准判定这次点击真的
+                // 交出了滚动（平滑滚动此刻还没改 `content-x`）。
+                root.scroll-requests = root.scroll-requests + 1;
                 // 箭头翻页用 Flickable 内置的平滑滚动（`ScrollBehavior.smooth`）。
                 //
                 // 不直接给 `content-x` 加 `animate`：那会把用户拖拽/滚轮也套上缓动
@@ -633,6 +644,7 @@ component CardRow inherits Rectangle {
 
         arrow-right-area := TouchArea {
             clicked => {
+                root.scroll-requests = root.scroll-requests + 1;
                 flick.scroll-to({ x: -flick.content-x + root.width, y: -flick.content-y }, ScrollBehavior.smooth);
             }
         }
@@ -696,6 +708,8 @@ export component HomePage inherits Rectangle {
     // 用在 `sweep` 里：点过 `*.right` / `*.left` 之后把行滚回原位，
     // 否则同一轮里后面按旧坐标点卡片会点到别的卡（见 docs/debugging.md）。
     callback row-scroll(int, length);
+    // 行箭头点击计数的上行（与 `row-scroll` 同一档报告序号）：只有 `sweep` 用。
+    callback row-scroll-activity(int, int);
     property <int> row-scroll-report-seq: 0;
     // 写回目标（下标 = `row-key`，内容坐标与 `flick.content-x` 同口径）与代次。
     in property <[length]> row-scroll-targets: [];
@@ -1300,6 +1314,9 @@ export component HomePage inherits Rectangle {
                 scroll-reported(row, x) => {
                     root.row-scroll(row, x);
                 }
+                scroll-activity(row, requests) => {
+                    root.row-scroll-activity(row, requests);
+                }
                 targets-visible: root.visible;
                 title: "继续观看";
                 cards: root.data.continue-watching;
@@ -1338,6 +1355,9 @@ export component HomePage inherits Rectangle {
                 scroll-target-gen: root.row-scroll-gen;
                 scroll-reported(row, x) => {
                     root.row-scroll(row, x);
+                }
+                scroll-activity(row, requests) => {
+                    root.row-scroll-activity(row, requests);
                 }
                 targets-visible: root.visible;
                 title: "最近添加";
@@ -1386,6 +1406,9 @@ export component HomePage inherits Rectangle {
                     scroll-target-gen: root.row-scroll-gen;
                     scroll-reported(row, x) => {
                         root.row-scroll(row, x);
+                    }
+                    scroll-activity(row, requests) => {
+                        root.row-scroll-activity(row, requests);
                     }
                     targets-visible: root.visible;
                     title: row-data.title;

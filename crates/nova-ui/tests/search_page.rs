@@ -11,7 +11,7 @@ mod common;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use common::{home_filled, init_backend, library_view, search_view};
+use common::{home_filled, init_backend, library_view, search_empty, search_view};
 use nova_ui::{App, AppWindow, CardView, FocusLayer, KeyCommand, Page, SearchView};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
@@ -346,4 +346,113 @@ fn page_input_hands_arrow_keys_to_the_result_grid() {
         "搜索框 ↑ 应进顶栏（否则搜索页的标签键盘不可达）"
     );
     assert!(!app.ui().get_search_focused(), "进顶栏后输入框不再持有焦点");
+}
+
+/// 空结果时 ↓ 在输入框里是**无操作**（Netflix 同款）：焦点留在输入框，
+/// 不给出额外反馈。`docs/ui-architecture.md` 的搜索页键位表里写明了这条约定。
+#[test]
+fn down_with_no_results_keeps_the_focus_in_the_input() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_empty();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+
+    press(&app, Key::DownArrow);
+    assert!(
+        app.ui().get_search_focused(),
+        "空结果时 ↓ 不能把焦点交给空网格（应留在输入框）"
+    );
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
+}
+
+/// 网格第 N 张 ↑ 回输入框，再 ↓ 必须回到第 N 张（不是第 0 张）。
+///
+/// 与首页「上下移行保持列」同口径：离开网格时记住位置，回来时恢复；
+/// 查询词变了（结果已经换了一批）则回到第 0 张。
+#[test]
+fn grid_up_then_down_returns_to_the_same_card() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    // ↓ 进网格，再行内右移 3 格。
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：焦点在第 4 张卡");
+
+    // 网格首行 ↑ 回输入框。
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+
+    // 再 ↓：回到第 3 张，而不是第 0 张。
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        3,
+        "回到网格时应恢复离开时的位置（不是第 0 张）"
+    );
+
+    // 查询词变了：旧下标作废，回到第 0 张。
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+    let mut other = search_view();
+    other.term = "沙丘：第二部".to_owned();
+    app.set_search(&other);
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "查询词变了就不能再回旧位置（新结果里那个下标没有意义）"
+    );
+}
+
+/// 输入法组字期间 ↑ / ↓ 交给输入法，不交接焦点。
+///
+/// 用 Slint 内部的 `UpdateComposition` 事件模拟一次组字（`TextInput.preedit-text`
+/// 变为非空），然后发方向键：`search.slint` 的 `key-pressed` 读 `preedit-text`，
+/// 非空就 `reject`，焦点必须留在输入框。
+#[test]
+fn down_during_ime_composition_stays_in_the_input() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+
+    // 组字中："沙" 的拼音在输入法里还没提交。
+    let composition = i_slint_core::input::InternalKeyEvent {
+        event_type: i_slint_core::input::KeyEventType::UpdateComposition,
+        preedit_text: "sha".into(),
+        ..Default::default()
+    };
+    app.ui()
+        .window()
+        .dispatch_event(i_slint_core::platform::WindowEvent::internal(composition));
+
+    // 组字期间 ↓（选下一候选）不能把焦点交给结果网格。
+    press(&app, Key::DownArrow);
+    assert!(
+        app.ui().get_search_focused(),
+        "组字期间 ↓ 属于输入法，不能交接焦点"
+    );
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
+
+    press(&app, Key::UpArrow);
+    assert!(
+        app.ui().get_search_focused(),
+        "组字期间 ↑ 属于输入法，不能进顶栏"
+    );
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
 }

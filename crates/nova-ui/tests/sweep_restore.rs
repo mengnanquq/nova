@@ -108,6 +108,53 @@ fn sweep_does_not_rewrite_unchanged_views() {
     );
 }
 
+/// 行箭头不能被 `sweep` 误记成 dead。
+///
+/// 箭头走的是平滑滚动：点击那一刻 `flick.content-x` 还没变（动画要等 tick），
+/// 只看状态摘要（不包含行内横向滚动）就会把箭头记成“点了没反应”。修复后
+/// `sweep` 在恢复前再读一次各行的**箭头点击计数**：点完比点前多就算有反应。
+#[test]
+fn sweep_does_not_mark_row_arrows_dead() {
+    let (app, _home) = home_with_library();
+    app.ui().set_nav_active(true);
+    settle(&app, 120);
+    let right: slint::SharedString = slint::platform::Key::RightArrow.into();
+    let left: slint::SharedString = slint::platform::Key::LeftArrow.into();
+    // 把焦点推到行内第 4 张：行被点亮且横向滚开，左 / 右箭头才会同时出现在
+    // 目标清单里（箭头只在“本行还能往那个方向滚”时登记）。
+    for _ in 0..3 {
+        app.press_key(right.clone()).expect("按右键");
+        settle(&app, 120);
+    }
+    app.press_key(left).expect("按左键");
+    settle(&app, 200);
+    assert!(
+        app.target("home.row.continue.left").is_some()
+            && app.target("home.row.continue.right").is_some(),
+        "前提：继续观看行的左右箭头都在清单里"
+    );
+
+    let report = app.sweep();
+    assert!(!report.aborted, "首页扫描不该中途收尾");
+    let arrows: Vec<&str> = report
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .filter(|id| id.ends_with(".left") || id.ends_with(".right"))
+        .collect();
+    assert!(!arrows.is_empty(), "前提：扫描清单里有行箭头");
+    let dead: Vec<&str> = report
+        .dead()
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .filter(|id| id.ends_with(".left") || id.ends_with(".right"))
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "行箭头点击会启动平滑滚动，不能在 sweep 里被记成 dead：{dead:?}"
+    );
+}
+
 /// 扫描前后各行的行内横向滚动位置必须一致。
 ///
 /// 扫描会真的点 `home.row.*.right` / `*.left`：这一行被滚走之后不写回，页面就

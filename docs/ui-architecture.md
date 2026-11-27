@@ -114,10 +114,20 @@ pub struct Navigator { /* 栈 + back() */ }
   （`on_search_retry`）再发一次同样的查询。
 
 键位（与下文「键盘 / 遥控器导航」的键位表同一条实现）：输入框里 `↓` 把焦点交给结果
-网格第一张卡（`focus_search_grid`；`.slint` 侧识别到方向键后先 `clear-focus()` +
-`search-blur()`，再把意图回调上来）；网格**首行**再按 `↑` 回到页内输入框（`move_up` 的
-`Page::Search` 分支，`focus_search_input`）；输入框里 `↑` 进顶栏（`focus_search_navbar`，
-标签仍键盘可达）；`Enter` 提交，`Esc` 清空查询并回首页。
+网格（`focus_search_grid`；`.slint` 侧识别到方向键后先 `clear-focus()` +
+`search-blur()`，再把意图回调上来）。焦点落点与首页「保持列」同口径：优先回到**上次
+离开网格时那张卡**（`State::search_return` 记住 `(查询词, 下标)`）；查询词变了（结果已经
+换了一批）就回第 0 张；**结果为空时 `↓` 不移动焦点**——留在输入框，不额外反馈
+（Netflix 同款行为，`search_page.rs` 有回归用例钉住）。网格**首行**再按 `↑` 回到页内输入框
+（`move_up` 的 `Page::Search` 分支，`focus_search_input`）并记下离开时的位置；输入框里
+`↑` 进顶栏（`focus_search_navbar`，标签仍键盘可达）；`Enter` 提交，`Esc` 清空查询并回首页。
+
+**输入法组字（已知限制，推测 / 未验证）**：组字期间 `↑` / `↓` 应该属于输入法
+（候选上下移），`search.slint` 在 `TextInput.key-pressed` 里读 Slint 暴露的预编辑状态
+`TextInput.preedit-text`（`i-slint-core` 的 `builtin_elements.rs` 里声明为内部、未文档化
+属性），非空就 `reject`、不交接焦点。这条只做了无头模拟（`UpdateComposition` 事件）
+验证；真实输入法（ibus / fcitx）在 X11 / Wayland 下是否把方向键交给应用、
+`preedit-text` 是否在同帧可读，**未做真机验证**。
 
 网格几何只有一份：`ui/poster_grid.slint`（媒体库与搜索页共用 6 列 / `content-gutter` /
 `card-gap` / 5:7 卡 / `CardZoom` 覆盖层）。改列数或卡宽只改这一个文件。
@@ -234,8 +244,9 @@ export struct Target {
 | `Esc` / `Backspace` | 在 chrome 层（顶栏 / hero）**只回内容层**，不返回上一页；在内容层返回上一级（栈空时无动作） |
 | `Ctrl+F` | 聚焦搜索框（首页/媒体库是顶栏胶囊，搜索页是页内大搜索框） |
 | 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
-| 搜索页 `↓`（输入框里） | 有结果时把焦点交给**结果网格第一张卡**（`R7-D1`：输入框不能把方向键吞掉） |
+| 搜索页 `↓`（输入框里） | 有结果时把焦点交给**结果网格**（`R7-D1`：输入框不能把方向键吞掉）；优先回到上次离开网格时那张卡，查询词变了回第 0 张；**结果为空时留在输入框**（无操作，不额外反馈） |
 | 搜索页 `↑`（输入框里） | 进顶栏（标签仍键盘可达；没结果时也一样） |
+| 搜索页 `↑` / `↓`（输入法组字中） | 交给输入法（候选上下移），不交接焦点：`.slint` 读 `TextInput.preedit-text` 判断组字中；**推测 / 未做真机输入法验证** |
 | 搜索页 `Esc` | 清空查询并回首页 |
 
 详情页没有顶栏（页内就是 hero + 按钮行），它的按钮与版本行本来就在内容层的扁平焦点

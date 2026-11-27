@@ -253,9 +253,19 @@ export component SearchPage inherits Rectangle {
                     root.search-blur();
                     return accept;
                 }
+                // 输入法组字期间：↑ / ↓ 属于输入法（候选上下移 / 组字光标），
+                // **不交接焦点**。`preedit-text` 是 Slint 暴露的预编辑状态
+                // （`TextInput` 的内部、未文档化属性，见 i-slint-core 的
+                // `builtin_elements.rs`）；非空 = 正在组字。这里 return reject，
+                // 把键还给 TextInput / 上层输入法处理。
+                if ((event.text == Key.UpArrow || event.text == Key.DownArrow)
+                    && query.preedit-text != "") {
+                    return reject;
+                }
                 // ↓：有结果时进结果网格（R7-D1）。以前它被 TextInput 当编辑键
                 // 吃掉，用户必须 Tab / Esc 手动释放焦点才能用方向键——
                 // 而进入搜索页时输入框本来就拿着焦点，网格等于完全不可达。
+                // 结果为空时焦点留在输入框（Netflix 同款：不需要额外反馈）。
                 if (event.text == Key.DownArrow) {
                     if (root.data.cards.length > 0) {
                         query.clear-focus();

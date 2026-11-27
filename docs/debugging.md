@@ -39,8 +39,8 @@ printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 | `{"cmd":"type","text":"沙丘"}` | 逐字符输入：每个字符作为按键事件直接送给**当前焦点**，不预点击（无输入目标的页面也不会落空） |
 | `{"cmd":"type","text":"沙丘","target":"search.input"}` | 同上，但先点一下 `target`（输入框不在当前焦点上时用；坐标按 `targets` 的最新登记） |
 | `{"cmd":"wait","ms":400}` | 在 UI 线程上**不阻塞**地等一段时间（动画 / 异步加载结算）|
-| `{"cmd":"sweep"}` | 对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化 |
-| `{"cmd":"dead"}` | `sweep` 的过滤版：只返回"点击后状态没有任何变化"的目标 |
+| `{"cmd":"sweep"}` | 对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化（行箭头另看点击计数，见下文） |
+| `{"cmd":"dead"}` | `sweep` 的过滤版：只返回"点击后状态没有任何变化"的目标（行箭头同上） |
 | `{"cmd":"quit"}` | 退出 |
 
 ### 目标清单长什么样
@@ -272,7 +272,9 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      会换库（栈顶被替换）、点 `search.clear` 会清空查询词并回首页，这两类点击现在都能
      回到被扫描的页面（R8-C2；以前 `library.nav.tab.*` / `search.clear` 之后
      `restored:false`，后半清单根本没扫到）。视图模型**只在真的变了时**才写回：
-     否则每个目标都会重建一次网格、清掉图片窗口、换库时还会把滚动归零；
+     否则每个目标都会重建一次网格、清掉图片窗口、换库时还会把滚动归零。恢复完会把
+     本层的搜索结果镜像用 `App::search_view()` 同步回填，否则点过 `search.clear` 之后
+     扫描结束明明回到了搜索页，`view.search` 摘要还是 `null`；
    - 首页各行的**行内横向滚动**（`CardRow.flick.content-x`）也是每轮写回的：它是
      Slint 的局部状态，`sweep` 点 `home.row.*.left` / `*.right` 会把它滚走，不滚回原位
      后面按扫描开始时的坐标点同一行的卡片就会点到**别的卡**。上行是
@@ -280,7 +282,12 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      `home-row-scroll-targets` 数组属性一次写整份快照、再推一档 `home-row-scroll-gen`
      代次，每行按 `row-key` 取自己那一格执行 `ScrollBehavior.instant`（顺带停掉进行中
      的平滑滚动）。代次让“目标值与当前值相同、但动画还没走完”的情况也能写回；整轮
-     恢复最多 flush 一次，不再逐行 flush（也不再依赖 `changed` 的合并语义）；
+     恢复最多 flush 一次，不再逐行 flush（也不再依赖 `changed` 的合并语义）。
+   - 行箭头（`home.row.*.left` / `*.right`）走平滑滚动：点击那一刻 `flick.content-x`
+     还没变（动画要等 tick），所以判定它们是否 dead 时看的是**箭头点击计数**
+     （`CardRow.scroll-requests`，在箭头的 `clicked` 处理器里同帧 +1，随
+     `home-row-scroll-activity` 上报），而不是恢复后的滚动偏移；计数器点完比点前多 =
+     箭头真的交出了滚动请求，反之为 dead（回调断掉的那种真死）；
    - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
      恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
 

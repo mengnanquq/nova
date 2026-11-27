@@ -301,6 +301,11 @@ struct State {
     layer: FocusLayer,
     nav_focus: usize,
     hero_focus: usize,
+    // 离开搜索网格时的焦点位置：`(查询词, 扁平下标)`。
+    //
+    // 网格首行 ↑ 回页内输入框后再按 ↓，应该回到原来那张卡（与首页「保持列」一致），
+    // 而不是第 0 张。查询词变了（结果已经换了一批）就丢弃记忆、回 0。
+    search_return: Option<(String, usize)>,
     home: HomeView,
     library: LibraryView,
     detail: DetailView,
@@ -322,6 +327,12 @@ struct State {
     // 它完全是 Slint 的局部状态：Rust 只能让各行主动上报（`home-row-scroll` 回调），
     // `sweep` 开扫前呼一次把它们快照下来，每点完一项再整份写回去（数组属性）。
     home_row_scrolls: BTreeMap<i32, f32>,
+    // 首页各行左右箭头的**点击计数**（行号 → 累计次数）。
+    //
+    // 行箭头走平滑滚动，点击那一刻 `flick.content-x` 还没变（要等动画 tick），
+    // 只比较偏移会把箭头误记成 dead；计数器在箭头的 `clicked` 处理器里同帧递增，
+    // `sweep` 用它判断这次点击是否真的交出了滚动请求（见 [`HomeRowSnapshot`]）。
+    home_row_scroll_activity: BTreeMap<i32, i32>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
     add_server: AddServerView,
@@ -336,6 +347,7 @@ impl Default for State {
             layer: FocusLayer::Content,
             nav_focus: 0,
             hero_focus: 0,
+            search_return: None,
             home: HomeView::new(),
             library: LibraryView::default(),
             detail: DetailView::default(),
@@ -347,6 +359,7 @@ impl Default for State {
             last_library_images: Vec::new(),
             last_search_images: Vec::new(),
             home_row_scrolls: BTreeMap::new(),
+            home_row_scroll_activity: BTreeMap::new(),
             images: Rc::new(RefCell::new(ImageStore::new())),
             add_server: AddServerView::new(),
             callbacks: Callbacks::default(),
@@ -391,6 +404,9 @@ pub struct SweepEntry {
     /// 界面上的文字。
     pub label: String,
     /// 点击前后状态摘要是否不同。
+    ///
+    /// 行箭头（`home.row.*.left` / `*.right`）是例外：平滑滚动在点击那一刻还没改
+    /// 滚动偏移，所以对它们还要看箭头的点击计数（见 [`HomeRowSnapshot`]）。
     pub changed: bool,
     /// 点击后是否成功把应用恢复原状（页面 / 路由 / 对话框）。
     pub restored: bool,
@@ -423,6 +439,24 @@ struct DialogSnapshot {
     address: String,
     user: String,
     password: String,
+}
+
+/// 一次 `sweep` 的首页行内横向状态。
+#[derive(Default)]
+struct HomeRowSnapshot {
+    /// `(行号, flick.content-x)`，恢复时整份写回。
+    offsets: Vec<(i32, f32)>,
+    /// 行号 → 左右箭头的累计点击次数。
+    ///
+    /// 箭头走的是平滑滚动：点击那一刻 `flick.content-x` 还是旧值（动画要等 tick），
+    /// 所以 sweep 判定 dead 不能只看偏移。这个计数在 `CardRow` 的箭头 `clicked`
+    /// 处理器里**同帧**递增，"点完比点前多"就说明这次点击真的交出了滚动请求。
+    activity: BTreeMap<i32, i32>,
+}
+
+/// 目标 id 是不是首页行的左右滚动箭头（`home.row.*.left` / `*.right`）。
+fn is_row_scroll_target(id: &str) -> bool {
+    id.ends_with(".left") || id.ends_with(".right")
 }
 
 /// 扫描开始时的页面视图快照（体检 R8-C2）。
@@ -728,14 +762,17 @@ impl App {
             search: self.state.borrow().search.clone(),
             search_text: self.search_text(),
         };
-        // 首页行内横向滚动是 Slint 的局部状态（`CardRow.flick.content-x`）：先让
-        // 各行把当前值报上来。点过 `*.right` / `*.left` 之后按旧坐标点同一行的卡片
-        // 会点到别的卡，所以每轮恢复都要把它写回去（见 `restore_after_click`）。
-        let row_scrolls = if page == Page::Home {
-            self.snapshot_home_row_scrolls()
+        // 首页行内横向滚动 / 箭头点击计数是 Slint 的局部状态
+        // （`CardRow.flick.content-x`）：先让各行把当前值报上来。点过
+        // `*.right` / `*.left` 之后按旧坐标点同一行的卡片会点到别的卡，
+        // 所以每轮恢复都要把偏移写回去（见 `restore_after_click`）。
+        let rows = if page == Page::Home {
+            self.snapshot_home_rows()
         } else {
-            Vec::new()
+            HomeRowSnapshot::default()
         };
+        // 箭头点击计数的基线：点完重新读一次，和它比较就知道箭头有没有交出滚动。
+        let mut activity = rows.activity.clone();
         let targets = self.targets();
         let mut entries = Vec::new();
         let mut aborted = false;
@@ -756,9 +793,17 @@ impl App {
                 continue;
             }
             let after = self.state_digest();
-            let changed = before != after;
+            // 行箭头：平滑滚动在点击那一刻还没改 `content-x`，用点击计数补上"这次
+            // 点击真的交了滚动请求"。只在恢复**之前**读（恢复会停掉动画、写回原位）。
+            let mut scroll_clicked = false;
+            if page == Page::Home && is_row_scroll_target(&target.id) {
+                let after_rows = self.snapshot_home_rows();
+                scroll_clicked = after_rows.activity != activity;
+                activity = after_rows.activity;
+            }
+            let changed = before != after || scroll_clicked;
             let restored =
-                self.restore_after_click(page, &route, dialog.as_ref(), &views, &row_scrolls);
+                self.restore_after_click(page, &route, dialog.as_ref(), &views, &rows.offsets);
             entries.push(SweepEntry {
                 id: target.id.clone(),
                 kind: target.kind.clone(),
@@ -882,21 +927,29 @@ impl App {
         &self.current_route() == route || page == Page::Player
     }
 
-    /// 读一次首页各行的行内横向滚动偏移（行号, `flick.content-x`）。
+    /// 读一次首页各行的行内横向状态（偏移 + 箭头点击计数）。
     ///
     /// 行是 `for` 重复元素，Rust 拿不到它们的 `flick`：让各行自己报上来
-    /// （`home-row-scroll` 回调 → `State::home_row_scrolls`），`ensure_tree_instantiated`
-    /// 负责把这次属性写入触发的 `changed` 处理器当场跑完（与 `refresh_targets` 同一机制）。
-    fn snapshot_home_row_scrolls(&self) -> Vec<(i32, f32)> {
-        self.state.borrow_mut().home_row_scrolls.clear();
+    /// （`home-row-scroll` / `home-row-scroll-activity` 回调 → `State` 里的两张表），
+    /// `ensure_tree_instantiated` 负责把这次属性写入触发的 `changed` 处理器当场跑完
+    /// （与 `refresh_targets` 同一机制）。
+    fn snapshot_home_rows(&self) -> HomeRowSnapshot {
+        {
+            let mut state = self.state.borrow_mut();
+            state.home_row_scrolls.clear();
+            state.home_row_scroll_activity.clear();
+        }
         self.ui.invoke_report_home_row_scrolls();
         self.instantiate_items();
-        self.state
-            .borrow()
-            .home_row_scrolls
-            .iter()
-            .map(|(row, x)| (*row, *x))
-            .collect()
+        let state = self.state.borrow();
+        HomeRowSnapshot {
+            offsets: state
+                .home_row_scrolls
+                .iter()
+                .map(|(row, x)| (*row, *x))
+                .collect(),
+            activity: state.home_row_scroll_activity.clone(),
+        }
     }
 
     /// 把首页各行滚回快照位置。
@@ -1641,10 +1694,21 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     }
     {
         // 首页各行的行内横向滚动（`CardRow.flick.content-x`）：只有 `sweep` 会
-        // 要求上报（`App::snapshot_home_row_scrolls`），存下来供写回用。
+        // 要求上报（`App::snapshot_home_rows`），存下来供写回用。
         let state = state.clone();
         ui.on_home_row_scroll(move |row, x| {
             state.borrow_mut().home_row_scrolls.insert(row, x);
+        });
+    }
+    {
+        // 首页各行左右箭头的点击计数：`sweep` 用它判定"滚动目标真的交出滚动"
+        // （平滑滚动点击当刻还没改 `content-x`）；与偏移走同一条上报通道。
+        let state = state.clone();
+        ui.on_home_row_scroll_activity(move |row, requests| {
+            state
+                .borrow_mut()
+                .home_row_scroll_activity
+                .insert(row, requests);
         });
     }
     {
@@ -2509,6 +2573,12 @@ fn move_up(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
     if page == Page::Search {
         // 搜索页首行 ↑：回到页内大搜索框（R7-D1）。搜索框里再按 ↑ 才进顶栏
         // （见 `focus_search_navbar`），所以标签仍然键盘可达。
+        //
+        // 离开网格前记住位置：回到输入框后按 ↓ 要回到同一张卡（与首页
+        // 「保持列」一致），而不是第 0 张。查询词变了就作废（见 `focus_search_grid`）。
+        let index = current_focus(ui, state, page);
+        let term = state.borrow().search.term.clone();
+        state.borrow_mut().search_return = Some((term, index));
         return focus_search_input(ui);
     }
     if page == Page::Home && hero_available(&state.borrow()) {
@@ -2537,8 +2607,21 @@ fn focus_search_grid(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     if Page::from_index(ui.get_page()) != Page::Search {
         return false;
     }
+    // 从输入框回到网格时恢复上次离开网格的位置（与首页「保持列」同口径）；
+    // 查询词变了（结果已经换了一批）就回 0：旧下标在新结果里没有意义。
+    let index = {
+        let state = state.borrow();
+        match state.search_return.as_ref() {
+            Some((term, index))
+                if *term == state.search.term && *index < state.search.cards.len() =>
+            {
+                *index
+            }
+            _ => 0,
+        }
+    };
     set_focus_layer(ui, state, FocusLayer::Content);
-    set_focus(ui, state, Page::Search, 0);
+    set_focus(ui, state, Page::Search, index);
     // 键盘已开始导航：网格的放大指示生效（与全局按键处理器同一口径）。
     ui.set_nav_active(true);
     scroll_focus_into_view(ui, state, Page::Search);

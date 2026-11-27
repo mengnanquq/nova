@@ -224,6 +224,9 @@ export component AppWindow inherits Window {
     // （见 home.slint / docs/debugging.md）。
     in-out property <[length]> home-row-scroll-targets: [];
     in-out property <int> home-row-scroll-gen: 0;
+    // 首页行左右箭头的点击计数上行（`sweep` 判定滚动目标有反应的依据，见 home.slint
+    // 的 `scroll-requests` 与 docs/debugging.md）。
+    callback home-row-scroll-activity(int, int);
 
     // 回调只把事件送出去，业务判断留在 Rust。
     callback open-item(string);
@@ -473,6 +476,9 @@ export component AppWindow inherits Window {
                 }
                 row-scroll(row, x) => {
                     root.home-row-scroll(row, x);
+                }
+                row-scroll-activity(row, requests) => {
+                    root.home-row-scroll-activity(row, requests);
                 }
                 open-item(id) => {
                     root.focus-global();
