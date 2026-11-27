@@ -157,3 +157,47 @@ async fn replayed_item_keeps_the_old_play_session_id_on_stop() {
         "没有标识时退回条目上最近一次的会话标识"
     );
 }
+
+/// 起播那次 `PlaybackInfo` 的标识必须与资源**出自同一个响应**。
+///
+/// 抓到的历史问题：先 `sources()`、再 `latest_play_session_id()`，两次调用之间如果插进
+/// 一次详情页刷新，本会话拿到的就是那次刷新的标识。`sources_with_session()` 把两者一次
+/// 带回，这里断言它给的是**自己这次**响应的标识，并且条目上的"最近一次"照样会被后续
+/// `PlaybackInfo` 覆盖（兜底值会漂，已经拿到手的那一份不会）。
+#[tokio::test]
+async fn sources_with_session_returns_the_id_of_the_same_response() {
+    let server = MockServer::start().await;
+    let store = Arc::new(MemoryStore::new());
+    let provider = provider(&server, Flavor::Jellyfin, Arc::clone(&store));
+
+    common::mount_login(&server, Flavor::Jellyfin).await;
+    provider
+        .authenticate("tester", &SecretString::new("correct horse"))
+        .await
+        .expect("登录应当成功");
+
+    Mock::given(method("GET"))
+        .and(path(format!("/Items/{ITEM_ID}/PlaybackInfo")))
+        .respond_with(RotatingSessions::new(&["sess-start", "sess-detail"]))
+        .mount(&server)
+        .await;
+
+    let item = ItemId::new(ITEM_ID);
+    let playback = provider
+        .sources_with_session(&item)
+        .await
+        .expect("起播那次 PlaybackInfo");
+    assert!(!playback.sources.is_empty(), "资源要与标识一起带回");
+    assert_eq!(
+        playback.play_session_id.as_deref(),
+        Some("sess-start"),
+        "本会话的标识必须取自这一次响应，而不是事后再查“最近一次”"
+    );
+
+    provider.sources(&item).await.expect("播放中的详情刷新");
+    assert_eq!(
+        provider.latest_play_session_id(&item).as_deref(),
+        Some("sess-detail"),
+        "用例前提：后面的 PlaybackInfo 会覆盖条目上的记录"
+    );
+}

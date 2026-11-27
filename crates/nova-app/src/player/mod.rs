@@ -1668,9 +1668,11 @@ impl Player {
     /// 为什么必须做：进度是**跨进程、跨设备**的状态，服务端才是事实来源。只读本地缓存会出现
     /// "上次播到 45s，这次从 0 开始"，以及"服务端已经标记看完，本地还显示继续观看"。
     ///
-    /// 第三个返回值是**本会话**的 `PlaySessionId`：这一轮 `PlaybackInfo` 成功返回后，
-    /// 它就是 provider 记下的"条目最近一次"。只在这一轮成功时才取——失败 / 超时时
-    /// 条目上的记录可能是**上一次会话**的旧标识，拿它顶替会让新会话的 `stop` 带旧标识。
+    /// 第三个返回值是**本会话**的 `PlaySessionId`：它和资源出自**同一次**
+    /// `PlaybackInfo`（`MediaProvider::sources_with_session`），所以中间插不进别的
+    /// `PlaybackInfo`——旧实现是「先 `sources()`、再查"最近一次"」，播放期间的详情页
+    /// 刷新恰好夹在两次调用之间时，本会话就会拿到别人的标识。
+    /// 失败 / 超时才没有标识：拿条目上的旧记录顶替会让本会话的 `stop` 带旧标识。
     fn refresh_before_play(
         &self,
         item: nova_core::MediaItem,
@@ -1689,11 +1691,13 @@ impl Player {
             // 2 秒超时会把首帧推到 2.001s；400ms 足够覆盖局域网，WAN 超时就退回缓存。
             match tokio::time::timeout(std::time::Duration::from_millis(400), async {
                 let fresh = provider.item(&id).await?;
-                let sources = provider.sources(&id).await?;
-                // `sources()`（`PlaybackInfo`）刚把**本会话**的标识记进 provider，
-                // 紧跟着取一次，趁条目上的记录还没被别人（详情页刷新）覆盖。
-                let session = provider.latest_play_session_id(&id);
-                Ok::<_, nova_provider::ProviderError>((fresh, sources, session))
+                // 同一个响应里带回资源与会话标识：不再「先 `sources()`、再查最近一次」。
+                let playback = provider.sources_with_session(&id).await?;
+                Ok::<_, nova_provider::ProviderError>((
+                    fresh,
+                    playback.sources,
+                    playback.play_session_id,
+                ))
             })
             .await
             {
@@ -2952,6 +2956,12 @@ mod tests {
         served: std::sync::Mutex<Vec<String>>,
         /// 当前"条目最近一次"的标识：真 provider 的 `play_sessions` 也是这样被覆盖的。
         latest: std::sync::Mutex<Option<String>>,
+        /// 起播那次 `PlaybackInfo` 之后、player 用上标识之前，再插一次「详情页刷新」：
+        /// 条目上的“最近一次”于是变成**别人的**标识（旧实现「先 `sources()`、再查最近一次」
+        /// 就会拿到它）。
+        interleaved: bool,
+        /// `item()` 永不返回：模拟起播前刷新撞上 400ms 上限。
+        stalling: bool,
     }
 
     impl SessionProvider {
@@ -2965,7 +2975,56 @@ mod tests {
                 ),
                 served: std::sync::Mutex::new(Vec::new()),
                 latest: std::sync::Mutex::new(None),
+                interleaved: false,
+                stalling: false,
             }
+        }
+
+        /// 用例：在起播那次 `PlaybackInfo` 之后插一次别人的 `PlaybackInfo`。
+        fn interleaved(mut self) -> Self {
+            self.interleaved = true;
+            self
+        }
+
+        /// 用例：起播前刷新卡住（走到 400ms 超时分支）。
+        fn stalling(mut self) -> Self {
+            self.stalling = true;
+            self
+        }
+
+        /// 用例：条目上已经有**上一个会话**的标识（超时分支只会查到它）。
+        fn with_latest(self, session: &str) -> Self {
+            match self.latest.lock() {
+                Ok(mut latest) => *latest = Some(session.to_owned()),
+                Err(poisoned) => *poisoned.into_inner() = Some(session.to_owned()),
+            }
+            self
+        }
+
+        /// 取下一个标识，并把它记成条目上的"最近一次"（真 provider 的行为）。
+        fn take_session(&self) -> Option<String> {
+            let next = match self.sessions.lock() {
+                Ok(mut queue) => queue.pop_front(),
+                Err(poisoned) => poisoned.into_inner().pop_front(),
+            };
+            if let Some(session) = &next {
+                match self.served.lock() {
+                    Ok(mut served) => served.push(session.clone()),
+                    Err(poisoned) => poisoned.into_inner().push(session.clone()),
+                }
+                match self.latest.lock() {
+                    Ok(mut latest) => *latest = Some(session.clone()),
+                    Err(poisoned) => *poisoned.into_inner() = Some(session.clone()),
+                }
+            }
+            next
+        }
+
+        fn sources_for(&self, id: &ItemId) -> Vec<nova_core::MediaSource> {
+            let mut source = source("src-1");
+            source.item_id = id.clone();
+            source.runtime = Some(Duration::from_secs(5400));
+            vec![source]
         }
 
         fn served(&self) -> Vec<String> {
@@ -3048,6 +3107,10 @@ mod tests {
             &self,
             id: &ItemId,
         ) -> Result<nova_core::MediaItem, nova_provider::ProviderError> {
+            if self.stalling {
+                // 起播前刷新有 400ms 上限：挂住就能稳定走到超时分支。
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
             Ok(session_item(id))
         }
 
@@ -3064,24 +3127,30 @@ mod tests {
         ) -> Result<Vec<nova_core::MediaSource>, nova_provider::ProviderError> {
             // 真实服务端行为：每取一次 `PlaybackInfo` 就给一个新标识，并把它记成条目上
             // 的"最近一次"（旧会话的标识就此被覆盖，正是审查指出的那个问题）。
-            let next = match self.sessions.lock() {
-                Ok(mut queue) => queue.pop_front(),
-                Err(poisoned) => poisoned.into_inner().pop_front(),
-            };
-            if let Some(session) = next {
-                match self.served.lock() {
-                    Ok(mut served) => served.push(session.clone()),
-                    Err(poisoned) => poisoned.into_inner().push(session.clone()),
-                }
-                match self.latest.lock() {
-                    Ok(mut latest) => *latest = Some(session),
-                    Err(poisoned) => *poisoned.into_inner() = Some(session),
-                }
+            self.take_session();
+            if self.interleaved {
+                // 另一次 `PlaybackInfo` 紧跟着完成：调用方接下来去查“最近一次”时，
+                // 条目上的记录已经是别人的标识了。
+                self.take_session();
             }
-            let mut source = source("src-1");
-            source.item_id = id.clone();
-            source.runtime = Some(Duration::from_secs(5400));
-            Ok(vec![source])
+            Ok(self.sources_for(id))
+        }
+
+        async fn sources_with_session(
+            &self,
+            id: &ItemId,
+        ) -> Result<nova_provider::PlaybackSources, nova_provider::ProviderError> {
+            // 真实现的原子版本：资源与标识出自同一次 `PlaybackInfo`。
+            let play_session_id = self.take_session();
+            if self.interleaved {
+                // 响应回来了，但 player 用上标识之前又插了一次 `PlaybackInfo`
+                // （详情页刷新 / 重播）：条目上的“最近一次”变成别人的标识。
+                self.take_session();
+            }
+            Ok(nova_provider::PlaybackSources {
+                sources: self.sources_for(id),
+                play_session_id,
+            })
         }
 
         fn latest_play_session_id(&self, _item: &ItemId) -> Option<String> {
@@ -3238,6 +3307,109 @@ mod tests {
                 Some("sess-new".to_owned()),
             ],
             "每条进度都带自己会话的标识：详情刷新（sess-detail）不能污染任何一条"
+        );
+    }
+
+    /// 起播那次 `PlaybackInfo` 是**原子**的：资源与会话标识来自同一个响应。
+    ///
+    /// 以前 player 先 `sources()`、再 `latest_play_session_id()`：两次调用之间如果插进
+    /// 一次详情页刷新，本会话就会拿到**别人的**标识（那次刷新的），退出时关错会话。
+    /// 现在 `sources_with_session()` 把标识随资源一起带回，player 直接用这个值。
+    #[test]
+    fn startup_snapshot_uses_the_same_playback_info_response() {
+        let (_dir, _local, mut player, runtime) = switch_fixture();
+        // 起播那次 `PlaybackInfo` 给 `sess-own`；紧接着又插了一次（`sess-detail`）。
+        let provider = Arc::new(SessionProvider::new(&["sess-own", "sess-detail"]).interleaved());
+        player.provider = Some(Arc::clone(&provider) as Arc<dyn nova_provider::MediaProvider>);
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+
+        assert_eq!(
+            nova_provider::MediaProvider::latest_play_session_id(
+                provider.as_ref(),
+                &ItemId::new("a")
+            )
+            .as_deref(),
+            Some("sess-detail"),
+            "用例前提：插进来的那次 PlaybackInfo 把条目上的记录覆盖了"
+        );
+        assert_eq!(
+            player.play_session_id.as_deref(),
+            Some("sess-own"),
+            "本会话的标识必须取自起播那次响应，不能回头查“最近一次”"
+        );
+
+        // 老做法（`sources()` + `latest_play_session_id()`）会拿到插进来的那个：
+        // 同一个前提在另一份假 provider 上重放一遍，锁住“为什么不能再分两步查”。
+        let legacy = SessionProvider::new(&["sess-own", "sess-detail"]).interleaved();
+        runtime
+            .block_on(nova_provider::MediaProvider::sources(
+                &legacy,
+                &ItemId::new("a"),
+            ))
+            .expect("取资源");
+        assert_eq!(
+            nova_provider::MediaProvider::latest_play_session_id(&legacy, &ItemId::new("a"))
+                .as_deref(),
+            Some("sess-detail"),
+            "分两步查时拿到的就是别人的标识——正是这次要修的"
+        );
+    }
+
+    /// 起播前刷新超时（400ms 上限）→ 本会话没有标识 → 入队时 `stamp` 退回条目上的
+    /// "最近一次"（那里可能是**上一次会话**的旧标识，所以只当兜底）。
+    ///
+    /// 这条降级路径以前没有用例：改动取标识的方式（`sources_with_session`）后，
+    /// 超时分支必须还能把 `None` 交给调用方，而不是把旧标识当成新会话的。
+    #[test]
+    fn startup_refresh_timeout_leaves_the_session_id_empty_and_stamp_falls_back() {
+        let (_dir, local, mut player, runtime) = switch_fixture();
+        // `item()` 挂住：起播前刷新必然撞上 400ms 上限；条目上留着旧会话的标识。
+        let provider = Arc::new(
+            SessionProvider::new(&[])
+                .with_latest("sess-stale")
+                .stalling(),
+        );
+        player.provider = Some(Arc::clone(&provider) as Arc<dyn nova_provider::MediaProvider>);
+        let recorder = Arc::new(RecordingSink::default());
+        player.progress = sink::Progress::for_test_with_provider(
+            &local,
+            runtime.handle(),
+            Arc::clone(&recorder) as Arc<dyn ProgressSink>,
+            Arc::clone(&provider) as Arc<dyn nova_provider::MediaProvider>,
+        );
+
+        let post: Post = Arc::new(|_| {});
+        player.begin("a", None, None, &post);
+        assert!(
+            player.play_session_id.is_none(),
+            "起播前刷新超时：本会话的标识必须是 None，不能拿旧标识顶替"
+        );
+        assert!(
+            provider.served().is_empty(),
+            "用例前提：超时发生在 `PlaybackInfo` 之前，没有取到新标识"
+        );
+
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.advance_position(Duration::from_secs(600));
+        let progress = player.build_progress().expect("出画后可以上报");
+        assert!(
+            progress.play_session_id.is_none(),
+            "player 不能自己编标识出来"
+        );
+        player.report(ProgressTrigger::Seek);
+
+        assert!(
+            wait_until(|| recorder.report_sessions().len() == 1),
+            "上报应当到达假 sink: {:?}",
+            recorder.report_sessions()
+        );
+        assert_eq!(
+            recorder.report_sessions(),
+            [Some("sess-stale".to_owned())],
+            "没有标识时由 `stamp` 退回条目上的“最近一次”（旧会话）"
         );
     }
 

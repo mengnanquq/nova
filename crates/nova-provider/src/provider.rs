@@ -14,6 +14,7 @@
 //!   [`item`](MediaProvider::item)、[`children`](MediaProvider::children)、
 //!   [`image`](MediaProvider::image)。
 //! - **播放**：[`sources`](MediaProvider::sources)、
+//!   [`sources_with_session`](MediaProvider::sources_with_session)、
 //!   [`stream_target`](MediaProvider::stream_target)、
 //!   [`report_progress`](MediaProvider::report_progress)。
 //!
@@ -103,7 +104,32 @@ pub trait MediaProvider: Send + Sync {
     async fn children(&self, id: &ItemId) -> Result<Vec<MediaItem>, ProviderError>;
 
     /// 取条目的可播放资源（同一部片的多个版本各算一个）。
+    ///
+    /// 只要资源时用它；需要**本会话**的服务端会话标识时用
+    /// [`sources_with_session`](Self::sources_with_session)，不要「先调它、再查
+    /// [`latest_play_session_id`](Self::latest_play_session_id)」——那两步之间能插进
+    /// 别的 `PlaybackInfo`。
     async fn sources(&self, id: &ItemId) -> Result<Vec<MediaSource>, ProviderError>;
+
+    /// 取资源，并把**这一次** `PlaybackInfo` 响应自带的 `PlaySessionId` 一并带回。
+    ///
+    /// player 在起播那一刻用这个值快照本会话的标识，随后写进每条
+    /// [`PlaybackProgress::play_session_id`]。和「`sources()` + `latest_play_session_id()`」
+    /// 的区别就在**原子性**：两个值出自同一个响应，中间插不进别的 `PlaybackInfo`
+    /// （播放期间详情页刷新 `sources()`、同一部片重播都会覆盖条目上的“最近一次”，
+    /// 那次覆盖如果正好夹在两次调用之间，本会话就会拿到别人的标识）。
+    ///
+    /// 默认实现退回两次调用：不记会话的实现（测试假 provider、离线方言）行为不变。
+    async fn sources_with_session(
+        &self,
+        id: &ItemId,
+    ) -> Result<crate::types::PlaybackSources, ProviderError> {
+        let sources = self.sources(id).await?;
+        Ok(crate::types::PlaybackSources {
+            sources,
+            play_session_id: self.latest_play_session_id(id),
+        })
+    }
 
     /// 条目**最近一次** `PlaybackInfo` 给出的服务端会话标识（`PlaySessionId`）。
     ///

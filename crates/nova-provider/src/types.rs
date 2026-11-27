@@ -241,6 +241,21 @@ impl ImageRequest {
     }
 }
 
+/// 一次 `PlaybackInfo` 的结果：资源列表 + **这一次**响应自带的会话标识。
+///
+/// 两个字段必须来自**同一个**响应：分开取（先 [`sources`](crate::MediaProvider::sources)
+/// 再 [`latest_play_session_id`](crate::MediaProvider::latest_play_session_id)）不是原子的，
+/// 中间插进来的详情页刷新会把条目上的"最近一次"换成别人的 `PlaySessionId`。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaybackSources {
+    /// 可播放资源（同一部片的多个版本各算一个）。
+    pub sources: Vec<nova_core::MediaSource>,
+    /// 这一次 `PlaybackInfo` 给出的 `PlaySessionId`（`None` = 服务端没给 / 没取到）。
+    ///
+    /// 上报进度时要原样带回，见 [`nova_core::PlaybackProgress::play_session_id`]。
+    pub play_session_id: Option<String>,
+}
+
 /// 一个可播放的直链。
 ///
 /// **地址查询串里带着访问令牌**（播放器只接受一条裸地址，无法附加认证头），

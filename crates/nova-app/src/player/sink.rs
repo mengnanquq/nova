@@ -261,6 +261,20 @@ impl Progress {
         Self::with_sink(local, runtime, sink, None)
     }
 
+    /// 测试：带 provider 的上报句柄。
+    ///
+    /// 生产里 provider 由 [`Progress::start`] 注入（用于 `stamp` 的兜底）；用例要覆盖
+    /// “起播前刷新超时 → 进度没带标识 → `stamp` 盖最近一次”这条降级路径时用它。
+    #[cfg(test)]
+    pub(crate) fn for_test_with_provider(
+        local: &Arc<Local>,
+        runtime: &Handle,
+        sink: Arc<dyn ProgressSink>,
+        provider: Arc<dyn MediaProvider>,
+    ) -> Self {
+        Self::with_sink(local, runtime, sink, Some(provider))
+    }
+
     fn with_sink(
         local: &Arc<Local>,
         runtime: &Handle,

@@ -409,7 +409,10 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 > 把 `keep-open` 改成 `no` 时，播完后的拖动行为**不保证**：媒体已卸载，seek 可能没反应，
 > 也不会再产生第二次 `Ended`。
 
-1. 控制层播放键 / `Enter` / `Space` = 从头重播（新会话、位置 0，见上）；
+1. 控制层播放键 / `Enter` / `Space` = 从头重播（新会话、位置 0，见上）。生产路径由
+   `Player::replay`（走 `begin`：递增会话代号、重取直链）处理；`Session::play` /
+   `toggle_pause` 的 `Ended` 分支（位置回 0、状态转回 `Playing`）只是状态机的**一致性**
+   保障，app 路径到不了那里，不要把它当成起播路径改；
 2. 拖动进度条、`←` / `→`（含 `Shift` 的 ±60s）= 跳到目标位置并**继续播放**：
    `Session::seek` 在 `Ended` 下也生效（位置立刻生效、状态转回 `Playing`），并按
    `ProgressTrigger::Seek` 上报一次进度。引擎这时还停在 EOF（mpv `keep-open`），
@@ -423,13 +426,19 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    同时 seek 还要把“seek 之前产生、seek 之后才被处理到”的 `eof-reached=true` 标成旧观察
    （`EndedGuard::stale_eof`）：主循环**先处理命令再处理事件**，不吞掉它就会在清标记之后
    立刻误报第二次 `Ended`——界面把状态钉成 `Ended`、位置钉到时长（显示「已看完」），
-   引擎其实还在播，这时按 `Enter` 会从 0 重播，位置就丢了。旧观察在 `playback-restart` /
-   `eof-reached=false` / 新的 `end-file` 处失效（即“seek 已生效”或“这是一次新片尾”）。
+   引擎其实还在播，这时按 `Enter` 会从 0 重播，位置就丢了。旧观察在**确认 seek 已生效**、
+   或者**这是一次新片尾**时才失效：`playback-restart` 时读到的 `eof-reached` 已经翻成
+   `false`（`EndedGuard::on_playback_restart(Some(false))`，读不到属性按“还不知道”处理）、
+   `eof-reached=false`、新的 `end-file`。`playback-restart` **本身**不再是无条件证据：
+   `keep-open` 下它与 `eof-reached=false` 的先后由 mpv 决定，restart 之后仍可能排着一条
+   seek 之前产生的 `eof-reached=true`，以前在这里无条件清 `stale_eof` 会把它当成新片尾
+   误报第二次 `Ended`（理论风险，事件乱序）。
    用**累积**是因为片尾后可能连着拖两次：第二次拖时 `reported` 已经是 `false`，覆盖赋值会把
    第一次设下的“吞掉旧观察”清掉，队列里更早的 `eof-reached=true` 又被当成新片尾误报。
    已经停在 `Ended` 时重复收到的 `Ended` 也不再补报一条 `Pause` 进度（`Player::pump_events`）。
    这几条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
-   `two_seeks_after_end_*` / `player::tests::duplicate_ended_does_not_report_again`）。
+   `two_seeks_after_end_*` / `restart_while_eof_is_still_reached_*` /
+   `restart_after_eof_is_cleared_*` / `player::tests::duplicate_ended_does_not_report_again`）。
 
 **已知限制（推测，未验证）**：播完后**直接拖到 100%（`duration`）** 时，`Session::seek`
 把位置 clamp 到时长、状态转回 `Playing`，界面靠引擎再报一次 `Ended` 才会回到「已看完」。
@@ -509,12 +518,14 @@ hero 上那种深色圆钮（`rgba(22,22,22,.7)` + 描边）**不用于播放器
   （`begin`）递增，所以同一部片**重播也是新会话**；`0` 表示"不知道"（旧版本落盘的待发文件、
   测试构造的进度），sink 不会为它补发 `Started`。
 - 服务端的 `PlaySessionId` 绑在**会话**上，不是绑在条目上：`PlaybackInfo` 每取一次都会给一个
-  新标识。player 在起播前那次刷新成功返回的那一刻就把它记进**本会话**
+  新标识。player 在起播前那次刷新成功的那一刻就把它记进**本会话**
   （`Player::play_session_id`），`build_progress_at` 写进每条 `PlaybackProgress::play_session_id`，
-  上报时原样带回。既不能等到发送时按条目查"最近一次"（同一部片重播时，新会话的
-  `PlaybackInfo` 会在旧会话异步发出的 `Exit`/`stop` 之前就把条目上的记录覆盖掉），也不能在
-  入队时去查：同一部片**播放期间**详情页刷新（`Shell::spawn_detail` → `provider.sources()`）
-  同样会覆盖条目上的记录，入队时查到的是第三个标识，`Exit` 照样关错会话。
+  上报时原样带回。标识与资源出自**同一个响应**（`MediaProvider::sources_with_session` 返回
+  `PlaybackSources`）：以前是「先 `sources()`、再查 `latest_play_session_id()`」，两次调用之间
+  能插进一次详情页刷新，本会话就会拿到那次刷新的标识。既不能等到发送时按条目查“最近一次”
+  （同一部片重播时，新会话的 `PlaybackInfo` 会在旧会话异步发出的 `Exit`/`stop` 之前就把条目上的
+  记录覆盖掉），也不能在入队时去查：同一部片**播放期间**详情页刷新（`Shell::spawn_detail` →
+  `provider.sources()`）同样会覆盖条目上的记录，入队时查到的是第三个标识，`Exit` 照样关错会话。
   `sink::Progress::stamp` 只给**没带**标识的进度兜底（旧版本落盘的待发项等）：这时退回
   "按条目查最近一次"（`MediaProvider::latest_play_session_id`）的老行为。
 - 起播前那次刷新有 400ms 上限（`refresh_before_play`）：超时 / 失败时拿不到本会话的标识，
@@ -522,6 +533,7 @@ hero 上那种深色圆钮（`rgba(22,22,22,.7)` + 描边）**不用于播放器
   预期服务端会把这条上报当作无效会话丢弃（这次续播点不准；**推测，未在服务端验证**）。取直链（`stream_target`）只按
   已有资源拼地址、**不再取** `PlaybackInfo`，所以后续拿到直链也补不回标识；要补只能再取一次
   `PlaybackInfo`，而服务端会给一个**新**标识、多出一个会话，所以不补。
+  这条降级路径有单测（`player::tests::startup_refresh_timeout_*`）。
 - 上报节奏：播放中每 10 秒、暂停/切轨/退出时立即、seek 后立即。
 - 上报失败不能阻塞播放：进队列，退避重试，退出时若仍失败要本地落盘并在下次启动补发。
 - 重试队列是跨条目共用的，但压制只针对**同一个会话**（会话代号 + 条目 + 资源）：条目 A 的

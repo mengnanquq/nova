@@ -233,8 +233,13 @@ pub(crate) struct Worker {
 /// `eof-reached=true` 还在事件队列里排着。清零之后才轮到它，就会被当成一次新片尾，
 /// 立刻误报第二次 `Ended`（界面把位置钉到时长、显示“已看完”，引擎其实还在播）。
 /// 所以 seek 时还要记下“旧观察要吞掉”（[`EndedGuard::after_seek`]），直到出现明确证据
-/// 说明 seek 已经生效 / 这是一次新的片尾（`playback-restart`、`eof-reached=false`、
-/// `end-file`）。
+/// 说明 seek 已经生效 / 这是一次新的片尾（`playback-restart` 时 `eof-reached` 已经
+/// 翻成 `false`、`eof-reached=false`、`end-file`）。
+///
+/// `playback-restart` **本身**不是证据：`keep-open` 下它与 `eof-reached` 的先后由 mpv
+/// 决定，restart 之后仍可能排着一条 seek 之前产生的 `eof-reached=true`。所以 restart
+/// 只在这一刻的 `eof-reached` 已经是 `false`（见 `EndedGuard::on_playback_restart` 的参数）
+/// 时才清“旧观察”。
 #[derive(Debug, Default)]
 struct EndedGuard {
     /// 当前这次片尾已经报过（或正在报）：同一次片尾只报一次。
@@ -282,9 +287,19 @@ impl EndedGuard {
         true
     }
 
-    /// mpv 的 `playback-restart`：seek 已经生效，之后到的 `eof-reached` 都是新的观察。
-    fn on_playback_restart(&mut self) {
-        self.stale_eof = false;
+    /// mpv 的 `playback-restart`：`eof_now` 是这一刻读到的 `eof-reached` 属性值。
+    ///
+    /// 只有它已经是 `false`（seek 真的离开了片尾）才能把“旧观察要吞掉”撤掉。属性还停在
+    /// `true` / 读不到（`None`）时**不清**：restart 之后仍可能排着一条 seek 之前产生的
+    /// `eof-reached=true`，清了它就会被当成新片尾、误报第二次 `Ended`（界面把位置钉到
+    /// 时长、显示“已看完”，引擎其实还在播）。
+    ///
+    /// 真到片尾之前 mpv 一定会送来一次 `eof-reached=false`（或新文件的 `end-file`），
+    /// 那两条路径会清掉标记，不会漏报。
+    fn on_playback_restart(&mut self, eof_now: Option<bool>) {
+        if eof_now == Some(false) {
+            self.stale_eof = false;
+        }
     }
 }
 
@@ -464,8 +479,14 @@ impl Worker {
             }
             MpvEvent::VideoReconfig => self.trace_shared("video-reconfig"),
             MpvEvent::PlaybackRestart => {
-                // seek 已经生效：之后到的 `eof-reached` 都是新的观察。
-                self.ended.on_playback_restart();
+                // 不算“seek 已生效”的证据：`eof-reached` 此刻已经翻成 `false` 才算
+                // （详见 [`EndedGuard::on_playback_restart`]）。
+                let eof_now = self
+                    .handle
+                    .get_string("eof-reached")
+                    .as_deref()
+                    .map(|value| value == "yes");
+                self.ended.on_playback_restart(eof_now);
                 self.trace_shared("playback-restart");
                 self.poll_properties();
             }
@@ -904,8 +925,8 @@ mod tests {
 
         // 播完后往回拖：清标记（不依赖 `eof-reached=false`）。
         ended.after_seek();
-        // mpv 的 seek 生效（`playback-restart`）。
-        ended.on_playback_restart();
+        // mpv 的 seek 生效（`playback-restart`），此刻 `eof-reached` 已经是 false。
+        ended.on_playback_restart(Some(false));
         assert!(
             ended.on_eof_observed(true),
             "拖回中段后第二次到片尾必须再报 Ended"
@@ -932,7 +953,7 @@ mod tests {
         );
 
         // seek 生效：旧观察的“丢弃”结束，第二次播到片尾要正常报。
-        ended.on_playback_restart();
+        ended.on_playback_restart(Some(false));
         assert!(ended.on_eof_observed(true), "第二次到片尾必须报 Ended");
     }
 
@@ -956,7 +977,7 @@ mod tests {
         );
 
         // 两次 seek 都生效之后，真的播到片尾仍然要报。
-        ended.on_playback_restart();
+        ended.on_playback_restart(Some(false));
         assert!(ended.on_eof_observed(true), "之后真的到片尾必须报 Ended");
         assert!(!ended.on_eof_observed(true), "同一次片尾只报一次");
     }
@@ -1001,6 +1022,62 @@ mod tests {
             "同一次片尾的 eof-reached 不重复"
         );
         assert!(!ended.on_end_file_eof(), "同一次 end-file 不重复");
+    }
+
+    /// 回归：**旧的** `eof-reached=true` 排在 `playback-restart` **之后**时，restart 不能
+    /// 把“旧观察要吞掉”清掉。
+    ///
+    /// 以前 `on_playback_restart` 无条件 `stale_eof = false`：`keep-open` 下 restart 与
+    /// `eof-reached=false` 的先后由 mpv 决定，那一瞬间 `eof-reached` 还停在 `true`，队列里
+    /// 旧的 `true` 于是被当成一次新片尾，误报第二次 `Ended`。现在只有 restart 时
+    /// `eof-reached` 已经是 `false` 才清；否则等后续的 `eof-reached=false`（或 `end-file`）。
+    #[test]
+    fn restart_while_eof_is_still_reached_keeps_swallowing_the_stale_eof() {
+        let mut ended = EndedGuard::default();
+        assert!(ended.on_eof_observed(true), "第一次到片尾报 Ended");
+
+        // 播完往回拖，mpv 报 `playback-restart`，但 `eof-reached` 这一瞬还是 true
+        // （读不到属性也一样按“还不知道”处理）。
+        ended.after_seek();
+        ended.on_playback_restart(Some(true));
+
+        // 排队的旧观察：不能报。
+        assert!(
+            !ended.on_eof_observed(true),
+            "restart 之后到的旧 eof-reached=true 不能变成第二次 Ended"
+        );
+        // 播放继续，mpv 把属性翻成 false：标记这才清掉。
+        assert!(!ended.on_eof_observed(false));
+        // 真的再播到片尾：要报第二次 Ended（不能因为吞旧观察而漏报）。
+        assert!(ended.on_eof_observed(true), "第二次真的到片尾必须报 Ended");
+        assert!(!ended.on_eof_observed(true), "同一次片尾只报一次");
+
+        // 读不到属性（`None`）时同样保守：先在 restart 之后到的旧观察仍然吞掉。
+        let mut unknown = EndedGuard::default();
+        assert!(unknown.on_eof_observed(true));
+        unknown.after_seek();
+        unknown.on_playback_restart(None);
+        assert!(!unknown.on_eof_observed(true), "不知道就别当成新片尾");
+        assert!(!unknown.on_eof_observed(false));
+        assert!(unknown.on_eof_observed(true), "之后真的到片尾必须报 Ended");
+    }
+
+    /// restart 时 `eof-reached` **已经**是 `false`（seek 真的离开了片尾）：立即清，
+    /// 不必再等一条 `eof-reached=false`，否则第二次播到片尾会漏报。
+    #[test]
+    fn restart_after_eof_is_cleared_drops_the_stale_flag_right_away() {
+        let mut ended = EndedGuard::default();
+        assert!(ended.on_eof_observed(true));
+        ended.after_seek();
+        assert!(
+            !ended.on_eof_observed(true),
+            "seek 之前产生的观察仍然要吞掉"
+        );
+        ended.on_playback_restart(Some(false));
+        assert!(
+            ended.on_eof_observed(true),
+            "restart 时 eof-reached 已是 false：下一次片尾要报"
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ use crate::mapping::{
     map_items, map_library, map_sources, play_method_to_api,
 };
 use crate::provider::MediaProvider;
-use crate::types::{ImageRequest, ItemQuery, Library, Page, StreamTarget};
+use crate::types::{ImageRequest, ItemQuery, Library, Page, PlaybackSources, StreamTarget};
 use crate::{CLIENT_NAME, CLIENT_VERSION};
 
 /// 默认的单次请求超时。
@@ -198,8 +198,9 @@ pub struct Provider {
     /// 每个条目最近一次 `PlaybackInfo` 给出的 `PlaySessionId`。
     ///
     /// 上报进度必须带它，否则服务端把上报当成"无媒体信息的会话"直接忽略（实测）。
-    /// 由 `sources()` 写入；上报时只当作**兼容兜底**：进度里已经带着起播时按会话快照的
-    /// 标识（见 `PlaybackProgress::play_session_id`），这里只给没有标识的进度用。
+    /// 由 [`Provider::playback_info`]（`sources()` / `sources_with_session()` 的共同实现）
+    /// 写入；上报时只当作**兼容兜底**：进度里已经带着起播时按会话快照的标识（见
+    /// `PlaybackProgress::play_session_id`），这里只给没有标识的进度用。
     play_sessions: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
@@ -685,6 +686,66 @@ impl Provider {
         Ok(())
     }
 
+    /// 一次 `PlaybackInfo` 请求：资源 + **这一次**响应自带的会话标识。
+    ///
+    /// [`sources`](MediaProvider::sources) 与
+    /// [`sources_with_session`](MediaProvider::sources_with_session) 共用这一条路径，
+    /// 区别只在返回什么：前者丢掉标识（并把它记进条目映射），后者把标识交给 player
+    /// 快照进本会话。两者必须取自**同一个**响应，不能拼成两次调用。
+    async fn playback_info(&self, id: &ItemId) -> Result<PlaybackSources, ProviderError> {
+        let user_id = self.user_id().await?;
+        let url = self.url(
+            &["Items", id.as_str(), "PlaybackInfo"],
+            &[("UserId", user_id.as_str())],
+        )?;
+        let header = self.auth_header(Some(&self.token()?))?;
+        let name = self.flavor.auth_header_name();
+        // 真实服务端行为：容器条目（`Folder`、剧集、季）调 `PlaybackInfo` 直接回
+        // `400`（部分版本回 `404`），而不是 `200` + 空数组。“没有媒体源”是个正常
+        // 结果，当成错误会让界面把一个空库/剧集母页渲染成错误页。
+        // 其它 4xx（尤其 401 / 403）仍然报错。
+        let response = self
+            .send_accepting(
+                || self.http.get(url.clone()).header(name, header.clone()),
+                true,
+                &[StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND],
+            )
+            .await?;
+        if !response.status().is_success() {
+            tracing::debug!(
+                status = response.status().as_u16(),
+                "该条目没有 PlaybackInfo（容器条目）"
+            );
+            return Ok(PlaybackSources::default());
+        }
+
+        let bytes = response.bytes().await.map_err(network_error)?;
+        let raw: RawPlaybackInfo = decode_json(&bytes)?;
+        // 空串等同于没给：上报一个空 `PlaySessionId` 与服务端预期的“无会话”不是一回事。
+        let play_session_id = raw
+            .play_session_id
+            .as_deref()
+            .filter(|session| !session.is_empty())
+            .map(str::to_owned);
+        if let Some(session) = play_session_id.as_deref() {
+            self.remember_play_session(id, session);
+        }
+        if !raw.media_sources.is_empty() {
+            return Ok(PlaybackSources {
+                sources: map_sources(&raw.media_sources, id, &self.base),
+                play_session_id,
+            });
+        }
+
+        // 有些服务端（旧版 Emby、以及按文件直读的库）在 PlaybackInfo 里返回空列表，
+        // 真正可播的资源挂在条目详情上。补一次详情请求，而不是直接告诉上层"不可播放"。
+        let detail = self.item_detail(id).await?;
+        Ok(PlaybackSources {
+            sources: map_sources(&detail.media_sources, id, &self.base),
+            play_session_id,
+        })
+    }
+
     /// 取条目详情原始结构（`MediaSources` 也在里面）。
     async fn item_detail(&self, id: &ItemId) -> Result<RawItem, ProviderError> {
         let user_id = self.user_id().await?;
@@ -962,45 +1023,12 @@ impl MediaProvider for Provider {
     }
 
     async fn sources(&self, id: &ItemId) -> Result<Vec<MediaSource>, ProviderError> {
-        let user_id = self.user_id().await?;
-        let url = self.url(
-            &["Items", id.as_str(), "PlaybackInfo"],
-            &[("UserId", user_id.as_str())],
-        )?;
-        let header = self.auth_header(Some(&self.token()?))?;
-        let name = self.flavor.auth_header_name();
-        // 真实服务端行为：容器条目（`Folder`、剧集、季）调 `PlaybackInfo` 直接回
-        // `400`（部分版本回 `404`），而不是 `200` + 空数组。“没有媒体源”是个正常
-        // 结果，当成错误会让界面把一个空库/剧集母页渲染成错误页。
-        // 其它 4xx（尤其 401 / 403）仍然报错。
-        let response = self
-            .send_accepting(
-                || self.http.get(url.clone()).header(name, header.clone()),
-                true,
-                &[StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND],
-            )
-            .await?;
-        if !response.status().is_success() {
-            tracing::debug!(
-                status = response.status().as_u16(),
-                "该条目没有 PlaybackInfo（容器条目）"
-            );
-            return Ok(Vec::new());
-        }
+        Ok(self.playback_info(id).await?.sources)
+    }
 
-        let bytes = response.bytes().await.map_err(network_error)?;
-        let raw: RawPlaybackInfo = decode_json(&bytes)?;
-        if let Some(session) = raw.play_session_id.as_deref().filter(|s| !s.is_empty()) {
-            self.remember_play_session(id, session);
-        }
-        if !raw.media_sources.is_empty() {
-            return Ok(map_sources(&raw.media_sources, id, &self.base));
-        }
-
-        // 有些服务端（旧版 Emby、以及按文件直读的库）在 PlaybackInfo 里返回空列表，
-        // 真正可播的资源挂在条目详情上。补一次详情请求，而不是直接告诉上层"不可播放"。
-        let detail = self.item_detail(id).await?;
-        Ok(map_sources(&detail.media_sources, id, &self.base))
+    async fn sources_with_session(&self, id: &ItemId) -> Result<PlaybackSources, ProviderError> {
+        // 原子版本：标识与资源出自同一次 `PlaybackInfo`。
+        self.playback_info(id).await
     }
 
     /// 上报前快照用：这个条目**最近一次** `PlaybackInfo` 给出的会话标识。

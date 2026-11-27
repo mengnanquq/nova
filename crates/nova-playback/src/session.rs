@@ -263,6 +263,12 @@ impl Session {
     /// `Ended` 下等于从头重播：位置回到 0、状态回到 `Playing`（体检 R8-B1：以前返回
     /// `None`/`false`，播完后按播放键完全没反应）。引擎仍停在 EOF，调用方必须重开
     /// 文件或同时 seek 到 0，只发 `play` 是原地不动。
+    ///
+    /// 调用约定（`Ended` 分支）：生产路径到不了这里。`Player` 在播完后按播放键 / 确认键
+    /// 时先把它拦成 [`Player::replay`]（走 `begin`：新会话、重取直链、从头开始），
+    /// [`Session::play`] 的 `Ended` 分支只是状态机自身的**一致性**保障——直接驱动
+    /// `Session` 的调用方（用例如 `returning_to_playback_after_end_starts_a_new_session_from_zero`）
+    /// 也不能拿到“状态停在 Ended、位置钉在时长”的死局。不要把它当成起播路径改。
     pub fn play(&mut self) -> bool {
         match self.state {
             SessionState::Paused => {
@@ -322,6 +328,9 @@ impl Session {
             }
             // 播完再按一下 = 从头重播（与播放器 / 遥控器的播放键同义），不是
             // "暂停在片尾"。
+            //
+            // 调用约定同 [`Session::play`]：生产路径由 `Player` 先拦成 `replay()`，
+            // 这里只负责状态一致性，不是起播路径。
             SessionState::Ended => {
                 self.restart_from_start();
                 Some(true)
