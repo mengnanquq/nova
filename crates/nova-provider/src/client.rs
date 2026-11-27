@@ -1003,8 +1003,8 @@ impl MediaProvider for Provider {
         Ok(map_sources(&detail.media_sources, id, &self.base))
     }
 
-    /// 上报前快照用：这个条目最近一次 `PlaybackInfo` 给出的会话标识。
-    fn play_session_id(&self, item: &ItemId) -> Option<String> {
+    /// 上报前快照用：这个条目**最近一次** `PlaybackInfo` 给出的会话标识。
+    fn latest_play_session_id(&self, item: &ItemId) -> Option<String> {
         self.play_session_for(item.as_str())
     }
 

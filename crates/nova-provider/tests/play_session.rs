@@ -4,12 +4,13 @@
 //! `PlaySessionId` 必须绑在**会话**上，而不是绑在条目上。
 //!
 //! 审查 🟡4：同一部片重播时，旧会话的 `Exit`/`stop` 是异步发的；与此同时新会话的
-//! `PlaybackInfo`（`refresh_before_play` 或取直链）已经把条目上的 `PlaySessionId`
-//! 覆盖成新值。如果上报在**发送那一刻**才去查"这个条目最近一次的会话标识"，旧会话的
+//! `PlaybackInfo`（`refresh_before_play`）已经把条目上的 `PlaySessionId` 覆盖成新值。
+//! 如果上报在**发送那一刻**才去查"这个条目最近一次的会话标识"，旧会话的
 //! `stop` 就会带上新会话的标识——服务端关掉的是新会话，旧会话一直留着。
 //!
-//! 所以进度在**入队那一刻**就把标识快照进来（`PlaybackProgress::play_session_id`），
-//! 上报只负责原样带回。这里断言的是"客户端实际发出的请求体"。
+//! 所以 player 在起播拿到 `PlaybackInfo` 的那一刻就把标识快照进本会话
+//! （`PlaybackProgress::play_session_id`），上报只负责原样带回。这里断言的是
+//! "客户端实际发出的请求体"。
 
 mod common;
 
@@ -108,22 +109,22 @@ async fn replayed_item_keeps_the_old_play_session_id_on_stop() {
     }
 
     let item = ItemId::new(ITEM_ID);
-    // 旧会话：取一次 `PlaybackInfo`，进度在入队那一刻快照下它给的会话标识。
+    // 旧会话：取一次 `PlaybackInfo`，进度在起播时就快照下它给的会话标识。
     provider.sources(&item).await.expect("第一次取资源");
     let old = provider
-        .play_session_id(&item)
+        .latest_play_session_id(&item)
         .expect("第一次 PlaybackInfo 应当给出会话标识");
     assert_eq!(old, "sess-old");
 
     // 同一部片重播：又取一次 `PlaybackInfo`，条目上的记录被新会话覆盖。
     provider.sources(&item).await.expect("第二次取资源");
     assert_eq!(
-        provider.play_session_id(&item).as_deref(),
+        provider.latest_play_session_id(&item).as_deref(),
         Some("sess-new"),
         "用例前提：重播时 PlaybackInfo 会覆盖条目上的会话标识"
     );
 
-    // 旧会话的收尾在晚一步的发送里：带着入队时的快照，服务端关掉的是旧会话。
+    // 旧会话的收尾在晚一步的发送里：带着起播时的快照，服务端关掉的是旧会话。
     provider
         .report_progress(&progress(1, Some(old.clone())))
         .await
@@ -144,8 +145,8 @@ async fn replayed_item_keeps_the_old_play_session_id_on_stop() {
         "重播后旧会话的 stop 必须带旧会话的 PlaySessionId"
     );
 
-    // 兼容：没有携带标识的进度（旧版本落盘的待发文件、`session_seq = 0`）退回
-    // "按条目查最近一次"的老行为，而不是干脆不带标识。
+    // 兼容：没有携带标识的进度（旧版本落盘的待发文件、`play_session_id` 为 `None`）
+    // 退回"按条目查最近一次"的老行为，而不是干脆不带标识。
     provider
         .report_stopped(&progress(0, None))
         .await

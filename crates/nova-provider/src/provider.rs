@@ -105,16 +105,19 @@ pub trait MediaProvider: Send + Sync {
     /// 取条目的可播放资源（同一部片的多个版本各算一个）。
     async fn sources(&self, id: &ItemId) -> Result<Vec<MediaSource>, ProviderError>;
 
-    /// 条目最近一次 `PlaybackInfo` 给出的服务端会话标识（`PlaySessionId`）。
+    /// 条目**最近一次** `PlaybackInfo` 给出的服务端会话标识（`PlaySessionId`）。
     ///
-    /// 调用方在进度**入队那一刻**把它快照进
-    /// [`PlaybackProgress::play_session_id`]，上报时原样带回。不能等到发送时再查：
-    /// 同一部片重播（或重试）时会再取一次 `PlaybackInfo`，条目上的记录已被新会话
-    /// 覆盖，旧会话的 `stop` 就会带上新会话的标识。
+    /// player 在起播那一刻（`PlaybackInfo` 刚返回）把它记进**本会话**，随后写进每条
+    /// [`PlaybackProgress::play_session_id`]，上报时原样带回；上报端只在进度没带标识时
+    /// 才回退到这里（旧版本落盘的待发文件）。不能等到发送时再查：同一部片重播（或
+    /// 重试）时会再取一次 `PlaybackInfo`，条目上的记录已被新会话覆盖，旧会话的 `stop`
+    /// 就会带上新会话的标识。
+    ///
+    /// "最近一次"也意味着它**不是**某个会话的常量：播放期间详情页刷新（`sources()`）
+    /// 同样会覆盖它，所以只能当兜底，不能当会话身份。
     ///
     /// 默认 `None`：不记会话的实现（测试假 provider、离线方言）上报时退回老行为。
-    fn play_session_id(&self, item: &ItemId) -> Option<String> {
-        let _ = item;
+    fn latest_play_session_id(&self, _item: &ItemId) -> Option<String> {
         None
     }
 

@@ -210,11 +210,12 @@ enum Command {
 pub(crate) struct Progress {
     commands: Option<UnboundedSender<Command>>,
     runtime: Handle,
-    /// 入队时给进度盖会话标识的 provider（未登录 / 离线时为 `None`）。
+    /// 入队时给**没带**会话标识的进度盖一个兜底标识的 provider（未登录 / 离线时为 `None`）。
     ///
-    /// 为什么盖章要在这里（入队）而不是 worker 发送时去查：见
-    /// [`PlaybackProgress::play_session_id`]。同一部片重播时，新会话的
-    /// `PlaybackInfo` 会在旧会话的 `stop` 发出之前就把条目上的记录覆盖掉。
+    /// 正常路径的标识由 player 在起播时快照进进度（[`PlaybackProgress::play_session_id`]），
+    /// 这里只在进度**没带**标识时兜底（旧版本落盘的待发项、起播前刷新超时拿不到标识的会话），
+    /// 用条目上的"最近一次"。为什么不作为主路径：同一部片播放期间详情页刷新、重播都会
+    /// 取 `PlaybackInfo` 覆盖条目上的记录，旧会话的 `stop` 就会带上新会话的标识。
     provider: Option<Arc<dyn MediaProvider>>,
     /// 测试：调用过几次**阻塞式**补发（`flush()`）。
     ///
@@ -316,14 +317,16 @@ impl Progress {
         }
     }
 
-    /// 把**此刻**（入队那一刻）的服务端会话标识盖进进度。
+    /// 给**没带**标识的进度盖一个兜底的服务端会话标识。
     ///
-    /// 进度里已经带了标识就不动：补发重试时用的一直是入队那一刻的快照，
-    /// 不能被期间又取过的 `PlaybackInfo`（新会话的标识）改写成新会话的。
+    /// 标识绑在会话上，主路径是 player 在起播时就把它快照进进度
+    /// （[`PlaybackProgress::play_session_id`]）；这里只处理 `None`：旧版本落盘的待发项、
+    /// 起播前刷新超时拿不到标识的会话。已经带标识的绝不能改写：那才是"这条进度属于
+    /// 哪个会话"的事实，后面的 `PlaybackInfo`（详情刷新、重播）会把它覆盖成新会话的。
     fn stamp(&self, mut progress: PlaybackProgress) -> PlaybackProgress {
         if progress.play_session_id.is_none() {
             if let Some(provider) = &self.provider {
-                progress.play_session_id = provider.play_session_id(&progress.item_id);
+                progress.play_session_id = provider.latest_play_session_id(&progress.item_id);
             }
         }
         progress
@@ -479,7 +482,7 @@ mod tests {
             ServerKind::Jellyfin
         }
 
-        fn play_session_id(&self, _item: &ItemId) -> Option<String> {
+        fn latest_play_session_id(&self, _item: &ItemId) -> Option<String> {
             match self.session.lock() {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
@@ -563,7 +566,7 @@ mod tests {
             let session = progress
                 .play_session_id
                 .clone()
-                .or_else(|| MediaProvider::play_session_id(self, &progress.item_id));
+                .or_else(|| MediaProvider::latest_play_session_id(self, &progress.item_id));
             match self.stopped_sessions.lock() {
                 Ok(mut guard) => guard.push(session),
                 Err(poisoned) => poisoned.into_inner().push(session),
@@ -769,8 +772,8 @@ mod tests {
     /// `stop` 发出之前把它覆盖掉，于是 `stop` 带上新会话的标识——服务端关掉的是新会话，
     /// 旧会话一直留着（服务端界面上两条会话，一条僵尸、一条被踢）。
     ///
-    /// 修法：进度**入队那一刻**（[`Progress::stamp`]，界面线程上、还没回 `begin`）就把
-    /// 标识盖进进度，随进度一路带到发送。
+    /// 修法：标识绑在会话上——player 在起播时快照进进度，随进度一路带到发送；
+    /// [`Progress::stamp`] 只给**没带**标识的旧进度兜底。
     #[tokio::test]
     async fn replayed_item_stops_the_old_session_with_its_own_play_session_id() {
         let provider = Arc::new(FakeProvider::default());
@@ -783,7 +786,7 @@ mod tests {
             flushes: Arc::new(AtomicUsize::new(0)),
         };
 
-        // 旧会话退出：`Exit` 在入队那一刻盖章（这时条目上的记录还是旧会话的）。
+        // 旧会话退出：后台 worker 晚一步才真发出去，进度里带的是它自己的标识。
         let leaving = handle.stamp(progress_at("a", 1, 30));
         assert_eq!(leaving.play_session_id.as_deref(), Some("sess-old"));
 

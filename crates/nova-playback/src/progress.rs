@@ -1154,6 +1154,52 @@ mod tests {
         );
     }
 
+    /// 落盘的待发项读回时：服务端会话标识（`play_session_id`）必须**保留**，代号清零。
+    ///
+    /// 标识绑的是"这条进度属于哪个会话"：上个进程的会话已经死了，带着它补发最多被服务端
+    /// 忽略；清掉反而让 provider 退回"按条目查最近一次"，可能把旧位置记到一个还活着的
+    /// 新会话上。代号则必须清零（否则补发时 sink 会给已结束的会话重发 `Started`）。
+    #[tokio::test]
+    async fn persisted_entries_keep_the_play_session_id_but_lose_the_seq() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let path = dir.path().join("pending-progress.json");
+        let clock = Arc::new(ManualClock::new());
+        let mut reporter =
+            ProgressReporter::new(&UserPreferences::default(), clock).with_pending_path(&path);
+
+        let mut entry = session_progress(7, 30);
+        entry.play_session_id = Some("sess-7".to_owned());
+        let failing = RecordingSink::always_failing(ReportError::Transient);
+        assert!(matches!(
+            reporter
+                .submit(&failing, ProgressTrigger::Tick, &entry)
+                .await,
+            ReportOutcome::Queued { .. }
+        ));
+        let outcome = reporter.flush(&failing).await;
+        assert_eq!(outcome.sent, 0);
+        assert!(outcome.persisted);
+        assert!(path.exists(), "仍然失败时必须落盘");
+
+        // 下次启动读回：标识还在，代号清零。
+        let clock = Arc::new(ManualClock::new());
+        let mut next =
+            ProgressReporter::new(&UserPreferences::default(), clock).with_pending_path(&path);
+        assert_eq!(next.load_pending().unwrap_or(0), 1);
+        let sink = RecordingSink::new();
+        assert_eq!(next.flush(&sink).await.sent, 1);
+        let sent = &sink.reported()[0];
+        assert_eq!(
+            sent.play_session_id.as_deref(),
+            Some("sess-7"),
+            "读回必须保留会话标识：清掉就会把旧位置记到一个还活着的新会话上"
+        );
+        assert_eq!(
+            sent.session_seq, 0,
+            "上个进程的代号已失效，补发时清零（sink 因此不会再发 Started）"
+        );
+    }
+
     #[tokio::test]
     async fn flush_reports_pending_and_persists_failures() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
