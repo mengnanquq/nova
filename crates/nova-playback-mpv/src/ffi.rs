@@ -1009,6 +1009,8 @@ pub(crate) fn load_gl_functions(
     load!(disable, c"glDisable");
     load!(viewport, c"glViewport");
     load!(scissor, c"glScissor");
+    load!(blend_func_separate, c"glBlendFuncSeparate");
+    load!(blend_equation_separate, c"glBlendEquationSeparate");
     load!(clear_color, c"glClearColor");
     load!(active_texture, c"glActiveTexture");
     load!(get_string, c"glGetString");
@@ -1052,6 +1054,8 @@ pub(crate) struct RawGlTable {
     pub disable: usize,
     pub viewport: usize,
     pub scissor: usize,
+    pub blend_func_separate: usize,
+    pub blend_equation_separate: usize,
     pub clear_color: usize,
     pub active_texture: usize,
     pub get_string: usize,
@@ -1096,6 +1100,8 @@ pub(crate) unsafe fn build_gl_functions(raw: RawGlTable) -> crate::gl::GlFunctio
         disable: cast!(raw.disable, extern "C" fn(u32)),
         viewport: cast!(raw.viewport, extern "C" fn(c_int, c_int, c_int, c_int)),
         scissor: cast!(raw.scissor, extern "C" fn(c_int, c_int, c_int, c_int)),
+        blend_func_separate: cast!(raw.blend_func_separate, extern "C" fn(u32, u32, u32, u32)),
+        blend_equation_separate: cast!(raw.blend_equation_separate, extern "C" fn(u32, u32)),
         clear_color: cast!(raw.clear_color, extern "C" fn(f32, f32, f32, f32)),
         active_texture: cast!(raw.active_texture, extern "C" fn(u32)),
         get_string: cast!(raw.get_string, extern "C" fn(u32) -> *const u8),

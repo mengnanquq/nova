@@ -186,6 +186,20 @@ impl EngineOptions {
             // mpv 0.42 的合法取值只有 no/yes/scale/force/strip（`style` 是 mpv 手册里
             // 早已移除的旧值）。`yes` 就是"用 sub-text-* 覆盖 ASS 自带样式"，语义相同。
             ("sub-ass-override".into(), "yes".into()),
+            // mpv 自己的 OSD 全关：所有提示由 Nova 的界面负责。
+            //
+            // 背景（体检 R6-3）：播放页左下出现一个「5.1」方块盖住暂停/静音键。实测它**不是**
+            // OSD：把 `osd-level` 在 0/1 之间来回切、关字幕、不动任何控件，方块都照样在，
+            // 且它的位置与尺寸严格跟着**视频画面**走（1920×1080 窗口 x110..199 y944..1014；
+            // 1920×1200 窗口（视频上下各 60px letterbox）同尺寸、y 整个下移 60；1600×900 窗口
+            // 按 1600/1920 等比缩小）——那是片子自带的「5.1ch」角标，属于画面内容。
+            //
+            // 这几项仍然要关：mpv 的 OSD 文字 / 进度条是画进**我们交给 Slint 的那张视频纹理**
+            // 的，一旦出现就盖在画面里、与 Nova 自己的控件重叠（且不会走我们的 UI 文案）。
+            // 手册 `--osd-level=<0-3>`：0 = "OSD completely disabled (subtitles only)"——
+            // 字幕由 mpv 照旧渲染（`blend-subtitles=video`），OSD 文本与 OSD 进度条一起消失。
+            ("osd-level".into(), "0".into()),
+            ("osd-bar".into(), "no".into()),
             // HDR → SDR：Slint 的纹理接口只吃 8bit RGBA，没有 10bit 直通路径。
             ("tone-mapping".into(), "auto".into()),
             ("dither-depth".into(), "auto".into()),
@@ -241,6 +255,9 @@ mod tests {
             ("blend-subtitles", "video"),
             ("sub-auto", "exact"),
             ("sub-ass-override", "yes"),
+            // mpv 的 OSD 必须全关（它的文字/进度条会被画进交出去的视频纹理）。
+            ("osd-level", "0"),
+            ("osd-bar", "no"),
             ("tone-mapping", "auto"),
             ("dither-depth", "auto"),
             ("audio", "auto"),
@@ -254,6 +271,18 @@ mod tests {
         assert_eq!(value_of(&options, "ao"), None);
         // copy 类硬解在 4K 下比软解还慢，配置层不得默认使用。
         assert!(!EngineOptions::new().requested_hwdec().contains("copy"));
+    }
+
+    /// mpv 自己的 OSD 必须全关（它的文字/进度条会被画进我们交给 Slint 的视频纹理里）。
+    /// 字幕不受影响：`osd-level=0` 是 "OSD completely disabled (subtitles only)"。
+    #[test]
+    fn mpv_osd_is_disabled_but_subtitles_stay() {
+        let options = EngineOptions::new().mpv_options();
+        assert_eq!(value_of(&options, "osd-level"), Some("0"));
+        assert_eq!(value_of(&options, "osd-bar"), Some("no"));
+        // 字幕仍然交给 mpv 渲染（关 OSD 不能顺手关字幕）。
+        assert_eq!(value_of(&options, "blend-subtitles"), Some("video"));
+        assert_ne!(value_of(&options, "sub-visibility"), Some("no"));
     }
 
     #[test]

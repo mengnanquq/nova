@@ -278,6 +278,20 @@ impl MpvEngine {
             .ok_or_else(|| PlaybackError::engine("视频渲染目标不可用"))?;
 
         let saved = gl.save_state();
+        // mpv 的 GL 状态契约（render_gl.h 46–59 行「OpenGL state」）：进来之前
+        // `GL_SCISSOR_TEST` / `GL_BLEND` / `GL_DEPTH_TEST` / `GL_STENCIL_TEST` /
+        // `GL_CULL_FACE` 必须是默认的关闭状态（其余例外状态由 save/restore 自己处理）。
+        // 宿主（Slint/femtovg）画完一帧总是开着 premultiplied 混合，不恢复它，mpv 的
+        //「output to screen」pass 就会在混合状态下落盘——体检 R6-1 的 1920×1080 黑屏
+        // 就是这么来的（详见 `MPV_REQUIRED_GL_DEFAULTS`）。
+        // 执行顺序：先 `save_state`（记下宿主的状态），再复位，最后 `restore_state` 还回去。
+        let violations = gl.restore_mpv_state_defaults();
+        if !violations.is_empty() {
+            tracing::debug!(
+                target: "nova_playback_mpv",
+                "宿主遗留了 mpv 不接受的 GL 状态，已复位：{violations:?}"
+            );
+        }
         let result = render.render_into(
             target.fbo(),
             video_width,

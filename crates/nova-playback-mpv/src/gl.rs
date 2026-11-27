@@ -42,10 +42,41 @@ const GL_VIEWPORT: u32 = 0x0BA2;
 const GL_SCISSOR_BOX: u32 = 0x0C10;
 const GL_SCISSOR_TEST: u32 = 0x0C11;
 const GL_BLEND: u32 = 0x0BE2;
+const GL_DEPTH_TEST: u32 = 0x0B71;
+const GL_STENCIL_TEST: u32 = 0x0B90;
+const GL_CULL_FACE: u32 = 0x0B44;
+const GL_BLEND_SRC_RGB: u32 = 0x80C9;
+const GL_BLEND_DST_RGB: u32 = 0x80C8;
+const GL_BLEND_SRC_ALPHA: u32 = 0x80CB;
+const GL_BLEND_DST_ALPHA: u32 = 0x80CA;
+const GL_BLEND_EQUATION_RGB: u32 = 0x8009;
+const GL_BLEND_EQUATION_ALPHA: u32 = 0x883D;
 const GL_COLOR_CLEAR_VALUE: u32 = 0x0C22;
 const GL_ACTIVE_TEXTURE: u32 = 0x84E0;
 const GL_TEXTURE_BINDING_2D: u32 = 0x8069;
 const GL_RENDERER: u32 = 0x1F01;
+
+/// mpv 要求调用方在进入 `mpv_render_context_render` 前保持默认值（关闭）的能力位。
+///
+/// `mpv/render_gl.h`（46–59 行）的「OpenGL state」一节原文要求：调用 mpv 前 GL 状态
+/// 应当是 **OpenGL 标准默认值**，mpv 也会尽量把上下文留成标准默认值；**例外**只有
+/// `glViewport`、`glScissor` 矩形、`glBlendFuncSeparate()` 与 `glClearColor()`
+/// （这几项 mpv 自己会改、不负责还原，由 [`GlFunctions::save_state`] /
+/// [`GlFunctions::restore_state`] 自己保存恢复）。除这四项之外，能力位必须是默认的
+/// **关闭**状态；mpv 只在需要混合的 pass 上自己 `glEnable(GL_BLEND)`，从不主动关掉
+/// 宿主遗留的混合 / 裁剪 / 深度 / 模板 / 面剔除状态。
+///
+/// 实测（体检 R6-1，Mesa/Intel + GLES，窗口 1920×1080）：Slint（femtovg）总是开着
+/// premultiplied 混合（`ONE, ONE_MINUS_SRC_ALPHA`），mpv 的「output to screen」pass 就在
+/// 混合状态下落盘——回读我们自己的 FBO 只有底部一条 96 行的画面（窗口里看到的正是那块
+/// "底下一条视频、其余全黑"）；把这些能力位复位成默认值后同一帧完整落盘（3/3 对 3/3）。
+const MPV_REQUIRED_GL_DEFAULTS: [(&str, u32); 5] = [
+    ("GL_SCISSOR_TEST", GL_SCISSOR_TEST),
+    ("GL_BLEND", GL_BLEND),
+    ("GL_DEPTH_TEST", GL_DEPTH_TEST),
+    ("GL_STENCIL_TEST", GL_STENCIL_TEST),
+    ("GL_CULL_FACE", GL_CULL_FACE),
+];
 
 /// 一个「当前 GL 上下文」里我们需要的入口点。
 ///
@@ -71,6 +102,8 @@ pub struct GlFunctions {
     pub(crate) disable: extern "C" fn(u32),
     pub(crate) viewport: extern "C" fn(c_int, c_int, c_int, c_int),
     pub(crate) scissor: extern "C" fn(c_int, c_int, c_int, c_int),
+    pub(crate) blend_func_separate: extern "C" fn(u32, u32, u32, u32),
+    pub(crate) blend_equation_separate: extern "C" fn(u32, u32),
     pub(crate) clear_color: extern "C" fn(f32, f32, f32, f32),
     pub(crate) active_texture: extern "C" fn(u32),
     pub(crate) get_string: extern "C" fn(u32) -> *const u8,
@@ -190,6 +223,22 @@ impl GlFunctions {
         })
     }
 
+    /// 把宿主遗留的 GL 状态恢复到 mpv 契要求的默认值。
+    ///
+    /// 对每个必须默认关闭的能力位（[`MPV_REQUIRED_GL_DEFAULTS`]）先读一下宿主是否把它
+    /// 打开了（返回值供调用方记日志：正常产品运行里应当为空），然后无条件关掉它——mpv
+    /// 自己会在需要混合的 pass 上重新 `glEnable(GL_BLEND)`。
+    ///
+    /// 必须在 `mpv_render_context_render` **之前**、且在 `save_state` 之后调用：
+    /// `restore_state` 会把宿主的混合状态还回去。
+    pub(crate) fn restore_mpv_state_defaults(&self) -> Vec<&'static str> {
+        enforce_defaults(
+            &MPV_REQUIRED_GL_DEFAULTS,
+            |cap| (self.is_enabled)(cap) != 0,
+            |cap| (self.disable)(cap),
+        )
+    }
+
     /// 删除 [`VideoTarget`] 的 GL 对象。必须在上下文 current 时调用。
     pub(crate) fn destroy_target(&self, target: VideoTarget) {
         (self.delete_framebuffers)(1, &target.fbo);
@@ -198,8 +247,9 @@ impl GlFunctions {
 
     /// 保存会被 mpv 改掉的 GL 状态。
     ///
-    /// render_gl.h 明确说 mpv 不保证恢复 `glViewport`/`glScissor`/`glBlendFunc`/
-    /// `glClearColor` 等状态，所以调用方必须自己还原。
+    /// render_gl.h 明确说 mpv 不保证恢复 `glViewport`/`glScissor`/`glBlendFuncSeparate`/
+    /// `glClearColor` 等状态（见 [`MPV_REQUIRED_GL_DEFAULTS`] 的说明），所以调用方必须
+    /// 自己还原：包括分离式混合因子与 blend equation（mpv 的 pass 会改它们）。
     pub(crate) fn save_state(&self) -> SavedState {
         let mut viewport = [0i32; 4];
         (self.get_integer_v)(GL_VIEWPORT, viewport.as_mut_ptr());
@@ -215,6 +265,12 @@ impl GlFunctions {
             clear_color: clear,
             active_texture: self.get_integer_v_i32(GL_ACTIVE_TEXTURE),
             texture_2d: self.get_integer_v_i32(GL_TEXTURE_BINDING_2D),
+            blend_src_rgb: self.get_integer_v_i32(GL_BLEND_SRC_RGB),
+            blend_dst_rgb: self.get_integer_v_i32(GL_BLEND_DST_RGB),
+            blend_src_alpha: self.get_integer_v_i32(GL_BLEND_SRC_ALPHA),
+            blend_dst_alpha: self.get_integer_v_i32(GL_BLEND_DST_ALPHA),
+            blend_equation_rgb: self.get_integer_v_i32(GL_BLEND_EQUATION_RGB),
+            blend_equation_alpha: self.get_integer_v_i32(GL_BLEND_EQUATION_ALPHA),
         }
     }
 
@@ -261,6 +317,17 @@ impl GlFunctions {
         } else {
             (self.disable)(GL_BLEND);
         }
+        // mpv 不负责还原分离式混合因子与 blend equation：这里还回宿主的原值。
+        (self.blend_func_separate)(
+            u32::try_from(state.blend_src_rgb).unwrap_or_default(),
+            u32::try_from(state.blend_dst_rgb).unwrap_or_default(),
+            u32::try_from(state.blend_src_alpha).unwrap_or_default(),
+            u32::try_from(state.blend_dst_alpha).unwrap_or_default(),
+        );
+        (self.blend_equation_separate)(
+            u32::try_from(state.blend_equation_rgb).unwrap_or_default(),
+            u32::try_from(state.blend_equation_alpha).unwrap_or_default(),
+        );
         (self.clear_color)(
             state.clear_color[0],
             state.clear_color[1],
@@ -295,6 +362,14 @@ pub(crate) struct SavedState {
     pub(crate) clear_color: [f32; 4],
     pub(crate) active_texture: i32,
     pub(crate) texture_2d: i32,
+    /// `GL_BLEND_SRC_RGB` / `GL_BLEND_DST_RGB` / `GL_BLEND_SRC_ALPHA` / `GL_BLEND_DST_ALPHA`。
+    pub(crate) blend_src_rgb: i32,
+    pub(crate) blend_dst_rgb: i32,
+    pub(crate) blend_src_alpha: i32,
+    pub(crate) blend_dst_alpha: i32,
+    /// `GL_BLEND_EQUATION_RGB` / `GL_BLEND_EQUATION_ALPHA`。
+    pub(crate) blend_equation_rgb: i32,
+    pub(crate) blend_equation_alpha: i32,
 }
 
 /// 视频纹理 + 它的 FBO：mpv 渲染进这里，Slint 把同一张纹理合成到窗口。
@@ -334,6 +409,25 @@ impl std::fmt::Debug for VideoTarget {
     }
 }
 
+/// 切入 mpv 前把「必须默认关闭」的能力位关掉，返回其中宿主确实打开过的名字。
+///
+/// 抽成纯函数是为了能在没有 GL 上下文的情况下做单测（[`GlFunctions::restore_mpv_state_defaults`]
+/// 只是把两个函数指针接进来）。
+fn enforce_defaults(
+    caps: &[(&'static str, u32)],
+    is_enabled: impl Fn(u32) -> bool,
+    disable: impl Fn(u32),
+) -> Vec<&'static str> {
+    let mut violated = Vec::new();
+    for (name, cap) in caps {
+        if is_enabled(*cap) {
+            violated.push(*name);
+        }
+        disable(*cap);
+    }
+    violated
+}
+
 /// 视频纹理尺寸的校验（尺寸来自视频属性，是外部输入）。
 ///
 /// 所有乘法走 `checked_mul`：`width * height * 4` 在 32 位目标上真的会溢出。
@@ -367,5 +461,69 @@ mod tests {
         assert!(checked_target_size(i32::MAX as u32 + 1, 1).is_err());
         // u32::MAX * u32::MAX * 4 必然溢出，不能靠 wrap 算出一个小数字。
         assert!(checked_target_size(u32::MAX - 1, u32::MAX - 1).is_err());
+    }
+
+    /// 体检 R6-1：mpv 的 GL 状态契约必须包含这五个默认关闭的能力位
+    /// （`mpv/render_gl.h` 46–59 行：除 viewport / scissor 矩形 / blend func /
+    /// clear color 四项例外外，其余状态必须是 OpenGL 标准默认值）。
+    #[test]
+    fn mpv_state_contract_covers_the_default_off_capabilities() {
+        let names: Vec<&str> = MPV_REQUIRED_GL_DEFAULTS.iter().map(|(n, _)| *n).collect();
+        for name in [
+            "GL_SCISSOR_TEST",
+            "GL_BLEND",
+            "GL_DEPTH_TEST",
+            "GL_STENCIL_TEST",
+            "GL_CULL_FACE",
+        ] {
+            assert!(names.contains(&name), "契约缺少 {name}");
+        }
+        // 只要这五项：viewport / scissor 矩形 / blend func / clear color 是 mpv 不负责
+        // 还原的例外，由 save_state / restore_state 自己处理。
+        assert_eq!(names.len(), 5);
+    }
+
+    /// 宿主（Slint/femtovg）开着混合时：契约执行必须报告并关掉它；五项都要关。
+    #[test]
+    fn host_blend_state_is_reported_and_disabled() {
+        let disabled = std::cell::RefCell::new(Vec::new());
+        let violated = enforce_defaults(
+            &MPV_REQUIRED_GL_DEFAULTS,
+            |cap| cap == GL_BLEND,
+            |cap| disabled.borrow_mut().push(cap),
+        );
+        assert_eq!(violated, vec!["GL_BLEND"]);
+        assert_eq!(
+            *disabled.borrow(),
+            vec![
+                GL_SCISSOR_TEST,
+                GL_BLEND,
+                GL_DEPTH_TEST,
+                GL_STENCIL_TEST,
+                GL_CULL_FACE
+            ]
+        );
+    }
+
+    /// 宿主状态本来就是默认值时：不报告任何违规，但仍然显式关一遍（不赌宿主的默认值）。
+    #[test]
+    fn clean_host_state_reports_no_violation_but_still_resets() {
+        let disabled = std::cell::RefCell::new(Vec::new());
+        let violated = enforce_defaults(
+            &MPV_REQUIRED_GL_DEFAULTS,
+            |_| false,
+            |cap| disabled.borrow_mut().push(cap),
+        );
+        assert!(violated.is_empty());
+        assert_eq!(
+            *disabled.borrow(),
+            vec![
+                GL_SCISSOR_TEST,
+                GL_BLEND,
+                GL_DEPTH_TEST,
+                GL_STENCIL_TEST,
+                GL_CULL_FACE
+            ]
+        );
     }
 }

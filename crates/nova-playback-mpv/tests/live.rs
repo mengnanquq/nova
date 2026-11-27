@@ -241,8 +241,12 @@ mod egl {
             .into_owned()
     }
 
-    /// 建一个 EGL surfaceless + OpenGL 的上下文并 make current。
+    /// 建一个 EGL surfaceless 上下文并 make current（`es=true` 走 GLES 3，与 Slint 一致）。
     pub fn create() -> Result<HeadlessGl, String> {
+        create_api(false)
+    }
+
+    pub fn create_api(es: bool) -> Result<HeadlessGl, String> {
         // SAFETY: dlopen 加载已安装的 libEGL；失败返回 NULL。
         let lib =
             unsafe { libc::dlopen(c"libEGL.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
@@ -294,8 +298,13 @@ mod egl {
             return Err("eglInitialize 失败".to_string());
         }
         // SAFETY: 只要常量参数。
-        if unsafe { bind_api(EGL_OPENGL_API) } != 1 {
-            return Err("eglBindAPI(EGL_OPENGL_API) 失败".to_string());
+        let api = if es {
+            0x30A0 // EGL_OPENGL_ES_API
+        } else {
+            EGL_OPENGL_API
+        };
+        if unsafe { bind_api(api) } != 1 {
+            return Err("eglBindAPI 失败".to_string());
         }
         let attributes = [EGL_CONTEXT_MAJOR_VERSION, 3, EGL_NONE];
         // surfaceless 平台没有 config，用 EGL_NO_CONFIG_KHR（NULL）+ EGL_EXT_no_config_context。
@@ -822,4 +831,414 @@ struct Pumped {
     frames: u64,
     max_position: Duration,
     errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// 渲染目标回读：体检 R6-1（1920×1080 首会话画面只剩底部一条）的引擎侧回归
+// ---------------------------------------------------------------------------
+
+/// 测试侧的 GL 回读 / 状态设置：把引擎交出来的纹理挂到临时 FBO 上读回 RGBA8。
+///
+/// 产品代码不回读，所以这里自己从 `eglGetProcAddress` 解析需要的入口点（与
+/// `docs/testing.md` 的「真机用例自己搭最小环境」一致）。
+#[allow(unsafe_code)]
+mod target_probe {
+    use std::ffi::{CStr, c_int, c_void};
+
+    type GenFramebuffers = extern "C" fn(c_int, *mut u32);
+    type BindFramebuffer = extern "C" fn(u32, u32);
+    type FramebufferTexture2D = extern "C" fn(u32, u32, u32, u32, c_int);
+    type DeleteFramebuffers = extern "C" fn(c_int, *const u32);
+    type ReadPixels = extern "C" fn(c_int, c_int, c_int, c_int, u32, u32, *mut c_void);
+    type PixelStore = extern "C" fn(u32, c_int);
+    type Enable = extern "C" fn(u32);
+    type Scissor = extern "C" fn(c_int, c_int, c_int, c_int);
+    type BlendFuncSeparate = extern "C" fn(u32, u32, u32, u32);
+    type GetIntegerv = extern "C" fn(u32, *mut c_int);
+
+    const GL_FRAMEBUFFER: u32 = 0x8D40;
+    const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+    const GL_TEXTURE_2D: u32 = 0x0DE1;
+    const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+    const GL_RGBA: u32 = 0x1908;
+    const GL_UNSIGNED_BYTE: u32 = 0x1401;
+    /// `GL_SCISSOR_TEST`。
+    pub const GL_SCISSOR_TEST: u32 = 0x0C11;
+    /// `GL_BLEND`。
+    pub const GL_BLEND: u32 = 0x0BE2;
+    /// `GL_DEPTH_TEST`。
+    pub const GL_DEPTH_TEST: u32 = 0x0B71;
+    /// `GL_STENCIL_TEST`。
+    pub const GL_STENCIL_TEST: u32 = 0x0B90;
+    /// `GL_CULL_FACE`。
+    pub const GL_CULL_FACE: u32 = 0x0B44;
+    /// `GL_BLEND_SRC_RGB` / `GL_BLEND_DST_RGB` / `GL_BLEND_SRC_ALPHA` / `GL_BLEND_DST_ALPHA`。
+    pub const GL_BLEND_SRC_RGB: u32 = 0x80C9;
+    pub const GL_BLEND_DST_RGB: u32 = 0x80C8;
+    pub const GL_BLEND_SRC_ALPHA: u32 = 0x80CB;
+    pub const GL_BLEND_DST_ALPHA: u32 = 0x80CA;
+    /// `GL_BLEND_EQUATION_RGB` / `GL_BLEND_EQUATION_ALPHA`。
+    pub const GL_BLEND_EQUATION_RGB: u32 = 0x8009;
+    pub const GL_BLEND_EQUATION_ALPHA: u32 = 0x883D;
+    /// `GL_FUNC_ADD`（blend equation 的默认值）。
+    pub const GL_FUNC_ADD: i32 = 0x8006;
+
+    /// 记录引擎调用的 `glDisable`（断言「引擎确实在渲染前复位了契约要求的能力位」）。
+    ///
+    /// `GlFunctions` 的入口点来自我们自己的 loader，所以测试可以在这里插一层记录器：
+    /// 产品代码不需要为测试留任何钩子。
+    pub mod spy {
+        use std::ffi::{CStr, c_char, c_void};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Mutex, OnceLock};
+
+        type Disable = extern "C" fn(u32);
+        type IsEnabled = extern "C" fn(u32) -> u8;
+
+        static REAL_DISABLE: AtomicUsize = AtomicUsize::new(0);
+        static REAL_IS_ENABLED: AtomicUsize = AtomicUsize::new(0);
+        static CALLS: OnceLock<Mutex<Vec<(u8, u32)>>> = OnceLock::new();
+
+        /// `glIsEnabled(cap)` 的标记。
+        const QUERY: u8 = 0;
+        /// `glDisable(cap)` 的标记。
+        const DISABLE: u8 = 1;
+
+        fn calls() -> &'static Mutex<Vec<(u8, u32)>> {
+            CALLS.get_or_init(|| Mutex::new(Vec::new()))
+        }
+
+        fn record(kind: u8, cap: u32) {
+            if let Ok(mut list) = calls().lock() {
+                list.push((kind, cap));
+            }
+        }
+
+        /// 引擎在关掉 `cap` 之前先查过它吗？（「查一下宿主是否开着，然后关掉」这对手势
+        /// 只有引擎会做——mpv 从不调用 `glIsEnabled`，它只是无条件 `glDisable`。）
+        pub fn reset_after_query(cap: u32) -> bool {
+            calls()
+                .lock()
+                .map(|list| {
+                    list.windows(2)
+                        .any(|pair| pair[0] == (QUERY, cap) && pair[1] == (DISABLE, cap))
+                })
+                .unwrap_or(false)
+        }
+
+        /// 清空记录（在开始播放之前调用）。
+        pub fn reset() {
+            if let Ok(mut list) = calls().lock() {
+                list.clear();
+            }
+        }
+
+        /// `glIsEnabled` 直通（测试自己查宿主状态用）。
+        pub fn is_enabled(cap: u32) -> u8 {
+            let pointer = REAL_IS_ENABLED.load(Ordering::Acquire);
+            if pointer == 0 {
+                return 0;
+            }
+            // SAFETY: 指针是上面安装的真 glIsEnabled，签名逐字对应。
+            let function: IsEnabled = unsafe { std::mem::transmute::<usize, IsEnabled>(pointer) };
+            function(cap)
+        }
+
+        extern "C" fn spy_disable(cap: u32) {
+            record(DISABLE, cap);
+            let pointer = REAL_DISABLE.load(Ordering::Acquire);
+            if pointer == 0 {
+                return;
+            }
+            // SAFETY: 指针是安装时记下的真 glDisable，签名逐字对应。
+            let function: Disable = unsafe { std::mem::transmute::<usize, Disable>(pointer) };
+            function(cap);
+        }
+
+        extern "C" fn spy_is_enabled(cap: u32) -> u8 {
+            record(QUERY, cap);
+            let pointer = REAL_IS_ENABLED.load(Ordering::Acquire);
+            if pointer == 0 {
+                return 0;
+            }
+            // SAFETY: 同上。
+            let function: IsEnabled = unsafe { std::mem::transmute::<usize, IsEnabled>(pointer) };
+            function(cap)
+        }
+
+        /// 给 `GlFunctions::from_loader` 用的 loader：`glDisable`/`glIsEnabled` 换成记录器，
+        /// 其余符号原样交给 `eglGetProcAddress`。
+        pub fn install(
+            gpa: unsafe extern "C" fn(*const c_char) -> *mut c_void,
+        ) -> impl Fn(&CStr) -> *const c_void {
+            // SAFETY: gpa 是 libEGL 的 eglGetProcAddress；两个名字都是静态 NUL 结尾字符串。
+            let real_disable = unsafe { gpa(c"glDisable".as_ptr()) };
+            let real_is_enabled = unsafe { gpa(c"glIsEnabled".as_ptr()) };
+            REAL_DISABLE.store(real_disable as usize, Ordering::Release);
+            REAL_IS_ENABLED.store(real_is_enabled as usize, Ordering::Release);
+            move |name: &CStr| -> *const c_void {
+                if name == c"glDisable" {
+                    return spy_disable as *const c_void;
+                }
+                if name == c"glIsEnabled" {
+                    return spy_is_enabled as *const c_void;
+                }
+                // SAFETY: 见上，name 是调用方传入的 NUL 结尾字符串。
+                unsafe { gpa(name.as_ptr()) }
+            }
+        }
+    }
+
+    pub struct Probe {
+        pub enable: Enable,
+        pub scissor: Scissor,
+        pub blend_func_separate: BlendFuncSeparate,
+        get_integer_v: GetIntegerv,
+        gen_fbo: GenFramebuffers,
+        bind_fbo: BindFramebuffer,
+        attach: FramebufferTexture2D,
+        delete_fbo: DeleteFramebuffers,
+        read: ReadPixels,
+        store: PixelStore,
+    }
+
+    impl Probe {
+        pub fn load(
+            gpa: unsafe extern "C" fn(*const std::ffi::c_char) -> *mut c_void,
+        ) -> Option<Self> {
+            let take = |name: &CStr| -> Option<*mut c_void> {
+                // SAFETY: gpa 是 EGL 的 eglGetProcAddress；name 是静态 NUL 结尾字符串。
+                let pointer = unsafe { gpa(name.as_ptr()) };
+                (!pointer.is_null()).then_some(pointer)
+            };
+            let gen_fbo = take(c"glGenFramebuffers")?;
+            let bind_fbo = take(c"glBindFramebuffer")?;
+            let attach = take(c"glFramebufferTexture2D")?;
+            let delete_fbo = take(c"glDeleteFramebuffers")?;
+            let read = take(c"glReadPixels")?;
+            let store = take(c"glPixelStorei")?;
+            let enable = take(c"glEnable")?;
+            let scissor = take(c"glScissor")?;
+            let blend_func_separate = take(c"glBlendFuncSeparate")?;
+            let get_integer_v = take(c"glGetIntegerv")?;
+            // SAFETY: 每个符号的签名都与 GL 规范一致（见 gl.xml），转换后只在持有同一
+            // 上下文的线程上调用。
+            Some(unsafe {
+                Self {
+                    enable: std::mem::transmute::<*mut c_void, Enable>(enable),
+                    scissor: std::mem::transmute::<*mut c_void, Scissor>(scissor),
+                    blend_func_separate: std::mem::transmute::<*mut c_void, BlendFuncSeparate>(
+                        blend_func_separate,
+                    ),
+                    get_integer_v: std::mem::transmute::<*mut c_void, GetIntegerv>(get_integer_v),
+                    gen_fbo: std::mem::transmute::<*mut c_void, GenFramebuffers>(gen_fbo),
+                    bind_fbo: std::mem::transmute::<*mut c_void, BindFramebuffer>(bind_fbo),
+                    attach: std::mem::transmute::<*mut c_void, FramebufferTexture2D>(attach),
+                    delete_fbo: std::mem::transmute::<*mut c_void, DeleteFramebuffers>(delete_fbo),
+                    read: std::mem::transmute::<*mut c_void, ReadPixels>(read),
+                    store: std::mem::transmute::<*mut c_void, PixelStore>(store),
+                }
+            })
+        }
+
+        /// 读一个整型 GL 状态（测试断言 blend func / equation 用）。
+        pub fn integer(&self, name: u32) -> c_int {
+            let mut value = 0;
+            (self.get_integer_v)(name, &mut value);
+            value
+        }
+
+        /// 把「引擎交出来的纹理」读回成 RGBA8（行序：第 0 行 = GL 坐标 y=0）。
+        pub fn read_texture(&self, texture: u32, width: u32, height: u32) -> Vec<u8> {
+            let mut fbo = 0u32;
+            (self.gen_fbo)(1, &mut fbo);
+            (self.bind_fbo)(GL_FRAMEBUFFER, fbo);
+            (self.attach)(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                texture,
+                0,
+            );
+            let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+            (self.store)(GL_PACK_ALIGNMENT, 1);
+            (self.read)(
+                0,
+                0,
+                width as c_int,
+                height as c_int,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                buffer.as_mut_ptr().cast(),
+            );
+            (self.bind_fbo)(GL_FRAMEBUFFER, 0);
+            (self.delete_fbo)(1, &fbo);
+            buffer
+        }
+    }
+
+    /// 每 `height / 8` 行一段的平均亮度（Rec.709 加权）。
+    pub fn row_bands(rgba: &[u8], width: u32, height: u32) -> Vec<f64> {
+        let w = width as usize;
+        let mut rows = vec![0.0f64; height as usize];
+        for (y, row) in rows.iter_mut().enumerate() {
+            let mut sum = 0.0;
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                sum += 0.2126 * f64::from(rgba[i])
+                    + 0.7152 * f64::from(rgba[i + 1])
+                    + 0.0722 * f64::from(rgba[i + 2]);
+            }
+            *row = sum / w as f64;
+        }
+        let step = (rows.len() / 8).max(1);
+        rows.chunks(step)
+            .map(|chunk| chunk.iter().sum::<f64>() / chunk.len() as f64)
+            .collect()
+    }
+}
+
+/// 体检 R6-1 的引擎侧回归：视频尺寸 == 渲染目标尺寸（1920×1080），宿主在进入渲染之前
+/// 留下 `GL_BLEND` + `GL_SCISSOR_TEST` 的非默认值（Slint/femtovg 画完一帧就是这个样子）。
+///
+/// `mpv/render_gl.h` 的「OpenGL state」一节要求这两项在调用渲染前必须是默认的关闭状态；
+/// 不满足时这台机器（Mesa/Intel + GLES）上 mpv 的「output to screen」pass 会在混合状态下
+/// 落盘，最终纹理只有底部一条带画面（产品里表现为 1920×1080 首会话近乎全黑，见
+/// `.claude/pipeline/qa-report-r6.md` R6-1）。修复（引擎在渲染前复位契约要求的默认值）之后
+/// 同一条用例返回整幅画面：每一段高度都有内容。
+///
+/// 素材用 ffmpeg 现生成（`testsrc2` 满幅有内容），`#[ignore]`：要真实 libmpv + 可用的 GPU
+/// 与 ffmpeg（同本文件其它真机用例）。
+#[test]
+#[ignore = "需要真实 libmpv + GPU（EGL surfaceless）与 ffmpeg；不需要 Jellyfin"]
+fn live_render_fills_whole_target_with_dirty_host_state() {
+    let dir = tempfile::Builder::new()
+        .prefix("nova-target-")
+        .tempdir()
+        .expect("建临时目录失败");
+    let media = dir.path().join("clip.mp4");
+    let generated = std::process::Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=6:size=1920x1080:rate=10",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+        ])
+        .arg(&media)
+        .status();
+    if !matches!(generated, Ok(status) if status.success()) {
+        eprintln!("跳过：没有可用的 ffmpeg，无法生成测试素材");
+        return;
+    }
+    let url = media.to_string_lossy().into_owned();
+
+    // GLES 3 上下文（与 Slint 的 femtovg 后端同一条 API）。
+    let headless = egl::create_api(true).expect("EGL surfaceless 上下文创建失败");
+    let probe = target_probe::Probe::load(headless.get_proc_address).expect("装载回读入口点失败");
+    // 用带记录器的 loader 建入口点表：`glDisable` 会被记下来，用于断言引擎确实复位了契约位。
+    let loader = target_probe::spy::install(headless.get_proc_address);
+    let functions = GlFunctions::from_loader(&loader).expect("装载 GL 入口点失败");
+    target_probe::spy::reset();
+
+    // 宿主（femtovg）留下的状态：混合开着（premultiplied over）、裁剪测试开着且裁剪框是
+    // 整窗、深度 / 模板 / 面剔除也开着——mpv 的契约要求这些能力位都是默认值。
+    (probe.blend_func_separate)(1, 0x0303, 1, 0x0303);
+    (probe.scissor)(0, 0, 1920, 1080);
+    (probe.enable)(target_probe::GL_BLEND);
+    (probe.enable)(target_probe::GL_SCISSOR_TEST);
+    (probe.enable)(target_probe::GL_DEPTH_TEST);
+    (probe.enable)(target_probe::GL_STENCIL_TEST);
+    (probe.enable)(target_probe::GL_CULL_FACE);
+
+    let mut engine = MpvEngine::new(EngineOptions::new().audio_output("null")).expect("建引擎失败");
+    engine.attach_gl(functions).expect("attach_gl 失败");
+    block_on(engine.open(OpenRequest::new(url))).expect("open 失败");
+
+    let mut state = Pumped::default();
+    pump(&mut engine, &mut state, Duration::from_secs(20), |state| {
+        state.frames >= 20
+    });
+    assert!(state.errors.is_empty(), "引擎报错：{:?}", state.errors);
+    let (texture, width, height) = engine.texture().expect("20 帧之后仍没有纹理");
+    assert_eq!(
+        (width, height),
+        (1920, 1080),
+        "渲染目标尺寸应当是视频尺寸（素材 1920×1080）"
+    );
+
+    let rgba = probe.read_texture(texture, width, height);
+    let bands = target_probe::row_bands(&rgba, width, height);
+    eprintln!("[target] 1920×1080 分段亮度：{bands:?}");
+    // 没有内容的高度段 = 画面被切掉（R6-1 的形态：只有底部一条有画面）。
+    let empty: Vec<usize> = bands
+        .iter()
+        .enumerate()
+        .filter(|(_, luma)| **luma < 8.0)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        empty.is_empty(),
+        "渲染目标有 {} / {} 段没有画面（{empty:?}，分段亮度 {bands:?}）：mpv 在宿主遗留的 \
+         GL 状态下没有画满整幅纹理",
+        empty.len(),
+        bands.len()
+    );
+
+    // 修复本体：引擎在把 FBO 交给 mpv 之前，必须把 mpv 契约要求的能力位复位成默认值。
+    for (name, cap) in [
+        ("GL_SCISSOR_TEST", target_probe::GL_SCISSOR_TEST),
+        ("GL_BLEND", target_probe::GL_BLEND),
+        ("GL_DEPTH_TEST", target_probe::GL_DEPTH_TEST),
+        ("GL_STENCIL_TEST", target_probe::GL_STENCIL_TEST),
+        ("GL_CULL_FACE", target_probe::GL_CULL_FACE),
+    ] {
+        assert!(
+            target_probe::spy::reset_after_query(cap),
+            "引擎没有在渲染前把 {name}（0x{cap:04x}）复位成默认值：mpv 的 render_gl.h \
+             契约要求它是默认值"
+        );
+    }
+
+    // 宿主的 GL 状态必须原样还回去（引擎只在自己的渲染期间复位）。
+    for (name, cap) in [
+        ("GL_BLEND", target_probe::GL_BLEND),
+        ("GL_SCISSOR_TEST", target_probe::GL_SCISSOR_TEST),
+    ] {
+        assert_ne!(
+            target_probe::spy::is_enabled(cap),
+            0,
+            "渲染结束后引擎没有把 {name} 还给宿主"
+        );
+    }
+    // blend func 也是 mpv 不负责还原的例外：必须回到宿主设置的值。
+    let blend = [
+        probe.integer(target_probe::GL_BLEND_SRC_RGB),
+        probe.integer(target_probe::GL_BLEND_DST_RGB),
+        probe.integer(target_probe::GL_BLEND_SRC_ALPHA),
+        probe.integer(target_probe::GL_BLEND_DST_ALPHA),
+    ];
+    assert_eq!(
+        blend,
+        [1, 0x0303, 1, 0x0303],
+        "渲染结束后引擎没有把 glBlendFuncSeparate 还给宿主（实际 {blend:?}）"
+    );
+    // blend equation 不在 mpv 的例外清单里，宿主保持默认的 GL_FUNC_ADD；
+    // save/restore 也必须把它还原成默认值（不能把 mpv 的中间状态漏出去）。
+    assert_eq!(
+        probe.integer(target_probe::GL_BLEND_EQUATION_RGB),
+        target_probe::GL_FUNC_ADD,
+        "渲染结束后 blend equation RGB 不是默认的 GL_FUNC_ADD"
+    );
+    assert_eq!(
+        probe.integer(target_probe::GL_BLEND_EQUATION_ALPHA),
+        target_probe::GL_FUNC_ADD,
+        "渲染结束后 blend equation Alpha 不是默认的 GL_FUNC_ADD"
+    );
+
+    let _ = block_on(engine.close());
 }
