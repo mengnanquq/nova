@@ -205,6 +205,9 @@ export component AppWindow inherits Window {
     // 首页图片窗口代次：数据真变了时 Rust 推一档，让每个卡片行重新上报可见区间
     // （行内的可见区间是事件驱动的，数据变化不一定改几何）。
     in-out property <int> home-image-gen: 0;
+    // 首页悬停锁存复位序号：焦点被钳回 0（数据变少）时 Rust 推一档，让各行的
+    // `hot` / `latch` 失效——否则放大层与左右箭头会亮在已经不存在的卡上（A2）。
+    in-out property <int> home-hover-reset: 0;
 
     // 回调只把事件送出去，业务判断留在 Rust。
     callback open-item(string);
@@ -221,6 +224,9 @@ export component AppWindow inherits Window {
     callback search-clear-input();
     // 搜索页错误态的“重试”。
     callback search-retry();
+    // 搜索页输入框 ↓ / ↑：焦点交给结果网格 / 顶栏（R7-D1，见 `search.slint`）。
+    callback search-grid-focus();
+    callback search-navbar-focus();
     callback banner-action();
     callback connect-server();
     callback add-server-close();
@@ -437,6 +443,7 @@ export component AppWindow inherits Window {
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
                 image-gen: root.home-image-gen;
+                hover-reset: root.home-hover-reset;
                 image-window(row, first, count) => {
                     root.home-image-window(row, first, count);
                 }
@@ -600,6 +607,12 @@ export component AppWindow inherits Window {
                 search-retry => {
                     root.focus-global();
                     root.search-retry();
+                }
+                search-grid-focus => {
+                    root.search-grid-focus();
+                }
+                search-navbar-focus => {
+                    root.search-navbar-focus();
                 }
                 grid-viewport-changed => {
                     root.search-grid-viewport-changed();

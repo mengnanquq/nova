@@ -60,6 +60,12 @@ export component SearchPage inherits Rectangle {
     callback search-escape();
     // Esc 或 Enter 之后把焦点还给全局键盘（方向键导航结果网格）。
     callback search-blur();
+    // 页内输入框 ↓：焦点交给结果网格的第一张卡（R7-D1）。
+    // 输入框会把 ↑ / ↓ 当编辑键吃掉，事件也冒泡不到兄弟节点 `keyboard`，
+    // 所以必须在这里主动上报（与 `global-shortcut` 同一类绕道）。
+    callback search-grid-focus();
+    // 页内输入框 ↑：进顶栏（与首页 / 媒体库的 chrome 层同一套）。
+    callback search-navbar-focus();
     // 错误态的"重试"。
     callback search-retry();
     // 页内大输入框里仍要生效的全局快捷键（参数是 `AppWindow.key-intent` 的意图编号）。
@@ -245,6 +251,25 @@ export component SearchPage inherits Rectangle {
                     root.search-clear();
                     query.clear-focus();
                     root.search-blur();
+                    return accept;
+                }
+                // ↓：有结果时进结果网格（R7-D1）。以前它被 TextInput 当编辑键
+                // 吃掉，用户必须 Tab / Esc 手动释放焦点才能用方向键——
+                // 而进入搜索页时输入框本来就拿着焦点，网格等于完全不可达。
+                if (event.text == Key.DownArrow) {
+                    if (root.data.cards.length > 0) {
+                        query.clear-focus();
+                        root.search-blur();
+                        root.search-grid-focus();
+                        return accept;
+                    }
+                    return accept;
+                }
+                // ↑：离开输入框进顶栏（标签在任何时候都键盘可达）。
+                if (event.text == Key.UpArrow) {
+                    query.clear-focus();
+                    root.search-blur();
+                    root.search-navbar-focus();
                     return accept;
                 }
                 // 8 = Ctrl+N（打开“添加服务器”），7 = Ctrl+F（重新聚焦搜索）。

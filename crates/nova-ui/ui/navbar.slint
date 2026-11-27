@@ -319,9 +319,16 @@ export component Navbar inherits Rectangle {
         }
 
         // 搜索：图标按钮，聚焦时展开为 240px 输入框。
+        //
+        // 宽度**必须**跟 `show-search` 门控（R7-C1）：搜索页（`show-search: false`）
+        // 把胶囊框藏起来，但 `visible: false` 在 `HorizontalLayout` 里**照样占位**——
+        // 而搜索页的页内大输入框持有焦点时 `search-focused` 为真，宽度会按**展开态**
+        // 240px 算，标签区凭空少了 204px（真机 800×600：587 → 383，最后几个标签
+        // 被切掉）。藏起来就不占位。
         Rectangle {
             visible: root.show-search;
-            width: root.search-focused ? Theme.search-box-width : 36px;
+            width: root.show-search
+                ? (root.search-focused ? Theme.search-box-width : 36px) : 0px;
             height: Theme.search-box-height;
             border-radius: Theme.radius-poster;
             background: root.search-focused

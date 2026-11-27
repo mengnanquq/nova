@@ -22,7 +22,9 @@ mod common;
 use std::time::Duration;
 
 use common::{home_filled, init_backend};
-use nova_ui::{App, AppWindow, CardView, FocusLayer, HomeView, LibraryRowView, Page, TargetInfo};
+use nova_ui::{
+    App, AppWindow, CardView, FocusLayer, HomeView, LibraryRowView, Page, TargetInfo, Theme,
+};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
@@ -204,6 +206,20 @@ fn home_keyboard_walks_every_row_down_and_back_up() {
     let last = row_start(5);
     press(&app, Key::DownArrow);
     assert_focus(&app, last, "最后一行的第一张卡");
+
+    // A4：最后一行的滚动落位是**严格**的 —— 卡片下沿正好贴在
+    // 「视口底 − 放大余量/2」上（行高与 `library-card-top` 曾经是三份拷贝，
+    // 只要有一份偏离这个等式就会露出黑边或被裁掉）。
+    let pad = f64::from(app.ui().global::<Theme>().get_zoom_allowance_y()) / 2.0;
+    let last_card = app
+        .target(&focus_target_id(last))
+        .expect("最后一行第一张卡应在窗口里");
+    let bottom = f64::from(last_card.y + last_card.height);
+    assert!(
+        (bottom - (f64::from(H) - pad)).abs() <= 1.0,
+        "最后一行卡片下沿 {bottom} 应等于视口底减放大余量 {}（±1）",
+        f64::from(H) - pad
+    );
 
     // ← / → 只在**行内**移动：到最后一行第 3 列，再 → 到第 6 列。
     press(&app, Key::RightArrow);
@@ -397,5 +413,104 @@ fn an_empty_first_focus_row_does_not_block_up_to_hero() {
         app.ui().get_focus_layer(),
         FocusLayer::Hero.index(),
         "第一行是空库行时，↑ 仍要回到 hero"
+    );
+}
+
+/// A2：数据变少把焦点钳回 0 时，页面要滚回顶部，并清掉悬停锁存。
+///
+/// 修复前：`set_home` 只把 `focus_index` 写回 0，页面仍停在底部（按 Enter 打开的
+/// 是屏幕外那张），行里的悬停锁存（`hot` / `latch`）也留着——放大层与左右箭头
+/// 亮在一个已经不存在的位置。
+#[test]
+fn shrinking_the_home_data_resets_the_scroll_and_the_hover() {
+    let app = app_1920x1080();
+    let view = home();
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().set_home_focus(0);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+
+    // 先把「最近添加」行滚进窗口，再悬停第 4 张：焦点 → 5，行内 hot/latch = 3。
+    // 全程不按方向键，`nav-active` 保持 false，于是放大层只可能来自悬停。
+    app.ui().invoke_scroll_home_to(-800.0);
+    settle(&app);
+    let card = app
+        .target("home.row.recent.card.3")
+        .expect("最近添加第 4 张应在窗口里");
+    let (x, y) = card.center();
+    app.ui()
+        .window()
+        .dispatch_event_with_result(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(x, y),
+        })
+        .expect("派发 PointerMoved");
+    settle(&app);
+    assert_eq!(app.ui().get_home_focus(), 5, "悬停应对齐焦点");
+    assert!(
+        app.target("home.row.recent.left").is_some(),
+        "前提：悬停让这一行的左右箭头出现（zoom-index >= 0）"
+    );
+    assert!(
+        f64::from(app.ui().get_home_scroll_y()) < 0.0,
+        "前提：页面已经滚离顶部"
+    );
+
+    // 数据变少：继续观看 2 + 最近添加 3 = 5 张，旧焦点 5 越界 → 钳到 0。
+    let mut shrunk = home();
+    shrunk.recently_added.truncate(3);
+    shrunk.library_rows.clear();
+    app.set_home(&shrunk);
+    settle(&app);
+
+    assert_eq!(app.ui().get_home_focus(), 0, "越界焦点必须钳回第 1 张");
+    assert_eq!(
+        f64::from(app.ui().get_home_scroll_y()),
+        0.0,
+        "钳位后页面必须滚回顶部（否则 Enter 打开的是屏幕外那张）"
+    );
+    assert!(
+        app.target("home.row.recent.left").is_none(),
+        "悬停锁存必须清掉：焦点已经不在那一行，箭头不能留下"
+    );
+}
+
+/// A3：首页焦点按**条目 id** 重定位，而不是沿用旧下标。
+///
+/// 修复前 `set_home` 只在越界时才写回焦点：`HomeView` 重新排序（「继续观看」按
+/// 最近播放重排）后，同一个下标指向的已经是另一部作品，焦点会悄悄飘走。
+#[test]
+fn focus_follows_the_item_when_the_home_view_is_reordered() {
+    let app = app_1920x1080();
+    let mut view = home();
+    view.continue_watching = vec![
+        CardView::new("a", "A"),
+        CardView::new("b", "B"),
+        CardView::new("c", "C"),
+    ];
+    view.recently_added.clear();
+    view.library_rows.clear();
+    view.hero = None;
+    app.set_home(&view);
+    app.show_page(Page::Home);
+    app.ui().set_home_focus(1);
+    app.ui().show().expect("显示窗口");
+    settle(&app);
+    assert_eq!(app.ui().get_home_focus(), 1, "前提：焦点停在 b（下标 1）");
+
+    // 重排：b 跑到第一位。
+    let mut next = view.clone();
+    next.continue_watching = vec![
+        CardView::new("b", "B"),
+        CardView::new("c", "C"),
+        CardView::new("a", "A"),
+    ];
+    app.set_home(&next);
+    settle(&app);
+
+    assert_eq!(
+        app.ui().get_home_focus(),
+        0,
+        "焦点应按 item id 跟着 b 落到新下标 0，而不是留在旧下标 1（c）"
     );
 }

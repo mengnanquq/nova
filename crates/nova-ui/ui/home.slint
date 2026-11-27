@@ -67,6 +67,16 @@ component CardRow inherits Rectangle {
     // 所以页面只下发「键盘滚到第 N 张」，由行自己执行。`-1` = 本行不是键盘焦点行。
     // 悬停只同步 `focus-index`（放大 / 方向键起点），绝不触发滚动（R7-1）。
     in property <int> keyboard-scroll: -1;
+    // 键盘滚动**请求序号**（单调递增）：每次页面下发滚动请求都 +1。
+    //
+    // 只看 `keyboard-scroll` 的值不够：用户可能用滚轮把这一行横向滚走（只改
+    // `flick.content-x`），再 ↑ 到 hero、↓ 回到同一格，或者行首按 ← / 末行按 ↓——
+    // 这些场景里请求的 row/local 与上次完全相同，值没变就永远不重新滚动，焦点卡
+    // 就留在视口外（A1）。所以真正触发滚动的是这个序号。
+    in property <int> keyboard-scroll-seq: 0;
+    // 悬停锁存复位序号（页面在数据变少、焦点被钳回 0 时推一档）：清掉 `hot` /
+    // `latch`，不让放大层留在已经被替换掉的那张卡上（A2）。
+    in property <int> hover-reset: 0;
 
     // ---- 调试通道：本行的可交互目标（见 docs/ui-architecture.md）----
     // 行是重复元素（各库行），父组件没法把本行的目标拼进自己的 `targets` 数组，
@@ -99,6 +109,12 @@ component CardRow inherits Rectangle {
         if (root.hot >= 0) {
             root.latch = root.hot;
         }
+    }
+    // 页面要求清掉悬停锁存（数据变少、焦点被钳回 0）：指针位置没变也不会再点亮
+    // 旧卡（`has-hover` 的边沿事件不会自己重发）。
+    changed hover-reset => {
+        root.hot = -1;
+        root.latch = -1;
     }
     property <int> zoom-index: root.hot >= 0 ? root.hot
         : ((zoom-ov.hovered || arrow-left-area.has-hover || arrow-right-area.has-hover)
@@ -150,7 +166,12 @@ component CardRow inherits Rectangle {
     // 行高 = 行标题 + 标题下距 + 卡片总高（图高 + 卡下标题）。
     // 不需要额外的放大预留：1.05 最多向上溢出 10px（1.05×368 的一半），标题下距 12px 兜住；
     // 向下溢出落在 40px 的 `section-gap` 里。
-    height: root.title-off + root.card-height;
+    //
+    // **空行不占一整块**（R7-C2）：`visible: false` 的元素在 `VerticalLayout` 里照样
+    // 占位，以前继续观看 / 最近添加为空时会在页面上留下一整块纯黑（真机半屏）。
+    // 这里把空行的高度直接算成 0；`HomePage` 的 `content-total` 与 `library-card-top`
+    // 都读这个 `height`，保持一致（只保留布局的块间距）。
+    height: root.cards.length > 0 ? root.title-off + root.card-height : 0px;
 
     // 行标题 + 查看全部（与卡同起于 content-gutter）。
     HorizontalLayout {
@@ -230,9 +251,12 @@ component CardRow inherits Rectangle {
         }
     }
 
-    // 只有键盘移动会改 `keyboard-scroll`（页面在 `scroll-to-index` 里下发），
-    // 悬停改的是 `focused-index`，不会走到这里——所以悬停不会把页面拽走（R7-1）。
-    changed keyboard-scroll => {
+    // 只有键盘移动会改 `keyboard-scroll` / `keyboard-scroll-seq`（页面在 `scroll-to-index`
+    // 里下发），悬停改的是 `focused-index`，不会走到这里——所以悬停不会把页面拽走（R7-1）。
+    //
+    // 触发条件是**请求序号**而不是下标值：滚轮把行滚走后再回到同一格，值不变、
+    // 序号变了，仍然要重新滚（A1）。
+    changed keyboard-scroll-seq => {
         if (root.nav-active && root.keyboard-scroll >= 0) {
             root.scroll-to-card(root.keyboard-scroll);
         }
@@ -510,6 +534,11 @@ export component HomePage inherits Rectangle {
     // 悬停路径永远不碰这两个属性（R7-1）。
     in-out property <int> keyboard-scroll-row: -1;
     in-out property <int> keyboard-scroll-local: -1;
+    // 滚动请求序号（单调递增，每次请求 +1）：行只认它，因为「同一个 row/local」
+    // 也要重新滚（滚轮把行滚走后 ↑ 到 hero、↓ 回来，或者行首 ← / 末行 ↓，A1）。
+    property <int> keyboard-scroll-seq: 0;
+    // 悬停锁存复位序号（Rust 在焦点被钳回 0 时推一档）：清掉各行的 `hot` / `latch`（A2）。
+    in property <int> hover-reset: 0;
     // 用户是否已开始导航；未激活时行不放大任何卡（首屏保持"干净"，与 Netflix 一致）。
     in property <bool> nav-active: false;
     in property <bool> search-focused: false;
@@ -600,23 +629,31 @@ export component HomePage inherits Rectangle {
         root.request-row-scroll(row, index - root.data.library-row-starts[ri]);
     }
 
-    /// 库行卡区上沿（内容坐标）：与 `content-total` / `VerticalLayout` 同一套常量。
+    /// 库行卡区上沿（内容坐标）：与 `content-total` / `VerticalLayout` 同一套几何。
     ///
     /// 行顺序固定：hero → 继续观看 → 最近添加 → 各库行，块间距 `section-gap`；
     /// 没有 hero 时第一个块从 0 开始（hero 是 `if` 子树，不会留空槽）。
+    ///
+    /// 块高一律读 `CardRow` 自己报的值（`height` / `cards-top` / `cards-height`），
+    /// 页面里不再抄一份“标题 + 卡片高”的公式（A4：以前 `library-card-top` 与
+    /// `continue/recent/library-row-h` 是同一公式的三份拷贝）。
     function library-card-top(ri: int) -> length {
         let rows-top = root.data.has-hero ? root.billboard-slot + Theme.section-gap : 0px;
         return rows-top
-            + root.continue-row-h + Theme.section-gap
-            + root.recent-row-h + Theme.section-gap
+            + row0.height + Theme.section-gap
+            + row1.height + Theme.section-gap
             + ri * (root.library-row-h + Theme.section-gap)
-            + Theme.section-title-height + Theme.row-title-gap;
+            + row0.cards-top;
     }
 
     /// 下发键盘滚动：本行横向跟随；`local` 是行内下标（非本行时为 -1）。
+    ///
+    /// 每次请求都推进序号：行只认序号变化，所以「同一个 row/local」也会重新执行
+    /// `scroll-to-card`（A1：轮滚滚走后回到同一格、行首 ←、末行 ↓）。
     function request-row-scroll(row: int, local: int) {
         root.keyboard-scroll-row = row;
         root.keyboard-scroll-local = local;
+        root.keyboard-scroll-seq = root.keyboard-scroll-seq + 1;
     }
 
     // 纵向让一段卡区（上沿 + 卡片总高）完全可见；视口是外层 `flick`。
@@ -658,23 +695,24 @@ export component HomePage inherits Rectangle {
     // 行高 = 行标题（`section-title-height`）+ 标题下距（`row-title-gap`）
     // + 卡片总高（图高 + 卡下标题）。不需要放大预留：1.05 的溢出（上下共 16.8px）
     // 全部落在标题下距 12px 与行间距 40px 里（见 `Theme.zoom-allowance-*`）。
-    property <length> continue-row-h: Theme.section-title-height + Theme.row-title-gap
-        + Theme.card-landscape-h + Theme.card-caption-height;
-    property <length> recent-row-h: Theme.section-title-height + Theme.row-title-gap
-        + Theme.card-portrait-h + Theme.card-caption-height;
-    property <length> library-row-h: continue-row-h;
+    //
+    // 这些值不再在页面里重写：真正的高度读 `row0.height` / `row1.height`（空行是 0，
+    // 见 `CardRow.height`，R7-C2）；库行与继续观看同一种横版行，用 `row0` 报的
+    // `cards-top + cards-height`（空行时它仍然是完整块的几何）。
+    property <length> library-row-h: row0.cards-top + row0.cards-height;
     // 布局块数 = 真正参与纵向布局的块数。
     //
     // 关键：`visible: false` **不**让块从布局里消失——`row0` / `row1` 是常驻实例，
-    // 即使继续观看 / 最近添加为空，它们照样占一整行高度；库行同理（`for` 的每项
-    // 都会占位）。以前这里按“非空行数”算，只要有一行是空的，内容总高就少一整行，
-    // 最后一个库行永远滚不进视口（体检 R7-1）。现在按**实例化的块数**算：
-    // hero 是 `if` 子树（没有就不实例化），其余两块 + 每条库行都算。
+    // 即使继续观看 / 最近添加为空，它们照样是布局里的两个块（只是高度为 0，见
+    // `CardRow.height`）。库行同理（`for` 的每项都会占位）。以前这里按“非空行数”
+    // 算，只要有一行是空的，内容总高就少一整行，最后一个库行永远滚不进视口
+    // （体检 R7-1）。现在按**实例化的块数**算：hero 是 `if` 子树（没有就不实例化），
+    // 其余两块 + 每条库行都算。
     property <int> layout-blocks: (root.data.has-hero ? 1 : 0) + 2
         + root.data.library-rows.length;
     property <length> content-total: root.billboard-slot
-        + continue-row-h + recent-row-h
-        + root.data.library-rows.length * library-row-h
+        + row0.height + row1.height
+        + root.data.library-rows.length * root.library-row-h
         + (root.layout-blocks - 1) * Theme.section-gap
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
@@ -733,10 +771,10 @@ export component HomePage inherits Rectangle {
         : (root.probe-focus-in-continue
             ? row0.y + row0.cards-top + row0.cards-height
             : row1.y + row1.cards-top + row1.cards-height) + flick.content-y;
-    out property <length> probe-row-content-x: root.probe-focus-in-continue
-        ? row0.probe-content-x : row1.probe-content-x;
-    out property <length> probe-row-viewport-w: root.probe-focus-in-continue
-        ? row0.probe-viewport-w : row1.probe-viewport-w;
+    out property <length> probe-row-content-x: !root.probe-focus-in-rows ? -1px
+        : root.probe-focus-in-continue ? row0.probe-content-x : row1.probe-content-x;
+    out property <length> probe-row-viewport-w: !root.probe-focus-in-rows ? -1px
+        : root.probe-focus-in-continue ? row0.probe-viewport-w : row1.probe-viewport-w;
     out property <length> probe-focus-left: !root.probe-focus-in-rows ? -1px
         : (root.probe-focus-in-continue
             ? row0.probe-focus-left : row1.probe-focus-left) + root.probe-row-content-x;
@@ -1101,6 +1139,8 @@ export component HomePage inherits Rectangle {
                 focused-index: root.continue-focus;
                 keyboard-scroll: root.keyboard-scroll-row == 0
                     ? root.keyboard-scroll-local : -1;
+                keyboard-scroll-seq: root.keyboard-scroll-seq;
+                hover-reset: root.hover-reset;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 0;
                 image-gen: root.image-gen;
@@ -1130,6 +1170,8 @@ export component HomePage inherits Rectangle {
                 focused-index: root.recent-focus;
                 keyboard-scroll: root.keyboard-scroll-row == 1
                     ? root.keyboard-scroll-local : -1;
+                keyboard-scroll-seq: root.keyboard-scroll-seq;
+                hover-reset: root.hover-reset;
                 nav-active: root.nav-active && root.content-focused;
                 image-row: 1;
                 image-gen: root.image-gen;
@@ -1173,6 +1215,8 @@ export component HomePage inherits Rectangle {
                         && local-focus < row-data.cards.length ? local-focus : -1;
                     keyboard-scroll: root.keyboard-scroll-row == 2 + ri
                         ? root.keyboard-scroll-local : -1;
+                    keyboard-scroll-seq: root.keyboard-scroll-seq;
+                    hover-reset: root.hover-reset;
                     nav-active: root.nav-active && root.content-focused;
                     focus-hover(index) => {
                         root.focus-index = root.data.library-row-starts[ri] + index;

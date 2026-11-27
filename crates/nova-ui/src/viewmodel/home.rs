@@ -194,6 +194,27 @@ impl HomeView {
     }
 }
 
+/// 视图整体替换（刷新 / 重新排序）后，首页焦点下标该落在哪里。
+///
+/// 与媒体库的 [`crate::viewmodel::rebase_focus`] 同一口彿：焦点按**条目 id**
+/// 重新定位，而不是沿用旧下标。首页也会重排——「继续观看」按最近播放排序、
+/// 「最近添加」按加入时间排序，同一个下标指向的往往是另一部作品；沿用旧下标会让
+/// 焦点惄惄地飘到另一张卡上（键盘用户看到的高亮不在了）。
+///
+/// - 旧焦点卡的 `item_id` 在新视图里还在 → 用它新的下标；
+/// - 找不到（条目被移除 / 换了数据源）→ 退回旧下标并夹到新卡片范围内；
+/// - 新视图为空 → `0`。
+pub fn rebase_home_focus(old: &HomeView, old_focus: usize, next: &HomeView) -> usize {
+    let total = next.card_count();
+    let fallback = old_focus.min(total.saturating_sub(1));
+    let Some(id) = old.card_at(old_focus).map(|card| card.item_id.as_str()) else {
+        return fallback;
+    };
+    (0..total)
+        .find(|index| next.card_at(*index).is_some_and(|card| card.item_id == id))
+        .unwrap_or(fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +367,34 @@ mod tests {
     #[test]
     fn hero_image_keys_are_empty_without_hero() {
         assert!(HomeView::new().hero_image_keys().is_empty());
+    }
+
+    /// A3：首页重排后焦点要跟着条目 id 走。
+    #[test]
+    fn rebase_home_focus_follows_the_item_through_a_reorder() {
+        let mut old = HomeView::new();
+        old.continue_watching = vec![
+            CardView::new("a", "A"),
+            CardView::new("b", "B"),
+            CardView::new("c", "C"),
+        ];
+        let mut next = old.clone();
+        next.continue_watching = vec![
+            CardView::new("b", "B"),
+            CardView::new("c", "C"),
+            CardView::new("a", "A"),
+        ];
+        assert_eq!(rebase_home_focus(&old, 1, &next), 0, "b 跑到下标 0");
+        assert_eq!(rebase_home_focus(&old, 0, &next), 2, "a 跑到下标 2");
+
+        // 条目被移除：退回旧下标并夹到范围内。
+        let mut shrunk = old.clone();
+        shrunk.continue_watching.remove(1);
+        assert_eq!(rebase_home_focus(&old, 1, &shrunk), 1);
+        shrunk.continue_watching.truncate(1);
+        assert_eq!(rebase_home_focus(&old, 1, &shrunk), 0);
+
+        // 新视图为空：0（不 panic、不越界）。
+        assert_eq!(rebase_home_focus(&old, 2, &HomeView::new()), 0);
     }
 }

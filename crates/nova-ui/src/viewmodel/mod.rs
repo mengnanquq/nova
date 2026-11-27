@@ -32,7 +32,7 @@ pub use format::{
     badge, detail_meta_line, episode_code, format_duration, meta_line, progress_percent,
 };
 pub use grid::{BUFFER_ROWS, FALLBACK_ROWS, GridWindow, grid_window};
-pub use home::{HomeView, LibraryRowView};
+pub use home::{HomeView, LibraryRowView, rebase_home_focus};
 pub use image::{ImageKey, ImageKind};
 pub use library::{LibraryTab, LibraryView, rebase_focus};
 pub use nav::{Navigator, Route};

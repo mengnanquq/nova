@@ -162,8 +162,16 @@ fn search_page_has_no_highlighted_navbar_tab() {
         "顶栏搜索按钮进搜索：顶栏不能高亮任何库标签"
     );
 
-    // 高亮为空，但键盘仍有合理起点：从第一行按 ↑ 进顶栏，焦点落在第 0 个标签
+    // 高亮为空，但键盘仍有合理起点：焦点链是 结果网格 → 页内搜索框 → 顶栏
+    // （R7-D1），所以从内容层按两下 ↑ 到顶栏，焦点落在第 0 个标签
     // （不是“无高亮”就等于“顶栏不可聚焦”）。
+    press(&app, Key::UpArrow);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Content,
+        "第一下 ↑ 先回页内搜索框（不是直接跳到顶栏）"
+    );
+    assert!(app.ui().get_search_focused(), "焦点应在页内搜索框里");
     press(&app, Key::UpArrow);
     assert_eq!(app.focus_layer(), FocusLayer::Navbar);
     assert_eq!(app.nav_focus(), 0, "无高亮时顶栏焦点从第一个标签开始");
@@ -278,4 +286,64 @@ fn escape_still_takes_the_clear_and_home_path() {
         "Esc 必须走 search-clear（清空 + 回首页）"
     );
     assert_eq!(app.search_text(), "");
+}
+
+/// R7-D1：页内搜索框不能把方向键吞掉。
+///
+/// 修复前：到搜索页时大输入框持有焦点，`TextInput` 把 ↓ / ↑ 当编辑键吃掉（事件冒泡
+/// 到不了兄弟节点 `keyboard`），结果网格完全无法用键盘进入——必须先按 Tab / Esc
+/// 手动释放焦点。
+///
+/// 期望（与 `docs/ui-architecture.md` 的搜索页键盘约定一致）：
+/// - 输入框里 ↓ → 焦点交给结果网格的第一张卡；
+/// - 网格第一行 ↑ → 回到搜索框；
+/// - 搜索框里 ↑ → 进顶栏（标签仍可达）。
+#[test]
+fn page_input_hands_arrow_keys_to_the_result_grid() {
+    let app = setup();
+    // 搜索页的顶栏沿用首页的标签：进顶栏那一步需要它们（`nav_slots`）。
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    app.set_search_text("沙丘");
+    assert!(app.handle_key(nova_ui::KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+    assert_eq!(app.ui().get_search_focus(), 0);
+
+    // ↓：焦点必须是「网格第一张」，并且真的交给了全局键盘（`nav_active` 为真说明
+    // 这个键走到了 `keyboard` 的 `key-pressed`，而不是被输入框吃掉）。
+    press(&app, Key::DownArrow);
+    app.refresh_targets();
+    assert!(
+        !app.ui().get_search_focused(),
+        "↓ 之后搜索框必须让出焦点（否则方向键仍然被它吞掉）"
+    );
+    assert_eq!(app.ui().get_search_focus(), 0, "焦点应停在结果网格第一张卡");
+    assert!(
+        app.ui().get_nav_active(),
+        "↓ 必须真的到达全局键盘（nav_active 由键盘处理器置真）"
+    );
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
+
+    // 再从第一行 ↑：回到搜索框，而不是"没反应"或被顶栏截走。
+    press(&app, Key::UpArrow);
+    assert!(
+        app.ui().get_search_focused(),
+        "网格第一行 ↑ 应把焦点交回页内搜索框"
+    );
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Content,
+        "输入框不是 chrome 层"
+    );
+
+    // 搜索框里 ↑：进顶栏（标签仍可达）。
+    press(&app, Key::UpArrow);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Navbar,
+        "搜索框 ↑ 应进顶栏（否则搜索页的标签键盘不可达）"
+    );
+    assert!(!app.ui().get_search_focused(), "进顶栏后输入框不再持有焦点");
 }

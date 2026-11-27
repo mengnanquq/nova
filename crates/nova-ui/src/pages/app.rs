@@ -18,6 +18,7 @@ use crate::pages::{add_server, assets::ImageStore, banner, detail, home, library
 use crate::viewmodel::{
     AddServerError, AddServerView, BannerData, DetailView, HomeView, ImageKey, LibraryView,
     Navigator, PlayerView, Route, SearchView, TargetInfo, grid_window, move_focus, rebase_focus,
+    rebase_home_focus,
 };
 use crate::{AppWindow, Target, TargetBus};
 
@@ -918,23 +919,33 @@ impl App {
         // **同一份**视图，若在这里无条件回写 `state.focus.home`，用户眼前的悬停
         // 高亮（以及页面滚动）会被弹回上一次键盘位置。
         //
-        // 所以只在 UI 焦点越界（数据变少）时才回写；其余情况保持不动。
+        // 但数据**真的变了**时要按条目 id 重新定位（[`rebase_home_focus`]）：
+        //「继续观看」会按最近播放重排，沿用旧下标会让焦点落到另一部作品上（A3）。
+        // 同一份视图重贴时 id 位置不变，结果就是原来的下标，悬停不受影响。
         let current = self.ui.get_home_focus().max(0) as usize;
         let mut state = self.state.borrow_mut();
         // 首页按行上报可见图片窗口是事件驱动的（滚动 / 布局变化）；数据本身变化
         // 不一定改几何，所以数据真变了时推一行代次，让每行重新上报自己的区间。
         // （`apply_image` 每次到图都会重贴**同一份**视图，那不该触发一整轮上报。）
         let changed = state.home != *view;
-        state.home = view.clone();
-        let focus = if current >= view.card_count() {
+        // 越界（数据变少）：钳到第 1 张，并把页面滚回顶部、清掉悬停锁存（A2）。
+        // 否则焦点虽然写在 0，屏幕还停在底部——Enter 打开的是屏幕外那张。
+        let out_of_range = current >= view.card_count();
+        let focus = if out_of_range {
             0
         } else {
-            current
+            rebase_home_focus(&state.home, current, view)
         };
+        state.home = view.clone();
         state.focus.home = focus;
         drop(state);
         if self.ui.get_home_focus() != focus as i32 {
             self.ui.set_home_focus(focus as i32);
+        }
+        if out_of_range {
+            self.ui.invoke_scroll_home_to(0.0);
+            let next = self.ui.get_home_hover_reset().wrapping_add(1);
+            self.ui.set_home_hover_reset(next);
         }
         if changed {
             let next = self.ui.get_home_image_gen().wrapping_add(1);
@@ -1618,6 +1629,26 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         });
     }
     {
+        // 搜索页输入框 ↓：焦点交给结果网格的第一张卡（R7-D1）。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search_grid_focus(move || {
+            if let Some(ui) = weak.upgrade() {
+                focus_search_grid(&ui, &state);
+            }
+        });
+    }
+    {
+        // 搜索页输入框 ↑：进顶栏（标签仍键盘可达）。
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_search_navbar_focus(move || {
+            if let Some(ui) = weak.upgrade() {
+                focus_search_navbar(&ui, &state);
+            }
+        });
+    }
+    {
         // 横幅动作按钮：动作在上层（重新登录 / 重试…）。
         let state = state.clone();
         ui.on_banner_action(move || {
@@ -2130,16 +2161,27 @@ fn move_focus_by(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, dx: i32
     // 它们的 `y`）；库行的横向滚动由页面下发「键盘滚到本行第 N 张」触发，悬停只
     // 同步焦点、不滚动（R2-2 / R7-2）。可视行号必须在这里算：`focus_rows` 会跳过
     // 空行，它的下标不能当界面行号用。
+    scroll_focus_into_view(ui, state, page);
+    true
+}
+
+/// 把当前焦点卡重新滚进视口（焦点没变也要重新下发请求）。
+///
+/// 两个调用点都需要它：
+/// 1. 方向键移动后（行内 / 行间）；
+/// 2. 从 chrome 层（顶栏 / hero）回到内容层时（A1）：用户可能在离开期间用滚轮
+///    把那一行滚走了，进门时的 row/local 与上次相同，必须重新请求才能回来。
+fn scroll_focus_into_view(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
+    let index = current_focus(ui, state, page);
     match page {
         Page::Home => {
-            let row = state.borrow().home.focus_row_at(next).unwrap_or(0);
-            ui.invoke_scroll_home_to_index(next as i32, row as i32);
+            let row = state.borrow().home.focus_row_at(index).unwrap_or(0);
+            ui.invoke_scroll_home_to_index(index as i32, row as i32);
         }
-        Page::Library => ui.invoke_scroll_library_to_index(next as i32),
-        Page::Search => ui.invoke_scroll_search_to_index(next as i32),
+        Page::Library => ui.invoke_scroll_library_to_index(index as i32),
+        Page::Search => ui.invoke_scroll_search_to_index(index as i32),
         Page::Detail | Page::Player => {}
     }
-    true
 }
 
 // ---- 键盘焦点层：hero / 顶栏（体检 R2-2b）----
@@ -2246,10 +2288,51 @@ fn move_up(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
     if !at_first_row {
         return move_focus_by(ui, state, page, 0, -1);
     }
+    if page == Page::Search {
+        // 搜索页首行 ↑：回到页内大搜索框（R7-D1）。搜索框里再按 ↑ 才进顶栏
+        // （见 `focus_search_navbar`），所以标签仍然键盘可达。
+        return focus_search_input(ui);
+    }
     if page == Page::Home && hero_available(&state.borrow()) {
         return enter_hero(ui, state);
     }
     enter_navbar(ui, state, page)
+}
+
+/// 把键盘焦点交给搜索页的页内大搜索框。
+///
+/// `search-focused` 必须与"输入框真的是按键目标"一致：只 `focus()` 不置属性会让
+/// 晚到的 `set_search` 按“用户没在输入”回填旧查询词。
+fn focus_search_input(ui: &AppWindow) -> bool {
+    ui.set_search_focused(true);
+    ui.invoke_focus_search_input();
+    true
+}
+
+/// 搜索页输入框 ↓：把键盘焦点交给结果网格的第一张卡（R7-D1）。
+///
+/// 页内输入框是 `TextInput`：它会把 ↑ / ↓ 当编辑键吃掉，事件也冒泡不到兄弟节点
+/// `keyboard`（方向键因此完全无法进网格）。`.slint` 侧识别到这两个键后先
+/// `clear-focus()` + `search-blur()`（与 Enter 提交同一条路径），再回调到这里；
+/// 焦点数学仍然只在 Rust 里做。
+fn focus_search_grid(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    if Page::from_index(ui.get_page()) != Page::Search {
+        return false;
+    }
+    set_focus_layer(ui, state, FocusLayer::Content);
+    set_focus(ui, state, Page::Search, 0);
+    // 键盘已开始导航：网格的放大指示生效（与全局按键处理器同一口径）。
+    ui.set_nav_active(true);
+    scroll_focus_into_view(ui, state, Page::Search);
+    true
+}
+
+/// 搜索页输入框 ↑：进顶栏（与首页 / 媒体库的 chrome 层同一套）。
+fn focus_search_navbar(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
+    if Page::from_index(ui.get_page()) != Page::Search {
+        return false;
+    }
+    enter_navbar(ui, state, Page::Search)
 }
 
 /// chrome 层（hero / 顶栏）里的方向键：层内移动，不碰内容层的扁平焦点。
@@ -2363,17 +2446,28 @@ fn handle_chrome_key(
             // 首页从顶栏往下先回 hero（若 hero 真的可聚焦），其余直接回内容层。
             if layer == FocusLayer::Navbar && page == Page::Home && hero_available(&state.borrow())
             {
-                enter_hero(ui, state)
-            } else {
-                leave_chrome_layer(ui, state)
+                return enter_hero(ui, state);
             }
+            let left = leave_chrome_layer(ui, state);
+            if left {
+                // 回到内容层时重新下发一次滚动请求（A1）：离开期间可能被滚轮滚走。
+                scroll_focus_into_view(ui, state, page);
+            }
+            left
         }
         KeyCommand::Accept => match layer {
             FocusLayer::Hero => activate_hero(ui, state),
             FocusLayer::Navbar => activate_navbar(ui, state, page),
             FocusLayer::Content => false,
         },
-        KeyCommand::Back => leave_chrome_layer(ui, state),
+        KeyCommand::Back => {
+            let left = leave_chrome_layer(ui, state);
+            if left {
+                // Esc / Backspace 只退层：退回来时也要把焦点卡重新滚进视口（A1）。
+                scroll_focus_into_view(ui, state, page);
+            }
+            left
+        }
         KeyCommand::Search => {
             leave_chrome_layer(ui, state);
             focus_search(ui, state);

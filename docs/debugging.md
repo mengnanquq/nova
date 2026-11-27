@@ -97,9 +97,9 @@ printf '{"cmd":"scroll","x":400,"y":300,"dy":360}\n' | socat - UNIX-CONNECT:/tmp
 
 首页的这四个字段只覆盖**继续观看 / 最近添加**两行：库行是 `for` 重复元素，页面拿不到
 它们的 `y` / `flick`（R7-2 之后库行也有键盘焦点了）。焦点不在前两行时
-`home_geometry.focus_top/bottom/left/right` **一律返回 `-1`**（与 `probe-focus-left` 同一
-口径，不能拿库行下标去点亮前两行的几何）。焦点在库行时用 `targets` 里的
-`home.row.lib.N.card.M` 矩形（窗口坐标）判断可见性。
+`home_geometry.focus_top/bottom/left/right` 与 `row_scroll_x` / `row_viewport_w`
+**一律返回 `-1`**（与 `probe-focus-left` 同一口径，不能拿库行下标去点亮前两行的几何）。
+焦点在库行时用 `targets` 里的 `home.row.lib.N.card.M` 矩形（窗口坐标）判断可见性。
 
 所以判断「焦点卡在视口内」**不需要**再拿 `scroll_y` 换算：
 

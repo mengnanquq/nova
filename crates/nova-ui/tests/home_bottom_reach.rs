@@ -243,6 +243,11 @@ fn content_total_handles_every_combinations_of_empty_blocks() {
     let mut one_library_row = home_filled();
     one_library_row.library_rows.truncate(1);
 
+    // R7-C2：继续观看与最近添加**都**空（真机首页的常见形状——没有续播点）。
+    let mut no_continue_no_recent = home_filled();
+    no_continue_no_recent.continue_watching.clear();
+    no_continue_no_recent.recently_added.clear();
+
     // 搜索过滤后的形状：每个块都只剩 1 张卡（行数不变）。
     let mut filtered = home_filled();
     filtered.continue_watching.truncate(1);
@@ -251,10 +256,11 @@ fn content_total_handles_every_combinations_of_empty_blocks() {
         row.items.truncate(1);
     }
 
-    let cases: [(&str, HomeView); 6] = [
+    let cases: [(&str, HomeView); 7] = [
         ("无 hero", no_hero),
         ("继续观看为空", no_continue),
         ("最近添加为空", no_recent),
+        ("继续观看与最近添加为空", no_continue_no_recent),
         ("0 个库行", no_library_rows),
         ("1 个库行", one_library_row),
         ("搜索过滤后", filtered),
@@ -293,5 +299,51 @@ fn content_total_handles_every_combinations_of_empty_blocks() {
                 bottom - expected_bottom
             );
         }
+    }
+}
+
+/// R7-C2：空的「继续观看」/「最近添加」不能占一整块高度。
+///
+/// 真机（800×600）滚到中段时出现约半屏的纯黑带：`.slint` 的纵向布局不会剔除
+/// `visible: false` 的行，空行照样占一整块（卡片高 + 表头），而画面上什么都没有。
+/// 判据：把一行清空后内容总高必须**减少这一块**（而不是 0），两行都空时减量等于
+/// 两次单独减量之和；同时「内容总高 = 布局真实占位」不能因此被破坏（那条由
+/// `content_total_handles_every_combinations_of_empty_blocks` 守着）。
+#[test]
+fn empty_continue_and_recent_rows_do_not_reserve_a_full_block() {
+    let content_h = |view: &HomeView, width: f32, height: f32| -> f64 {
+        let app = setup(view, width, height);
+        f64::from(app.ui().get_home_content_h())
+    };
+
+    let full = home_filled();
+    let mut no_continue = home_filled();
+    no_continue.continue_watching.clear();
+    let mut no_recent = home_filled();
+    no_recent.recently_added.clear();
+    let mut neither = home_filled();
+    neither.continue_watching.clear();
+    neither.recently_added.clear();
+
+    for (width, height) in [(1920.0f32, 1080.0f32), (800.0, 600.0)] {
+        let a = content_h(&full, width, height);
+        let b = content_h(&no_continue, width, height);
+        let c = content_h(&no_recent, width, height);
+        let d = content_h(&neither, width, height);
+
+        assert!(
+            a - b > 1.0,
+            "{width}x{height}: 清空「继续观看」后内容总高必须减少一整块（实际 {a} → {b}）"
+        );
+        assert!(
+            a - c > 1.0,
+            "{width}x{height}: 清空「最近添加」后内容总高必须减少一整块（实际 {a} → {c}）"
+        );
+        assert!(
+            ((a - b) - (c - d)).abs() <= 1.0,
+            "{width}x{height}: 两行都空的减量应等于两次单独减量之和（{} vs {}）",
+            a - b,
+            c - d
+        );
     }
 }

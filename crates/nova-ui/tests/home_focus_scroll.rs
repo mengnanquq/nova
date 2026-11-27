@@ -15,7 +15,7 @@ mod common;
 use std::time::Duration;
 
 use common::{home_filled, init_backend};
-use nova_ui::{App, AppWindow, CardView, HomeView, Page, Theme};
+use nova_ui::{App, AppWindow, CardView, FocusLayer, HomeView, Page, Theme};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
@@ -175,6 +175,13 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
         card.y,
         card.height
     );
+    // 横向也要跟着走：焦点卡整张落在窗口宽度里（行自己的横向 Flickable 已跟随）。
+    assert!(
+        f64::from(card.x) >= -0.5 && f64::from(card.x + card.width) <= f64::from(W) + 0.5,
+        "库行焦点卡横向必须在窗口里：x={} w={}（窗口宽 {W}）",
+        card.x,
+        card.width
+    );
 
     // Up 回「最近添加」的同一列（第 4 列 → focus = 2 + 3）。
     press(&app, Key::UpArrow);
@@ -204,6 +211,96 @@ fn home_keyboard_focus_scrolls_the_page_and_the_row() {
     assert_focus_card_visible_horizontally(
         "首页（回到继续观看行）",
         app.ui().get_home_row_viewport_w(),
+        app.ui().get_home_focus_left(),
+        app.ui().get_home_focus_right(),
+        hpad,
+    );
+}
+
+/// A1：滚轮把一行横向滚走之后，再 ↑ 到 hero、↓ 回到**同一张卡**，行必须重新滚回来。
+///
+/// 修复前：`CardRow.changed keyboard-scroll` 只在**值变化**时触发。滚轮只改行的
+/// `content-x`（不改 `keyboard-scroll`），回到同一格时请求的 row/local 与上次相同 →
+/// 不滚 → 焦点卡留在视口外（按 Enter 打开的是一张看不见的卡）。行首按 ←、末行按 ↓
+/// 也是同一类「请求没变但必须重滚」。
+#[test]
+fn returning_to_the_same_focused_card_scrolls_the_row_back() {
+    let app = app_800x600();
+    let mut view = home_filled();
+    view.hero = view
+        .hero
+        .map(|hero| hero.with_overview("保罗·厄崔迪与弗雷曼人并肩作战。"));
+    view.continue_watching = (0..12)
+        .map(|index| CardView::new(format!("c{index:02}"), format!("第 {index} 集")))
+        .collect();
+    // 只留一行：纵向不必滚，断言只关心行内横向。
+    view.recently_added.clear();
+    view.library_rows.clear();
+    app.set_home(&view);
+    app.ui().set_billboard_ratio(0.2);
+    app.show_page(Page::Home);
+    app.ui().set_home_focus(0);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+    app.refresh_targets();
+    let theme = app.ui().global::<Theme>();
+    let hpad = theme.get_zoom_allowance_x() / 2.0;
+
+    // 一次 Right：焦点落在继续观看第 2 张，`nav-active` 生效（用户已开始导航）。
+    press(&app, Key::RightArrow);
+    assert_eq!(app.focus_index(), 1, "焦点应在继续观看第 2 张");
+    let row_w = app.ui().get_home_row_viewport_w();
+
+    // 滚轮把这一行横向滚走（与真机一样：只动 content-x，焦点不变）。
+    //
+    // 指针停在两张卡之间的 `card-gap` 里，而且每一步滚的都是**整数张卡**
+    // （卡宽 + 间距 = 212px），所以指针始终落在同一个「缝」里——没有卡被悬停，
+    // `focus-hover` 不会把焦点改掉（悬停会同步焦点，那是另一条语义）。
+    let card = app
+        .target("home.row.continue.card.1")
+        .expect("第 2 张卡在视口里");
+    let (x, y) = card.center();
+    let gap_x = card.x + card.width + 6.0;
+    assert!(gap_x > x, "缝隙在卡片右侧（x={gap_x}）");
+    for _ in 0..3 {
+        app.ui()
+            .window()
+            .dispatch_event_with_result(WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(gap_x, y),
+                delta_x: -212.0,
+                delta_y: 0.0,
+            })
+            .expect("派发 PointerScrolled");
+    }
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+    assert_eq!(
+        app.focus_index(),
+        1,
+        "滚轮不该改变焦点（指针停在两张卡之间的缝隙里）"
+    );
+    assert!(
+        f64::from(app.ui().get_home_row_scroll_x()) < 0.0,
+        "滚轮必须真的把这一行横向滚出去（row content-x = {}）",
+        app.ui().get_home_row_scroll_x()
+    );
+    assert!(
+        f64::from(app.ui().get_home_focus_left()) < 0.0,
+        "前提：焦点卡已被滚出视口左沿（focus_left = {}）",
+        app.ui().get_home_focus_left()
+    );
+
+    // ↑ 到 hero、↓ 回到内容层的同一张卡：焦点请求与上次完全一样。
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Hero, "首页首行 ↑ 先进 hero");
+    press(&app, Key::DownArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
+    assert_eq!(app.focus_index(), 1, "↓ 回到同一格（焦点没变）");
+
+    // 重新请求滚动后焦点卡必须重新完全可见。
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(80));
+    assert_focus_card_visible_horizontally(
+        "首页（滚轮后回到同一格）",
+        row_w,
         app.ui().get_home_focus_left(),
         app.ui().get_home_focus_right(),
         hpad,
