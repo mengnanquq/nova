@@ -232,8 +232,7 @@ export struct Target {
   标签的环描边会被标签区的 `clip` 裁掉。所以“焦点环完整可见”的判定是
   `focus_tab_left - focus-offset >= 0 && focus_tab_right + focus-offset <=
   tabs_viewport_w`（`focus-offset` / `focus-width` 都从 `Theme` 取）；800px 下滚到底时
-  标签本体右沿是 `tabs_viewport_w - focus-offset`，环的外沿才贴住视口右沿
-  （旧版“末端无额外余量 / `focus_tab_right == tabs_viewport_w`”的说法已过时）；
+  标签本体右沿是 `tabs_viewport_w - focus-offset`，环的外沿才贴住视口右沿；
 - 搜索页的顶栏**不画**胶囊搜索框（页内已有大搜索框），那个控件也就不能占标签区的
   宽度（`R7-C1`：以前 `visible: false` 照样占位，800px 下标签区从 587 掉到 383）。
   标签区的宽度与首页同一套算法，两页的标签行 / 最大滚动量也完全一致（`R8-A1`
