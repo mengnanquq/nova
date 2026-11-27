@@ -304,9 +304,10 @@ struct State {
     // 离开搜索网格时的焦点位置：`(查询词, 条目 id)`。
     //
     // 网格首行 ↑ 回页内输入框后再按 ↓，应该回到原来那张卡（与首页「保持列」一致），
-    // 而不是第 0 张。记 **item id** 而不是下标：结果变少 / 刷新后下标会指向别的卡，
-    // 按 id 找回位置才可靠（找不到就回 0）。查询词变了或**离开搜索页**（Esc 回首页 /
-    // 点卡进详情 / 返回）就作废——下次进网格从 0 开始。
+    // 而不是第 0 张；点卡进详情再返回也一样（Netflix 停在原来那张卡上）。记 **item id**
+    // 而不是下标：结果变少 / 刷新后下标会指向别的卡，按 id 找回位置才可靠（找不到就
+    // 回 0）。查询词变了或**真的离开搜索**（Esc 回首页 / 切换标签进媒体库）就作废；
+    // 进出详情 / 播放页不清（见 `set_page`）。
     search_return: Option<(String, String)>,
     home: HomeView,
     library: LibraryView,
@@ -486,8 +487,10 @@ fn arrow_row_key(id: &str) -> Option<i32> {
 
 /// 这次点击是否真的让**箭头所在行**交出了滚动请求。
 ///
-/// 只比这一行的点击计数：整张表比起来，别的行在这一轮里涨了（或行组件被模型
-/// 重建、计数凭空出现 / 归零）也会算到这个箭头头上。
+/// 只比这一行的点击计数，而且只看**增大**：计数在箭头 `clicked` 里同帧 +1，点完比
+/// 点前多才算交出请求；整张表比起来，别的行在这一轮里涨了也会算到这个箭头头上。
+/// 计数变小（行组件被模型重建）不当成交出过请求——否则重建本身就会把死箭头记成
+/// `changed`。
 fn arrow_scroll_clicked(
     after: &BTreeMap<i32, i32>,
     before: &BTreeMap<i32, i32>,
@@ -496,7 +499,7 @@ fn arrow_scroll_clicked(
     let Some(row) = arrow_row_key(target_id) else {
         return false;
     };
-    after.get(&row).copied() != before.get(&row).copied()
+    after.get(&row).copied().unwrap_or(0) > before.get(&row).copied().unwrap_or(0)
 }
 
 /// 扫描开始时的页面视图快照（体检 R8-C2）。
@@ -2630,9 +2633,9 @@ fn move_up(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) -> bool {
                 .get(index)
                 .map(|card| (state.search.term.clone(), card.item_id.clone()))
         };
-        if let Some(record) = record {
-            state.borrow_mut().search_return = Some(record);
-        }
+        // 取不到卡（空结果 / 下标越界）也要写：留旧记录会让“查询词恰好又相同”的
+        // 下一次 ↓ 跳回一张早就不是当前焦点的卡。
+        state.borrow_mut().search_return = record;
         return focus_search_input(ui);
     }
     if page == Page::Home && hero_available(&state.borrow()) {
@@ -2651,6 +2654,22 @@ fn focus_search_input(ui: &AppWindow) -> bool {
     true
 }
 
+/// `search_return` 对应的结果网格下标。
+///
+/// 按 **item id** 在**当前**结果里找回位置（结果变少 / 重排不会跳到另一张卡上）；
+/// 没记录、查询词变了或条目没了都回 0。
+fn search_return_index(state: &State) -> usize {
+    match state.search_return.as_ref() {
+        Some((term, item_id)) if *term == state.search.term => state
+            .search
+            .cards
+            .iter()
+            .position(|card| card.item_id == *item_id)
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// 搜索页输入框 ↓：把键盘焦点交给结果网格的第一张卡（R7-D1）。
 ///
 /// 页内输入框是 `TextInput`：它会把 ↑ / ↓ 当编辑键吃掉，事件也冒泡不到兄弟节点
@@ -2664,18 +2683,7 @@ fn focus_search_grid(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     // 从输入框回到网格时恢复上次离开网格的位置（与首页「保持列」同口径）；
     // 记住的是 **item id**：按 id 在新结果里找回位置，结果变少 / 换了顺序也不会
     // 跳到另一张卡上；找不到（条目没了）或查询词变了就回 0。
-    let index = {
-        let state = state.borrow();
-        match state.search_return.as_ref() {
-            Some((term, item_id)) if *term == state.search.term => state
-                .search
-                .cards
-                .iter()
-                .position(|card| card.item_id == *item_id)
-                .unwrap_or(0),
-            _ => 0,
-        }
-    };
+    let index = search_return_index(&state.borrow());
     set_focus_layer(ui, state, FocusLayer::Content);
     set_focus(ui, state, Page::Search, index);
     // 键盘已开始导航：网格的放大指示生效（与全局按键处理器同一口径）。
@@ -2860,6 +2868,20 @@ fn activate(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
 }
 
 fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
+    // 从搜索网格点进 / Enter 进详情：记下这张卡，返回时按 item id 找回焦点（Netflix
+    // 同款）。进出详情页不当作“离开搜索”（见 `set_page`），所以这条记录会留到返回。
+    if Page::from_index(ui.get_page()) == Page::Search {
+        let record = {
+            let state = state.borrow();
+            state
+                .search
+                .cards
+                .iter()
+                .find(|card| card.item_id == item_id)
+                .map(|card| (state.search.term.clone(), card.item_id.clone()))
+        };
+        state.borrow_mut().search_return = record;
+    }
     let handler = {
         let mut state = state.borrow_mut();
         state.nav.push(Route::Detail {
@@ -3003,9 +3025,10 @@ fn set_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
     let changed = Page::from_index(ui.get_page()) != page;
     ui.set_page(page.index());
     if changed {
-        // 离开搜索页（Esc 回首页 / 点卡进详情 / 返回）就不再记得上次的网格位置：
-        // 回来时应该从第一张卡开始。记住它只在"搜索页内输入框 ↔ 网格"之间有意义。
-        if page != Page::Search {
+        // 真的离开搜索（Esc 回首页 / 切换标签进媒体库）就不再记得上次的网格位置：
+        // 下次进来从第一张卡开始。**进出详情 / 播放页不清**：从卡片进详情再返回
+        // 要停在原来那张卡上（Netflix 同款）。
+        if matches!(page, Page::Home | Page::Library) {
             state.borrow_mut().search_return = None;
         }
         ui.invoke_focus_global();
@@ -3026,6 +3049,11 @@ fn set_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
             Page::Search => {
                 state.borrow_mut().last_search_images.clear();
                 sync_grid_window(ui, state, Page::Search);
+                // 回到搜索页（从详情 / 播放页返回）时把焦点还给进入前那张卡：
+                // 记的是 item id，按当前结果找回；找不到就回第 0 张。
+                let index = search_return_index(&state.borrow());
+                set_focus(ui, state, Page::Search, index);
+                scroll_focus_into_view(ui, state, Page::Search);
             }
             Page::Home | Page::Detail | Page::Player => {}
         }
@@ -3586,9 +3614,9 @@ mod tests {
             &before,
             "home.row.continue.left"
         ));
-        // 两边的值不同就算（行组件被重建时计数也可能变小）。
+        // 计数变小（行组件被模型重建）不算交出请求：只有增大才是 `clicked` 跑过。
         let after: BTreeMap<i32, i32> = [(0, 0), (1, 0)].into_iter().collect();
-        assert!(arrow_scroll_clicked(
+        assert!(!arrow_scroll_clicked(
             &after,
             &before,
             "home.row.continue.left"

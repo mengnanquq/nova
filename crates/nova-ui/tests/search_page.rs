@@ -505,6 +505,55 @@ fn leaving_the_search_page_clears_the_grid_return() {
     );
 }
 
+/// 空结果时离开网格不能留下旧记录：下次 ↓ 从第 0 张开始。
+///
+/// 修复前 `move_up` 只在取到卡时写 `search_return`：空结果那一轮取不到卡，旧记录
+/// 还留着；结果回来（查询词没变）后 ↓ 会跳回一张早就不是当前焦点的卡。
+#[test]
+fn leaving_an_empty_grid_does_not_keep_a_stale_return() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    // 进网格到第 4 张（`s04`），↑ 回输入框（记下 `s04`），再 ↓ 回到它。
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：焦点回到输入框");
+    press(&app, Key::DownArrow);
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：记录生效，回到 s04");
+    assert_eq!(
+        app.search_view().cards[3].item_id,
+        "s04",
+        "前提：这张是 s04"
+    );
+
+    // 同一个查询词的异步结果为空：焦点被 clamp 回第 0 张（仍在内容层）。
+    let mut blank = search_view();
+    blank.cards.clear();
+    app.set_search(&blank);
+    assert!(!app.ui().get_search_focused(), "前提：焦点仍在结果网格");
+
+    // 空网格首行 ↑：取不到卡，不能留下 `s04` 的旧记录。
+    press(&app, Key::UpArrow);
+    assert!(app.ui().get_search_focused(), "前提：↑ 回到输入框");
+
+    // 结果回来（查询词没变）：↓ 应该从第 0 张开始，而不是跳回 s04。
+    app.set_search(&view);
+    press(&app, Key::DownArrow);
+    assert!(!app.ui().get_search_focused(), "↓ 应把焦点交给结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "空结果时离开网格已经清掉旧记录，结果回来应从第 0 张开始"
+    );
+}
+
 /// 输入法组字期间 ↑ / ↓ 交给输入法，不交接焦点。
 ///
 /// 用 Slint 内部的 `UpdateComposition` 事件模拟一次组字（`TextInput.preedit-text`
@@ -586,4 +635,161 @@ fn arrows_work_again_after_a_stuck_preedit_is_superseded() {
         "`preedit` 残留不能把 ↓ 永久拒掉（文本已经编辑过）"
     );
     assert_eq!(app.ui().get_search_focus(), 0);
+}
+
+/// 提交一段组字后紧接着组下一段：方向键仍然要交给输入法。
+///
+/// 修复前 `edited`（提交）把 `ime-rely-on-preedit` 置假后就没人恢复它：焦点一直在
+/// 输入框里，新一段组字开始时的字母被 `TextInput` 吃掉、不经过页面的 `key-pressed`，
+/// 等 `preedit-text` 已经非空时按 ↓，判据还停在“不信任”上——焦点被交给结果网格，
+/// 正在组的那段字丢掉。
+///
+/// 这里走完整链路：组字 → 提交（文本真的变了）→ 再组一段 → ↓ 必须留在输入框。
+#[test]
+fn down_after_a_commit_and_a_new_composition_stays_in_the_input() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+    assert!(app.ui().get_search_focused(), "前提：搜索框持有焦点");
+    app.set_search_text("");
+
+    let composition = |text: &str| {
+        let event = i_slint_core::input::InternalKeyEvent {
+            event_type: i_slint_core::input::KeyEventType::UpdateComposition,
+            preedit_text: text.into(),
+            ..Default::default()
+        };
+        app.ui()
+            .window()
+            .dispatch_event(i_slint_core::platform::WindowEvent::internal(event));
+    };
+
+    // 第一段组字，用户选中候选提交："沙" 真的写进文本（触发 `edited`）。
+    composition("sha");
+    type_text(&app, "沙");
+    assert_eq!(app.search_text(), "沙", "前提：第一段已提交");
+
+    // 紧接着组下一段：焦点一直没离开输入框，字母被 TextInput 吃掉。
+    composition("di");
+    press(&app, Key::DownArrow);
+    assert!(
+        app.ui().get_search_focused(),
+        "提交后新一段组字里的 ↓ 仍属于输入法，不能交接焦点"
+    );
+    assert_eq!(app.focus_layer(), FocusLayer::Content);
+}
+
+/// 在详情页期间搜索结果刷新 / 重排：返回时仍按 item id 停在原来那张卡上。
+///
+/// 修复前离开搜索页就清掉 `search_return`，返回时只剩旧的扁平下标：结果重排后
+/// 同一个下标指向另一张卡（结果变少时还会被 `set_search` clamp 到第 0 张）。
+#[test]
+fn returning_from_detail_follows_the_item_id_when_results_refresh() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    // 进网格到第 4 张（`s04`），Enter 进详情。
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：焦点在第 4 张卡");
+    press(&app, Key::Return);
+    assert_eq!(app.page(), Page::Detail, "前提：进了详情页");
+
+    // 详情页期间异步搜索结果落地：同一批卡重排，`s04` 从第 3 位换到第 0 位。
+    let mut reordered = search_view();
+    reordered.cards.swap(0, 3);
+    app.set_search(&reordered);
+    assert_eq!(reordered.cards[0].item_id, "s04", "前提：s04 到了第 0 位");
+
+    // 返回搜索页：按 item id 应该停在 `s04`（新第 0 位），不是旧下标 3。
+    assert!(app.go_back(), "前提：导航栈里有上一级");
+    assert_eq!(app.page(), Page::Search, "前提：回到了搜索页");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        0,
+        "结果重排后要按 item id 找回原来那张卡"
+    );
+}
+
+/// 从搜索网格点卡进详情再返回：焦点停在**点的那张卡**上。
+///
+/// 鼠标点卡走的是 `open_item` 回调，不会经过键盘焦点（焦点可能还停在第 0 张）；
+/// 修复前返回时焦点就留在旧位置。现在进详情时按 item id 记下这张卡，返回时找回。
+#[test]
+fn returning_from_detail_restores_the_clicked_card() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert_eq!(app.ui().get_search_focus(), 0, "前提：键盘焦点在第 0 张");
+    // 卡片的可点目标是切页 / 数据落地后才登记的，推进两轮代次再点。
+    for _ in 0..2 {
+        app.refresh_targets();
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(40));
+    }
+
+    app.click_target("search.card.2")
+        .expect("点结果网格第 3 张卡");
+    assert_eq!(app.page(), Page::Detail, "前提：进了详情页");
+    assert_eq!(
+        app.search_view().cards[2].item_id,
+        "s03",
+        "前提：这张是 s03"
+    );
+
+    assert!(app.go_back(), "前提：导航栈里有上一级");
+    assert_eq!(app.page(), Page::Search, "前提：回到了搜索页");
+    assert!(!app.ui().get_search_focused(), "返回时焦点在结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        2,
+        "返回搜索页时应回到点进详情的那张卡"
+    );
+}
+
+/// 从搜索网格进详情再返回：焦点停在原来那张卡上（Netflix 同款）。
+///
+/// 修复前 `set_page` 只要离开搜索页就清 `search_return`，返回时从第 0 张开始。
+#[test]
+fn returning_from_detail_restores_the_grid_focus() {
+    let app = setup();
+    app.set_home(&home_filled());
+    let view = search_view();
+    app.set_search(&view);
+    app.open_search(&view);
+    assert!(app.handle_key(KeyCommand::Search));
+
+    // 进网格，右移到第 4 张（`s04`），Enter 进详情。
+    press(&app, Key::DownArrow);
+    for _ in 0..3 {
+        press(&app, Key::RightArrow);
+    }
+    assert_eq!(app.ui().get_search_focus(), 3, "前提：焦点在第 4 张卡");
+    assert_eq!(
+        app.search_view().cards[3].item_id,
+        "s04",
+        "前提：这张是 s04"
+    );
+    press(&app, Key::Return);
+    assert_eq!(app.page(), Page::Detail, "前提：进了详情页");
+
+    // 返回搜索页：焦点应该回到 `s04`，不是第 0 张。
+    assert!(app.go_back(), "前提：导航栈里有上一级");
+    assert_eq!(app.page(), Page::Search, "前提：回到了搜索页");
+    assert!(!app.ui().get_search_focused(), "返回时焦点在结果网格");
+    assert_eq!(
+        app.ui().get_search_focus(),
+        3,
+        "返回搜索页时应回到进入详情前那张卡"
+    );
 }

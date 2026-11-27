@@ -289,7 +289,8 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      `home-row-scroll-activity` 上报），而不是恢复后的滚动偏移。判据是“这次点击
      **交出了滚动请求**”——也就是箭头 `clicked` 处理器真的跑了：该行计数点完比点前
      多 = `changed:true`，反之 = dead。只比**这一箭头所在行**（按 id 取 `row-key`），
-     别的行的计数变化不会算到它头上。边界：箭头本身显示不显示已经由 `can-scroll`
+     且只看**增大**：别的行的计数变化不会算到它头上，计数变小（行组件被模型重建）
+     也不当作交出了滚动请求。边界：箭头本身显示不显示已经由 `can-scroll`
      控制（`arrow-left-on` / `arrow-right-on`，不可滚动的箭头不登记进 `targets`），
      所以这一项只能识别出“回调断了”那种真死，看不到滚动方向 / 距离是否合理；
    - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经

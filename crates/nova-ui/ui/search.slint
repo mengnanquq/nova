@@ -127,15 +127,32 @@ export component SearchPage inherits Rectangle {
     //
     // `preedit-text` 是 Slint 的内部、未文档化属性（见 i-slint-compiler 的
     // `builtin_elements.rs`）；输入法异常时它可能一直不清空，把 ↑ / ↓ 永久拒绝。
-    // 兜底（`changed` 不能挂在内置元素的属性上，只能在事件里判断）：
+    // 兜底：
     // - 文本真的被编辑（`edited`，含提交）、`Enter` 提交、`Esc` 后置假，
     //   不再拿 `preedit-text` 拦方向键；
-    // - 之后只要观察到 `preedit-text` 已回到空串（输入法恢复正常）就重新置真，
-    //   真实组字仍然受保护。
+    // - 之后只要观察到 `preedit-text` 变了（镜像属性 `changed`）或重新聚焦输入框，
+    //   就重新置真，真实组字仍然受保护。
     property <bool> ime-rely-on-preedit: true;
+
+    // `preedit-text` 的只读镜像。
+    //
+    // `changed` 不能挂在内置元素的属性上，但可以挂在自己的属性上。这是「提交一段
+    // 组字后紧接着组下一段」时**唯一一定会经过的点**：那段时间焦点一直在框里，
+    // 新输入的字母被 TextInput 吃掉、不经过页面的 `key-pressed`，等下一段组字开始
+    // 时 preedit 已经非空，靠按键里的「回空串才恢复信任」走不到。
+    property <string> preedit-mirror: query.preedit-text;
+    changed preedit-mirror => {
+        // 预编辑文本一变（变空 = 这段组字结束，变成新值 = 下一段组字开始）就说明
+        // 输入法还在正常工作，重新信任它；只有「一直停在同一个非空值上」才算异常。
+        root.ime-rely-on-preedit = true;
+    }
 
     /// 把焦点交给本页的搜索框（Ctrl+F / 从顶栏首次输入时由上层调到这里）。
     public function focus-input() {
+        // 重新聚焦是新的一段输入：上一段组字可能留下没清空的 `preedit-text`，
+        // 从这里开始重新信任它（放在 `has-focus` 提前返回之前：焦点本来就在框里
+        // 时也要生效）。
+        root.ime-rely-on-preedit = true;
         // 已经在本框里打字时不碰光标：否则在中间改字会被强行跳到末尾。
         if (query.has-focus) {
             return;
@@ -251,7 +268,7 @@ export component SearchPage inherits Rectangle {
             accepted => {
                 root.search-submit();
                 // 提交后组字一定结束了：`preedit-text` 可能没被输入法清掉，
-                // 不再拿它拦方向键（`preedit-text` 回到空串时自动重新信任）。
+                // 不再拿它拦方向键（`preedit-mirror` 再变化 / 重新聚焦时恢复信任）。
                 root.ime-rely-on-preedit = false;
                 // 焦点还给全局键盘：方向键/Enter 才能在结果网格里用。
                 query.clear-focus();
@@ -259,7 +276,8 @@ export component SearchPage inherits Rectangle {
             }
             key-pressed(event) => {
                 // `preedit-text` 回到空串：输入法（又）正常了，重新信任它。
-                // 只在按键时检查（`changed` 不能挂在内置元素的属性上）。
+                // `changed` 挂不到内置属性上，所以这里补一次同步检查；新一段组字
+                // 开始（preedit 变成非空新值）由 `preedit-mirror` 的 `changed` 覆盖。
                 if (query.preedit-text == "") {
                     root.ime-rely-on-preedit = true;
                 }
