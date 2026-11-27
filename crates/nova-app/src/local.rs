@@ -185,10 +185,12 @@ impl Local {
         lock(&self.libraries).clone()
     }
 
-    /// 记录刷新拿到的媒体库列表，并持久化（schema v3）。
+    /// 记录刷新拿到的媒体库列表，并持久化（schema v4 起连**服务端顺序**一起存）。
     ///
     /// 以前只放内存：进程一退，离线启动就只剩一个合成的「全部」标签，真实库名
     /// 全部丢失。写入失败只记日志（内存里仍是新的，下一次刷新还会重试）。
+    /// 顺序按传入切片（`/Views` 的服务端顺序）写进 `position` 列，读回保持同一顺序
+    /// （真机 R6-8：以前按显示名读回，刷新后顶栏标签会重排）。
     pub fn set_libraries(&self, libraries: Vec<Library>) {
         if let Some(server) = self.server() {
             let stored: Vec<nova_storage::StoredLibrary> =
@@ -295,6 +297,23 @@ impl Local {
             Some(server) => Ok(views::search_view(&self.db, &server.info.id, term, limit)?),
             None => Ok(SearchView::from_cards(term, Vec::new())),
         }
+    }
+
+    /// 本地缓存里匹配 `term` 的条目总数（不受搜索上限截断，R6-10）。
+    ///
+    /// 服务端搜索只返回前 `limit` 条，且实测 `TotalRecordCount` 也可能等于
+    /// 返回条数；结果头要提示“显示前 N 部”就需要一个可信的总数下限，
+    /// 本地缓存是现成的（离线时也是唯一来源）。
+    pub fn search_count(&self, term: &str) -> usize {
+        let Some(server) = self.server() else {
+            return 0;
+        };
+        self.db
+            .search_item_count(&server.info.id, views::search_kinds(), term)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, term, "本地搜索计数失败");
+                0
+            })
     }
 
     /// 用缓存构建详情页。
@@ -850,26 +869,37 @@ mod tests {
         }
 
         // 第一次启动：刷新把媒体库列表写进本层（内存 + SQLite）。
+        // 顺序故意不是显示名序（“儿童节目”在“动画电影”前），锁住 R6-8：
+        // 读回必须保持服务端顺序，而不是重新按 name 排序。
         {
             let local = Local::open(&env, None).expect("打开状态目录");
-            local.set_libraries(vec![library("lib-anime", "动画电影", MediaKind::Movie)]);
+            local.set_libraries(vec![
+                library("lib-anime", "动画电影", MediaKind::Movie),
+                library("lib-kids", "儿童节目", MediaKind::Movie),
+                library("lib-movie", "电影", MediaKind::Movie),
+            ]);
             assert_eq!(
                 local
                     .tabs()
                     .iter()
                     .map(|tab| tab.title.as_str())
                     .collect::<Vec<_>>(),
-                vec!["首页", "动画电影"]
+                vec!["首页", "动画电影", "儿童节目", "电影"]
             );
         }
 
-        // 第二次启动（离线）：标签仍是真实库名，库页也能按库列出条目。
+        // 第二次启动（离线）：标签仍是真实库名 + 服务端顺序，库页也能按库列出条目。
         let local = Local::open(&env, None).expect("重新打开状态目录");
         let titles: Vec<String> = local.tabs().into_iter().map(|tab| tab.title).collect();
         assert_eq!(
             titles,
-            vec!["首页".to_owned(), "动画电影".to_owned()],
-            "离线启动必须读回持久化的媒体库标签"
+            vec![
+                "首页".to_owned(),
+                "动画电影".to_owned(),
+                "儿童节目".to_owned(),
+                "电影".to_owned()
+            ],
+            "离线启动必须按服务端顺序读回持久化的媒体库标签"
         );
         let library = local
             .library("lib-anime", None, views::LibrarySort::default())

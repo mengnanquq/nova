@@ -32,7 +32,7 @@ use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
 use nova_ui::{
     AddServerError, App, AppWindow, BannerData, BannerLevel, DetailView, HomeView, ImageKey,
-    LibraryView, PlayerShellView, Route, SearchView, TargetInfo, TrackItem,
+    LibraryView, Page, PlayerShellView, Route, SearchView, TargetInfo, TrackItem,
 };
 use slint::ComponentHandle;
 use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -41,7 +41,9 @@ use tokio::task::JoinHandle;
 
 use crate::connect::{ConnectedServer, connect};
 use crate::error::AppError;
-use crate::images::{ImageService, ProviderFetcher, image_from_decoded};
+use crate::images::{
+    IMAGE_STORE_BUDGET, ImageScope, ImageService, ProviderFetcher, image_from_decoded,
+};
 use crate::local::Local;
 use crate::player::{self, Message, Player, Post, StartPlay};
 use crate::refresh;
@@ -296,7 +298,7 @@ pub fn run_window(
     });
 
     install_callbacks(&shell);
-    shell.request_images(home.image_keys());
+    shell.prefetch_images(home.image_keys());
     if start.is_none() {
         shell.spawn_refresh();
     }
@@ -1198,14 +1200,60 @@ impl Shell {
         })
     }
 
-    fn request_images(&self, keys: Vec<ImageKey>) {
+    /// 上报某个页面当前可见窗口的图片键（滚动时补发新进入视口的卡）。
+    fn request_images(&self, scope: ImageScope, keys: Vec<ImageKey>) {
         request_images(
+            &self.images,
+            &self.local,
+            scope,
+            keys,
+            &self.runtime,
+            &self.channel,
+        );
+    }
+
+    /// 首屏预热：只发前 [`crate::images::MAX_PREFETCH`] 张，其余由可见窗口补发。
+    fn prefetch_images(&self, keys: Vec<ImageKey>) {
+        prefetch_images(
             &self.images,
             &self.local,
             keys,
             &self.runtime,
             &self.channel,
         );
+    }
+
+    /// 首页某一行（`row = -1` 是 hero）当前的可见图片窗口。
+    ///
+    /// 区间 `(first, count)` 由 `.slint` 侧按行内 `content-x` / 卡宽与页面纵向
+    /// 可见行算好；这里只做"行号 → 卡片"的映射。**空窗口（`count == 0`）在离屏
+    /// 时也要处理**：那是页面离屏时行的上报，用来清掉 `HomeRow` 的可见集合；
+    /// 非空窗口只在首页路由下受理。
+    fn request_home_images(&self, row: i32, first: i32, count: i32) {
+        let on_home = matches!(self.app.current_route(), Some(Route::Home) | None);
+        if !on_home && count > 0 {
+            return;
+        }
+        let (scope, keys) = {
+            let state = self.state.borrow();
+            if row < 0 {
+                let keys = if count > 0 {
+                    state.home.hero_image_keys()
+                } else {
+                    Vec::new()
+                };
+                (ImageScope::HomeHero, keys)
+            } else {
+                let row = row as usize;
+                let first = first.max(0) as usize;
+                let count = count.max(0) as usize;
+                (
+                    ImageScope::HomeRow(row),
+                    state.home.row_image_keys(row, first, count),
+                )
+            }
+        };
+        self.request_images(scope, keys);
     }
 
     /// 后台刷新一次，然后重建首页与（如果停在媒体库页）当前库的视图。
@@ -1253,7 +1301,7 @@ impl Shell {
                         home,
                         library,
                     })));
-                    request_images(&images, &local, keys, &runtime, &channel);
+                    prefetch_images(&images, &local, keys, &runtime, &channel);
                 }
                 Ok(Err(error)) => tracing::warn!(%error, "刷新后构建视图失败"),
                 Err(error) => tracing::warn!(%error, "刷新后构建视图任务失败"),
@@ -1268,7 +1316,7 @@ impl Shell {
         match self.local.home(search) {
             Ok(home) => {
                 self.app.set_home(&home);
-                self.request_images(home.image_keys());
+                self.prefetch_images(home.image_keys());
                 self.state.borrow_mut().home = home;
             }
             Err(error) => tracing::warn!(%error, "搜索过滤本地缓存失败"),
@@ -1317,13 +1365,13 @@ impl Shell {
     /// `focus_input` 只在**同步**路径上为真（用户刚敲字）；异步结果到达时不动焦点，
     /// 否则用户按过 Enter 之后焦点会被拽回输入框。
     fn show_search(&self, view: SearchView, focus_input: bool) {
-        let keys = view.image_keys();
+        // 图片不再在这里按整页请求：`open_search` 落地时会按网格可见窗口上报
+        // （`App::on_search_images`），大结果集也只请求视口里的那几十张。
         self.app.open_search(&view);
         self.state.borrow_mut().search = Some(view);
         if focus_input {
             self.app.ui().invoke_focus_search_input();
         }
-        self.request_images(keys);
     }
 
     /// 后台打一次服务端搜索：成功/失败都回一条 [`UiMessage::Search`]。
@@ -1362,7 +1410,19 @@ impl Shell {
                         if let Err(error) = build_local.cache_search_items(&items) {
                             tracing::warn!(%error, "搜索结果写缓存失败");
                         }
-                        views::search_view_from_items(&view_term, &items).with_total(total)
+                        // 服务端给的 `total` 只在**疑似被截断**时用本地计数兜底：
+                        // `total == items.len()` 且条数正好等于请求的 limit，说明服务端
+                        // 的 total 很可能就是返回条数（R6-10）。其它情况（total 明显
+                        // 大于返回条数）直接用服务端的值，不白跑一次本地计数。
+                        let truncated = total == items.len()
+                            && items.len() >= usize::try_from(SEARCH_LIMIT).unwrap_or(usize::MAX);
+                        let local_total = if truncated {
+                            build_local.search_count(&view_term)
+                        } else {
+                            0
+                        };
+                        views::search_view_from_items(&view_term, &items)
+                            .with_total(total.max(local_total))
                     })
                     .await;
                     match built {
@@ -1520,16 +1580,15 @@ impl Shell {
                 let status = self.local.status();
                 match self.local.home(None) {
                     Ok(home) => {
-                        let keys = home.image_keys();
                         self.app.set_home(&home);
                         self.app.set_banner(status.banner_data());
                         {
                             let mut state = self.state.borrow_mut();
                             state.status = status;
-                            state.home = home;
+                            state.home = home.clone();
                             state.library = None;
                         }
-                        self.request_images(keys);
+                        self.prefetch_images(home.image_keys());
                     }
                     Err(error) => tracing::warn!(%error, "登录成功但重建首页失败"),
                 }
@@ -1578,7 +1637,7 @@ impl Shell {
                 state.library = Some(view);
             }
         }
-        self.request_images(keys);
+        self.prefetch_images(keys);
     }
 
     /// 刷新落地时重建当前媒体库视图（按当前排序）并写进界面。
@@ -1626,16 +1685,34 @@ impl Shell {
         }
         self.app.set_detail(&detail);
         self.state.borrow_mut().detail = Some(detail);
-        self.request_images(keys);
+        self.request_images(ImageScope::Detail, keys);
     }
 
-    fn apply_image(&self, key: ImageKey, decoded: &DecodedImage) {
-        // 纹理上传属于界面线程：像素转 `slint::Image` 必须在这里做。
-        let Some(image) = image_from_decoded(decoded) else {
-            return;
+    /// 一批解码完成的图片：先全部放进 store，最后**只重贴当前路由**的视图一次。
+    ///
+    /// 以前每收到一张图就把 home / library / detail / search 全量重贴一遍，
+    /// 深滚海外电影（4546 张）时 `convert::library_data` 每张图都重建一次整库
+    /// 卡片；一批 N 张图现在只重建 1 次（其余页面的视图在切回时由 `set_page` 补上）。
+    fn apply_images(&self, images: Vec<(ImageKey, DecodedImage)>) {
+        for (key, decoded) in images {
+            // 纹理上传属于界面线程：像素转 `slint::Image` 必须在这里做。
+            let Some(image) = image_from_decoded(&decoded) else {
+                continue;
+            };
+            self.app.set_image(&key, image);
+        }
+        // 内存上限：按字节预算淘汰最旧的图，但在屏上的图（各来源可见窗口的并集）
+        // 一律保护。被淘汰的键解除"已请求"标记，滚回来时能重新装载。
+        let evicted = {
+            let protect = self.images.visible_keys();
+            self.app.trim_images(&protect, IMAGE_STORE_BUDGET)
         };
-        self.app.set_image(&key, image);
-        // 重新应用当前持有的视图，让新图片进入 Slint 模型。
+        if !evicted.is_empty() {
+            tracing::debug!(count = evicted.len(), "图片表超预算，淘汰旧图");
+            self.images.forget(&evicted);
+        }
+        // 只重贴当前路由：离屏页面的模型不在这里重建。
+        let route = self.app.current_route();
         let (home, library, detail, search) = {
             let state = self.state.borrow();
             (
@@ -1645,18 +1722,66 @@ impl Shell {
                 state.search.clone(),
             )
         };
-        self.app.set_home(&home);
-        if let Some(library) = library {
-            self.app.set_library(&library);
+        match route {
+            Some(Route::Home) | None => self.app.set_home(&home),
+            Some(Route::Library { .. }) => {
+                if let Some(library) = library {
+                    self.app.set_library(&library);
+                }
+            }
+            Some(Route::Detail { .. }) | Some(Route::Player { .. }) => {
+                if let Some(detail) = detail {
+                    self.app.set_detail(&detail);
+                }
+            }
+            Some(Route::Search { .. }) => {
+                if let Some(search) = search {
+                    self.app.set_search(&search);
+                }
+            }
         }
-        if let Some(detail) = detail {
-            self.app.set_detail(&detail);
+    }
+
+    /// 页面切换后释放离开页面的图片可见窗口（`set_page` 回调）。
+    ///
+    /// 不释放的话 `ImageScope::HomeRow(n)` / Library / Search / Detail 的 `visible`
+    /// 集合永远停在离开时的值：`is_wanted` 恒为真、排队中的请求不会取消，这些
+    /// 键在 `ImageStore::trim` 里永远被当成保护对象。重新进入页面时视图重新上报，
+    /// 按磁盘缓存装载（不重复下载）。
+    fn release_images_for_page(&self, page: Page) {
+        if page != Page::Home {
+            self.images.release_home_rows();
+            // 预取只在首页有意义；离开时作废排队中的预取（只占 1 个独立名额，
+            // 但仍然不该在用户打开大库时继续下载首页的图）。
+            self.images.cancel_prefetch();
         }
-        if let Some(search) = search {
-            // 晚到的图片只在仍停留在搜索页时重贴：用户可能已经点进详情 / 播放页，
-            // 这时 `set_search` 会把搜索页数据写回，并按旧查询词回填输入框。
-            if matches!(self.app.current_route(), Some(Route::Search { .. })) {
-                self.app.set_search(&search);
+        if page != Page::Library {
+            self.images.release_scope(ImageScope::Library);
+        }
+        if page != Page::Search {
+            self.images.release_scope(ImageScope::Search);
+        }
+        if page != Page::Detail {
+            self.images.release_scope(ImageScope::Detail);
+        } else {
+            // 回到详情页（例如从播放页返回）：Detail scope 在离开时被释放了，
+            // 这里重新上报一次当前详情的图（磁盘缓存命中，不重复下载）。
+            // 只在路由里的条目与已持有的详情一致时才报：从首页点开另一部时，
+            // `set_page` 先于 `Shell::open_detail` 取到新详情，这里报旧键是没用的
+            // （新详情落地时 `open_detail` 自己会请求）。
+            let keys = match self.app.current_route() {
+                Some(Route::Detail { item_id }) => self
+                    .state
+                    .borrow()
+                    .detail
+                    .as_ref()
+                    .filter(|detail| detail.item_id == item_id)
+                    .map(DetailView::image_keys)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            if !keys.is_empty() {
+                self.request_images(ImageScope::Detail, keys);
             }
         }
     }
@@ -1670,7 +1795,7 @@ impl Shell {
                 let keys = detail.image_keys();
                 self.app.set_detail(&detail);
                 self.state.borrow_mut().detail = Some(detail);
-                self.request_images(keys);
+                self.request_images(ImageScope::Detail, keys);
             }
             Ok(None) => {
                 let placeholder = DetailView::new(item_id, "正在加载…");
@@ -1775,10 +1900,9 @@ impl Shell {
         // 除了后台数据刷新什么都不会发生（交互扫描会把它记成"死按钮"）。
         if library_id == crate::local::HOME_TAB_ID {
             if let Ok(home) = self.local.home(None) {
-                let keys = image_keys(&home, None, None);
                 self.app.set_home(&home);
+                self.prefetch_images(home.image_keys());
                 self.state.borrow_mut().home = home;
-                self.request_images(keys);
             }
             self.app.show_home();
             return;
@@ -1786,10 +1910,9 @@ impl Shell {
         let sort = *self.library_sort.borrow();
         match self.local.library(library_id, None, sort) {
             Ok(view) => {
-                let keys = view.image_keys();
+                // 图片由 `open_library` 内部的 `sync_grid_window` 按可见窗口上报。
                 let _ = self.app.open_library(&view);
                 self.state.borrow_mut().library = Some(view);
-                self.request_images(keys);
             }
             Err(error) => tracing::warn!(%error, "构建媒体库视图失败"),
         }
@@ -1849,6 +1972,40 @@ impl Shell {
 }
 
 fn install_callbacks(shell: &Rc<Shell>) {
+    {
+        // 图片按可见窗口请求：网格 / 首页行的可见区间变了就补发新进入视口的图。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_library_images(move |keys| {
+            if let Some(shell) = weak.upgrade() {
+                shell.request_images(ImageScope::Library, keys.to_vec());
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(shell);
+        shell.app.on_search_images(move |keys| {
+            if let Some(shell) = weak.upgrade() {
+                shell.request_images(ImageScope::Search, keys.to_vec());
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(shell);
+        shell.app.on_home_images(move |row, first, count| {
+            if let Some(shell) = weak.upgrade() {
+                shell.request_home_images(row, first, count);
+            }
+        });
+    }
+    {
+        // 页面切走：释放离开页面的图片可见窗口（否则这些键永远被当成在屏上的图）。
+        let weak = Rc::downgrade(shell);
+        shell.app.on_page_changed(move |page| {
+            if let Some(shell) = weak.upgrade() {
+                shell.release_images_for_page(page);
+            }
+        });
+    }
     {
         let weak = Rc::downgrade(shell);
         shell.app.on_open_detail(move |item_id| {
@@ -2200,12 +2357,26 @@ fn key_event_text(name: &str) -> Option<slint::SharedString> {
 fn request_images(
     images: &Arc<ImageService>,
     local: &Arc<Local>,
+    scope: ImageScope,
     keys: Vec<ImageKey>,
     runtime: &Handle,
     channel: &Arc<UiChannel>,
 ) {
     let deliver_channel = Arc::clone(channel);
-    images.request(local, keys, runtime, move |key, decoded| {
+    images.request_window(local, scope, &keys, runtime, move |key, decoded| {
+        deliver_channel.post(UiMessage::Image { key, decoded });
+    });
+}
+
+fn prefetch_images(
+    images: &Arc<ImageService>,
+    local: &Arc<Local>,
+    keys: Vec<ImageKey>,
+    runtime: &Handle,
+    channel: &Arc<UiChannel>,
+) {
+    let deliver_channel = Arc::clone(channel);
+    images.request_prefetch(local, keys, runtime, move |key, decoded| {
         deliver_channel.post(UiMessage::Image { key, decoded });
     });
 }
@@ -2232,13 +2403,33 @@ fn channel_drain(channel: &Arc<UiChannel>) {
 }
 
 fn drain(queue: &Arc<Mutex<VecDeque<UiMessage>>>) {
-    loop {
-        let message = lock(queue).pop_front();
+    let (images, others) = {
+        let mut queued = lock(queue);
+        partition_queue(std::mem::take(&mut *queued))
+    };
+    // 非图片消息先落地（它们可能替换整页视图），再把这一批图片一次贴上去：
+    // 一批 N 张图只触发 1 次视图重建（深滚大库时以前是 N 次整库重建）。
+    for message in others {
+        apply_message(message);
+    }
+    if !images.is_empty() {
+        apply_images(images);
+    }
+}
+
+/// 把队列拆成"图片批次"与"其余消息"：一批图只重贴一次界面。
+fn partition_queue(
+    mut queue: VecDeque<UiMessage>,
+) -> (Vec<(ImageKey, DecodedImage)>, Vec<UiMessage>) {
+    let mut images = Vec::new();
+    let mut others = Vec::new();
+    while let Some(message) = queue.pop_front() {
         match message {
-            Some(message) => apply_message(message),
-            None => break,
+            UiMessage::Image { key, decoded } => images.push((key, decoded)),
+            other => others.push(other),
         }
     }
+    (images, others)
 }
 
 fn apply_message(message: UiMessage) {
@@ -2249,10 +2440,19 @@ fn apply_message(message: UiMessage) {
         UiMessage::Refreshed(payload) => shell.apply_refresh(*payload),
         UiMessage::Detail(detail) => shell.apply_detail(*detail),
         UiMessage::Search { generation, view } => shell.apply_search_message(generation, *view),
-        UiMessage::Image { key, decoded } => shell.apply_image(key, &decoded),
+        // `drain` 会把图片收进批次统一处理；这里保留单张的回退路径。
+        UiMessage::Image { key, decoded } => shell.apply_images(vec![(key, decoded)]),
         UiMessage::Playback(message) => shell.apply_playback(message),
         UiMessage::AddServer(outcome) => shell.apply_add_server(*outcome),
     }
+}
+
+/// 一批图片 → 放进 store 并重贴当前路由（见 [`Shell::apply_images`]）。
+fn apply_images(images: Vec<(ImageKey, DecodedImage)>) {
+    let Some(shell) = SHELL.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    shell.apply_images(images);
 }
 
 /// 一条搜索结果是否应当上屏。
@@ -2633,5 +2833,45 @@ mod tests {
         // 多字符不是单键；未知命名键也不行（`key_event_text` 返回 None）。
         assert_eq!(super::key_event_text("沙丘"), None);
         assert_eq!(super::key_event_text("F13"), None);
+    }
+
+    /// 💡1：一批 N 张图只触发 **1 次**视图重建。
+    ///
+    /// 修复前 `drain` 每弹出 `UiMessage::Image` 就调一次 `apply_image`，而
+    /// `apply_image` 会把 home / library / detail / search 全部重贴一遍（
+    /// `convert::library_data` 每次重建整库 4546 张卡）——深滚时每张图一次。
+    /// 现在 `partition_queue` 把队列里的图全部收成**一个**批次，`drain` 只调用
+    /// 一次 `apply_images`，所以“批次数 = 1”就是“视图重建次数 = 1”。
+    #[test]
+    fn a_batch_of_images_is_applied_once() {
+        use std::collections::VecDeque;
+
+        use nova_images::DecodedImage;
+        use nova_ui::{DetailView, ImageKey};
+
+        use super::{UiMessage, partition_queue};
+
+        fn decoded() -> DecodedImage {
+            DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        for index in 0..5 {
+            queue.push_back(UiMessage::Image {
+                key: ImageKey::poster(format!("p{index}")),
+                decoded: decoded(),
+            });
+        }
+        queue.push_back(UiMessage::Detail(Box::new(DetailView::new("x", "X"))));
+
+        let (images, others) = partition_queue(queue);
+        assert_eq!(images.len(), 5, "5 张图必须收成同一个批次");
+        assert_eq!(others.len(), 1, "非图片消息保持原样");
+        assert_eq!(images[0].0, ImageKey::poster("p0"));
+        assert_eq!(images[4].0, ImageKey::poster("p4"));
     }
 }

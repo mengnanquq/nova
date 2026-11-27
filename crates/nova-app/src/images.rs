@@ -31,9 +31,19 @@
 //! - 同时最多 [`MAX_CONCURRENT_DOWNLOADS`] 张图在下载（`tokio::sync::Semaphore`）；
 //! - 每个 `ImageKey` 只发起一次；失败的图记进 `failed` 集合，之后不再重试，
 //!   避免"坏图 → 重试 → 依然坏"的死循环，界面保留首字母占位；
-//! - 每次视图请求最多装载 [`MAX_IMAGES_PER_VIEW`] 张，防止一次刷新把整库海报都排进队列。
+//! - **按可见窗口请求**：界面把"当前视口内（± 缓冲行）的卡片"作为一批上报
+//!   （[`ImageScope`]），滚动时补发新进入视口的键；还没开始下载就滚出视口的
+//!   请求会被丢弃（[`RequestState::cancel_if_unwanted`]），所以快速滚动不会在
+//!   队列里堆几千张图；已装载的图不会重复请求；
+//! - **离开页面就释放可见窗口**（[`ImageService::release_scope`]）：`visible` 里的
+//!   集合与"已请求"标记一起解除，这些键不再被 `ImageStore::trim` 当成保护对象，
+//!   重新进入页面时按磁盘缓存重新装载（命中成本很低）；
+//! - [`MAX_PREFETCH`] 只约束"首屏预热"这类一次性预取，不再限制整页图片；预取
+//!   走**独立的** [`MAX_CONCURRENT_PREFETCH`] 名额池，永远不会占住可见窗口的
+//!   下载名额（以前两者共用 4 个名额，用户打开大库时首屏海报排在 120 个预取后面）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nova_core::{ItemId, MediaItem};
@@ -57,8 +67,27 @@ pub const IMAGE_CACHE_BUDGET: u64 = 512 * 1024 * 1024;
 /// 同时下载的图片数量上限。
 pub const MAX_CONCURRENT_DOWNLOADS: usize = 4;
 
-/// 单次视图最多请求的图片数量。
-pub const MAX_IMAGES_PER_VIEW: usize = 120;
+/// 一次性预取（首屏预热）最多请求的图片数量。
+///
+/// 可见窗口之外的图由视口上报补发（见 [`ImageScope`]），这里只是让"刷新 / 切库
+/// 落地之前"先有一批图在路上；上限防止一次刷新把整库 4546 张海报都排进队列。
+pub const MAX_PREFETCH: usize = 120;
+
+/// 预取专用的并发名额。
+///
+/// 与可见窗口的 [`MAX_CONCURRENT_DOWNLOADS`] **分开计**：预取再慢也只占 1 个下载位，
+/// 用户随后打开大库时首屏海报用可见窗口的 4 个名额，不会被 119 个排队中的预取
+/// 堵在队头（体检 R6：预取与可见窗口共用一个 `Semaphore(4)` 时的队头阻塞）。
+pub const MAX_CONCURRENT_PREFETCH: usize = 1;
+
+/// 界面图片表（已解码的 `slint::Image`）的字节预算。
+///
+/// 依据：一张 300 宽的 2:3 海报解码后是 300×450×4 ≈ 0.51 MiB（真实库实测
+/// 每进入一个新窗口 RSS 约 +0.5 MiB/张）；海外电影 4546 张全留在内存里 ≈ 2.3 GiB。
+/// 64 MiB ≈ 125 张海报，是"一屏网格（42 张）+ 首页两三行（~30 张）+ 详情背景
+/// 图（1280 宽 ≈ 3.5 MiB）"的 2–3 倍余量：滚回去一两屏直接复用，再远重读磁盘
+/// 缓存。在屏上的键由 `ImageStore::trim` 的 `protect` 保护，不会当场变骨骸。
+pub const IMAGE_STORE_BUDGET: u64 = 64 * 1024 * 1024;
 
 /// 卡片海报宽度。
 pub const POSTER_WIDTH: u32 = 300;
@@ -220,13 +249,152 @@ impl std::fmt::Debug for ProviderFetcher {
     }
 }
 
-/// 图片装载服务：持有缓存、下载器、并发闸门与"已请求/已失败"集合。
+/// 图片请求的来源（页面 / 首页行）。
+///
+/// 可见窗口按来源分别记录：同一来源刷新窗口时替换自己的集合，其它来源不受影响
+/// （首页逐行上报，各库行的可见区间互不覆盖）。取消判定看所有来源的**并集**。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ImageScope {
+    /// 首页 hero（背景图 + 海报兜底）。
+    HomeHero,
+    /// 首页横向行；`0` = 继续观看，`1` = 最近添加，`2 + n` = 第 n 个库行。
+    HomeRow(usize),
+    /// 媒体库网格。
+    Library,
+    /// 搜索页网格。
+    Search,
+    /// 详情页（背景图 + 海报）。
+    Detail,
+}
+
+/// "已请求 / 已失败 / 当前可见"三份状态。
+///
+/// 逻辑全部与 tokio 无关，单独抽出来是为了能直接对"可见窗口 → 需要请求的键"
+/// 做确定性测试（不需要 runtime / 数据库）。
+#[derive(Default)]
+struct RequestState {
+    /// 已发起（在途或已完成）的键。
+    started: HashSet<ImageKey>,
+    /// 装载失败、不再重试的键。
+    failed: HashSet<ImageKey>,
+    /// 各来源最后一次上报的可见键。
+    visible: HashMap<ImageScope, HashSet<ImageKey>>,
+    /// 只被预取排队（尚未开始、也还没被可见窗口要）的键。
+    ///
+    /// `begin_window` 遇到这里的键会把它**升级**为可见窗口请求：预取只有 1 个名额，
+    /// 如果可见键排在 100 个预取后面就会被队头阻塞（预取与可见窗口共用 `started`
+    /// 标记，光看"已请求"无法区分优先级）。
+    prefetched: HashSet<ImageKey>,
+}
+
+impl RequestState {
+    /// 释放某个来源的可见窗口（页面离屏 / 路由切走）。
+    ///
+    /// 只有**没有别的来源还在要**这些键时才解除"已请求"标记：首页 hero 与卡片可能
+    /// 同键，详情页与搜索页也可能同时可见。解除标记后重新进入页面会重新上报，
+    /// 按磁盘缓存装载（不重复下载）。返回真正被释放（不再受任何来源保护）的键。
+    fn release(&mut self, scope: ImageScope) -> Vec<ImageKey> {
+        let Some(keys) = self.visible.remove(&scope) else {
+            return Vec::new();
+        };
+        let released: Vec<ImageKey> = keys
+            .into_iter()
+            .filter(|key| !self.is_wanted(key))
+            .collect();
+        for key in &released {
+            self.started.remove(key);
+            self.prefetched.remove(key);
+        }
+        released
+    }
+
+    /// 释放所有首页行的可见窗口（hero + 继续观看 / 最近添加 / 各库行）。
+    fn release_home_rows(&mut self) -> Vec<ImageKey> {
+        let scopes: Vec<ImageScope> = self
+            .visible
+            .keys()
+            .copied()
+            .filter(|scope| matches!(scope, ImageScope::HomeHero | ImageScope::HomeRow(_)))
+            .collect();
+        scopes
+            .into_iter()
+            .flat_map(|scope| self.release(scope))
+            .collect()
+    }
+}
+
+impl RequestState {
+    /// 记录某个来源的可见窗口，返回其中**需要新发请求**的键（去重，保持顺序）。
+    ///
+    /// 已经在途 / 已装载 / 已失败的键不会重复请求；同一次上报里的重复键只算
+    /// 一次（首页 hero 的背景图与海报是两张不同的图，这里的去重只是防御）。
+    /// **只被预取排队的键会升级为可见窗口请求**：预取名额只有 1 个，可见键不能
+    /// 排在预取队列后面（返回的 `fresh` 会交给可见窗口的 `load_window`）。
+    fn begin_window(&mut self, scope: ImageScope, keys: &[ImageKey]) -> Vec<ImageKey> {
+        let mut wanted = HashSet::with_capacity(keys.len());
+        let mut fresh = Vec::new();
+        for key in keys {
+            if !wanted.insert(key.clone()) {
+                continue;
+            }
+            if self.failed.contains(key) {
+                continue;
+            }
+            if self.started.insert(key.clone()) {
+                fresh.push(key.clone());
+            } else if self.prefetched.remove(key) {
+                // 之前只是预取排队（`started` 已置位）：升级为可见窗口请求，
+                // `started` 不用再插一次，但必须真的 spawn 一个可见任务。
+                fresh.push(key.clone());
+            }
+        }
+        self.visible.insert(scope, wanted);
+        fresh
+    }
+
+    /// 这个键是否还在某个来源的可见窗口里。
+    fn is_wanted(&self, key: &ImageKey) -> bool {
+        self.visible.values().any(|keys| keys.contains(key))
+    }
+
+    /// 任务被取消（滚出视口、还没开始下载）。
+    ///
+    /// 只有确实没人再要它时才解除"已请求"标记，否则用户滚回来时这张图会永远
+    /// 不再被请求。返回是否真的取消了。
+    fn cancel_if_unwanted(&mut self, key: &ImageKey) -> bool {
+        if self.is_wanted(key) {
+            return false;
+        }
+        self.started.remove(key);
+        self.prefetched.remove(key);
+        true
+    }
+
+    /// 解除"已请求"标记（例如界面的图片表把它淘汰了，需要能重新装载）。
+    fn forget(&mut self, key: &ImageKey) {
+        self.started.remove(key);
+        self.prefetched.remove(key);
+    }
+}
+
+/// 一次装载的来源：可见窗口（可取消、走 `permits`）或预取（走独立名额、按代次作废）。
+#[derive(Clone, Copy)]
+enum SpawnMode {
+    Window,
+    Prefetch { epoch: u64 },
+}
+
+/// 图片装载服务：持有缓存、下载器、并发闸门与请求状态。
 pub struct ImageService {
     cache: Arc<ImageCache>,
     fetcher: Arc<dyn Fetcher>,
+    /// 可见窗口的下载名额。
     permits: Arc<Semaphore>,
-    started: Mutex<HashSet<ImageKey>>,
-    failed: Mutex<HashSet<ImageKey>>,
+    /// 预取专用名额（与 `permits` 分开，见 [`MAX_CONCURRENT_PREFETCH`]）。
+    prefetch_permits: Arc<Semaphore>,
+    /// 预取代次：离开首页时 +1，排队中、还没开始的预取发现代次变了就丢弃。
+    prefetch_epoch: AtomicU64,
+    requests: Mutex<RequestState>,
 }
 
 impl ImageService {
@@ -236,9 +404,14 @@ impl ImageService {
             cache,
             fetcher,
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
-            started: Mutex::new(HashSet::new()),
-            failed: Mutex::new(HashSet::new()),
+            prefetch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_PREFETCH)),
+            prefetch_epoch: AtomicU64::new(0),
+            requests: Mutex::new(RequestState::default()),
         }
+    }
+
+    fn state(&self) -> MutexGuard<'_, RequestState> {
+        lock(&self.requests)
     }
 
     /// 磁盘缓存。
@@ -248,13 +421,63 @@ impl ImageService {
 
     /// 装载一张图。失败会被记录且不再重试。
     pub async fn load(&self, spec: &ImageSpec) -> Option<(ImageKey, DecodedImage)> {
-        {
-            let failed = lock(&self.failed);
-            if failed.contains(&spec.key) {
-                return None;
-            }
+        if self.state().failed.contains(&spec.key) {
+            return None;
         }
         let permit = self.permits.acquire().await.ok()?;
+        self.fill(spec, permit).await
+    }
+
+    /// 可见窗口里的装载：**拿到并发名额后**再确认一次仍然在视口内。
+    ///
+    /// 排队期间用户可能已经滑走（滚动的一致性保证），这时丢弃请求并解除标记，
+    /// 以免快速滚动时把已经没人看的图一张张下载完。
+    async fn load_window(&self, spec: &ImageSpec) -> Option<(ImageKey, DecodedImage)> {
+        if self.state().failed.contains(&spec.key) {
+            return None;
+        }
+        let permit = self.permits.acquire().await.ok()?;
+        if self.state().cancel_if_unwanted(&spec.key) {
+            return None;
+        }
+        self.fill(spec, permit).await
+    }
+
+    /// 预取装载：先拿**预取专用**名额，拿到后再确认页面还在（代次没变）。
+    ///
+    /// 与 [`Self::load_window`] 的区别是名额池不同：即使 [`MAX_PREFETCH`] 个预取
+    /// 全在排队，可见窗口的请求仍然能用满 [`MAX_CONCURRENT_DOWNLOADS`] 个名额。
+    async fn load_prefetch(
+        &self,
+        spec: &ImageSpec,
+        epoch: u64,
+    ) -> Option<(ImageKey, DecodedImage)> {
+        if self.state().failed.contains(&spec.key) {
+            return None;
+        }
+        let permit = self.prefetch_permits.acquire().await.ok()?;
+        if self.prefetch_epoch.load(Ordering::SeqCst) != epoch {
+            // 排队期间已经离开首页：这张图不再需要，解除标记让下次进首页重新上报。
+            self.state().forget(&spec.key);
+            return None;
+        }
+        if !self.state().prefetched.contains(&spec.key) {
+            // 排队期间已经被可见窗口升级（`begin_window` 已经把 `prefetched` 拿掉，
+            // `started` 仍置位）：可见任务会负责这张图，预取直接退出。
+            return None;
+        }
+        let loaded = self.fill(spec, permit).await;
+        // 预取结束（成功或失败）后都不再是"排队中的预取"了。
+        self.state().prefetched.remove(&spec.key);
+        loaded
+    }
+
+    /// 已持名额时的真实装载（单张图不会在 `load` 与 `fill` 之间被重复请求）。
+    async fn fill(
+        &self,
+        spec: &ImageSpec,
+        permit: tokio::sync::SemaphorePermit<'_>,
+    ) -> Option<(ImageKey, DecodedImage)> {
         let request = ImageRequest::new(&spec.url).with_max_width(spec.width);
         let request = match spec.tag.as_deref() {
             Some(tag) => request.with_tag(Some(tag)),
@@ -269,17 +492,38 @@ impl ImageService {
             Ok(image) => Some((spec.key.clone(), image)),
             Err(error) => {
                 tracing::warn!(endpoint = nova_images::endpoint_of(&spec.url), %error, "图片装载失败（不重试）");
-                lock(&self.failed).insert(spec.key.clone());
+                self.state().failed.insert(spec.key.clone());
                 None
             }
         }
     }
 
-    /// 把一组界面图片键排进后台队列，成功时调用 `deliver`。
+    /// 上报某个来源当前的可见窗口：新进入视口的键排进后台队列，成功时调用 `deliver`。
+    ///
+    /// 滚出视口且**尚未开始下载**的键会被丢弃（见 [`RequestState::cancel_if_unwanted`]），
+    /// 因此在途任务数始终受并发闸门约束，快速滚动不会堆积几千个排队任务。
     ///
     /// 必须从已有 tokio runtime 的上下文调用（窗口模式在 UI 线程调用也安全，
     /// 只是 `spawn` 发生在后台 runtime 上）。
-    pub fn request<F>(
+    pub fn request_window<F>(
+        self: &Arc<Self>,
+        local: &Arc<Local>,
+        scope: ImageScope,
+        keys: &[ImageKey],
+        runtime: &Handle,
+        deliver: F,
+    ) where
+        F: Fn(ImageKey, DecodedImage) + Send + Sync + 'static,
+    {
+        let fresh = self.state().begin_window(scope, keys);
+        self.spawn(fresh, local, runtime, deliver, SpawnMode::Window);
+    }
+
+    /// 一次性预取（首屏预热）：不参与可见窗口，按 [`MAX_PREFETCH`] 截断。
+    ///
+    /// 预取不做"滚出视口就取消"：调用点发生在视图落地之前，这时还没有可见窗口
+    /// 可以解释这批键。上限保证代价可控，剩余的图由视口上报补发。
+    pub fn request_prefetch<F>(
         self: &Arc<Self>,
         local: &Arc<Local>,
         keys: Vec<ImageKey>,
@@ -288,23 +532,100 @@ impl ImageService {
     ) where
         F: Fn(ImageKey, DecodedImage) + Send + Sync + 'static,
     {
-        let deliver: Arc<dyn Fn(ImageKey, DecodedImage) + Send + Sync> = Arc::new(deliver);
-        for key in keys.into_iter().take(MAX_IMAGES_PER_VIEW) {
-            if !self.mark_started(&key) {
-                continue;
+        let mut seen = HashSet::new();
+        let mut fresh = Vec::new();
+        {
+            let mut state = self.state();
+            for key in keys {
+                if !seen.insert(key.clone()) || state.failed.contains(&key) {
+                    continue;
+                }
+                if state.started.insert(key.clone()) {
+                    state.prefetched.insert(key.clone());
+                    fresh.push(key);
+                }
+                if fresh.len() >= MAX_PREFETCH {
+                    break;
+                }
             }
+        }
+        let epoch = self.prefetch_epoch.load(Ordering::SeqCst);
+        self.spawn(
+            fresh,
+            local,
+            runtime,
+            deliver,
+            SpawnMode::Prefetch { epoch },
+        );
+    }
+
+    /// 作废所有还没开始的预取（离开首页时调用）。
+    ///
+    /// 已经在下载的那一张会正常完成（没法中途取消网络请求）；排队中的会在拿到
+    /// 名额后发现代次变了，直接丢弃并解除"已请求"标记。
+    pub fn cancel_prefetch(&self) {
+        self.prefetch_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 释放一个来源的可见窗口（页面离屏 / 路由切走）。
+    ///
+    /// 释放后这些键不再出现在 [`Self::visible_keys`] 里，`ImageStore::trim` 不会再
+    /// 把它们当保护对象；`cancel_if_unwanted` 也会丢弃还没开始的在途请求。
+    pub fn release_scope(&self, scope: ImageScope) {
+        let released = self.state().release(scope);
+        if !released.is_empty() {
+            tracing::debug!(?scope, keys = released.len(), "释放页面可见图片窗口");
+        }
+    }
+
+    /// 释放所有首页行（hero + 继续观看 / 最近添加 / 各库行）的可见窗口。
+    pub fn release_home_rows(&self) {
+        let released = self.state().release_home_rows();
+        if !released.is_empty() {
+            tracing::debug!(keys = released.len(), "释放首页可见图片窗口");
+        }
+    }
+
+    fn spawn<F>(
+        self: &Arc<Self>,
+        keys: Vec<ImageKey>,
+        local: &Arc<Local>,
+        runtime: &Handle,
+        deliver: F,
+        mode: SpawnMode,
+    ) where
+        F: Fn(ImageKey, DecodedImage) + Send + Sync + 'static,
+    {
+        let deliver: Arc<dyn Fn(ImageKey, DecodedImage) + Send + Sync> = Arc::new(deliver);
+        for key in keys {
             let service = Arc::clone(self);
             let local = Arc::clone(local);
             let deliver = Arc::clone(&deliver);
             runtime.spawn(async move {
-                let Some(spec) = local.image_spec(&key) else {
-                    // 条目暂时没有这张图（例如刚刷新还没写进缓存）：解除标记，
-                    // 下次视图重建时可以再试一次。
-                    service.unmark(&key);
-                    return;
-                };
-                if let Some((key, decoded)) = service.load(&spec).await {
-                    deliver(key, decoded);
+                match mode {
+                    SpawnMode::Window => {
+                        if service.state().cancel_if_unwanted(&key) {
+                            return;
+                        }
+                        let Some(spec) = local.image_spec(&key) else {
+                            // 条目暂时没有这张图（例如刚刷新还没写进缓存）：解除标记，
+                            // 下次视图重建时可以再试一次。
+                            service.state().forget(&key);
+                            return;
+                        };
+                        if let Some((key, decoded)) = service.load_window(&spec).await {
+                            deliver(key, decoded);
+                        }
+                    }
+                    SpawnMode::Prefetch { epoch } => {
+                        let Some(spec) = local.image_spec(&key) else {
+                            service.state().forget(&key);
+                            return;
+                        };
+                        if let Some((key, decoded)) = service.load_prefetch(&spec, epoch).await {
+                            deliver(key, decoded);
+                        }
+                    }
                 }
             });
         }
@@ -312,18 +633,26 @@ impl ImageService {
 
     /// 是否已经为这个键发过请求。
     pub fn was_requested(&self, key: &ImageKey) -> bool {
-        lock(&self.started).contains(key) || lock(&self.failed).contains(key)
+        let state = self.state();
+        state.started.contains(key) || state.failed.contains(key)
     }
 
-    fn mark_started(&self, key: &ImageKey) -> bool {
-        if lock(&self.failed).contains(key) {
-            return false;
+    /// 当前所有来源可见窗口的并集（界面图片表做淘汰时用它保护在屏上的图）。
+    pub fn visible_keys(&self) -> HashSet<ImageKey> {
+        let state = self.state();
+        state
+            .visible
+            .values()
+            .flat_map(|keys| keys.iter().cloned())
+            .collect()
+    }
+
+    /// 解除"已请求"标记，让淘汰掉的图在重新进入视口时能再次装载。
+    pub fn forget(&self, keys: &[ImageKey]) {
+        let mut state = self.state();
+        for key in keys {
+            state.forget(key);
         }
-        lock(&self.started).insert(key.clone())
-    }
-
-    fn unmark(&self, key: &ImageKey) {
-        lock(&self.started).remove(key);
     }
 }
 
@@ -332,8 +661,9 @@ impl std::fmt::Debug for ImageService {
         formatter
             .debug_struct("ImageService")
             .field("permits", &MAX_CONCURRENT_DOWNLOADS)
-            .field("started", &lock(&self.started).len())
-            .field("failed", &lock(&self.failed).len())
+            .field("prefetch_permits", &MAX_CONCURRENT_PREFETCH)
+            .field("started", &self.state().started.len())
+            .field("failed", &self.state().failed.len())
             .finish_non_exhaustive()
     }
 }
@@ -469,7 +799,10 @@ fn item_id_from_image_url(url: &str) -> Option<String> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use nova_core::{ImageSet, ItemId, MediaItem, MediaKind};
+    use nova_core::{
+        AuthState, ImageSet, ItemId, Language, MediaItem, MediaKind, ServerId, ServerInfo,
+        ServerKind,
+    };
     use nova_images::ImageCache;
     use nova_storage::Database;
 
@@ -647,6 +980,376 @@ mod tests {
             assert!(service.load(&spec).await.is_none());
             assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1, "失败后不应重试");
             assert!(service.was_requested(&spec.key));
+        });
+    }
+
+    fn keys(prefix: &str, count: usize) -> Vec<ImageKey> {
+        (0..count)
+            .map(|index| ImageKey::poster(format!("{prefix}{index:02}")))
+            .collect()
+    }
+
+    /// 可见窗口 → 需要请求的键：同一次上报里的重复只发一次，已请求过的不重发。
+    #[test]
+    fn window_requests_each_key_once_and_only_new_ones() {
+        let mut state = RequestState::default();
+        let window = [
+            ImageKey::poster("a"),
+            ImageKey::poster("b"),
+            ImageKey::poster("a"),
+        ];
+        assert_eq!(
+            state.begin_window(ImageScope::Library, &window),
+            vec![ImageKey::poster("a"), ImageKey::poster("b")],
+            "重复键只请求一次"
+        );
+        // 同一个窗口再报一次（滚动但窗口未变）：不再发请求。
+        assert!(state.begin_window(ImageScope::Library, &window).is_empty());
+        // 滚到新窗口：只发新进入视口的键。
+        let next = [ImageKey::poster("b"), ImageKey::poster("c")];
+        assert_eq!(
+            state.begin_window(ImageScope::Library, &next),
+            vec![ImageKey::poster("c")]
+        );
+        assert!(state.started.contains(&ImageKey::poster("a")), "a 已请求过");
+        assert!(!state.is_wanted(&ImageKey::poster("a")), "a 已滚出视口");
+    }
+
+    /// 滚出视口且尚未开始下载 → 取消并解除标记（滚回来时可以重新请求）。
+    #[test]
+    fn scrolling_out_cancels_unstarted_requests() {
+        let mut state = RequestState::default();
+        let first = keys("p", 10);
+        let requested = state.begin_window(ImageScope::Library, &first);
+        assert_eq!(requested.len(), 10);
+
+        // 快速滚动：新窗口只剩 p07..p09。
+        let second = keys("p", 10)[7..].to_vec();
+        assert!(state.begin_window(ImageScope::Library, &second).is_empty());
+
+        let mut cancelled = Vec::new();
+        for (index, key) in first.iter().enumerate() {
+            if state.cancel_if_unwanted(key) {
+                cancelled.push(index);
+            }
+        }
+        assert_eq!(
+            cancelled,
+            (0..7).collect::<Vec<_>>(),
+            "只取消滚出视口的前 7 张"
+        );
+        // 取消后标记已解除：再滚回来会重新请求。
+        let again = state.begin_window(ImageScope::Library, &first);
+        assert_eq!(again.len(), 7, "取消过的前 7 张重新进入视口时要重新请求");
+    }
+
+    /// 只要还有一个来源需要这张图，就不能取消（首页 hero 与卡片可能同键）。
+    #[test]
+    fn a_key_wanted_by_any_scope_is_not_cancelled() {
+        let mut state = RequestState::default();
+        let poster = ImageKey::poster("hero");
+        state.begin_window(ImageScope::HomeHero, std::slice::from_ref(&poster));
+        state.begin_window(ImageScope::Detail, std::slice::from_ref(&poster));
+        // 详情页离开：首页 hero 仍然需要它。
+        state.begin_window(ImageScope::Detail, &[]);
+        assert!(!state.cancel_if_unwanted(&poster), "还有来源需要它");
+        state.begin_window(ImageScope::HomeHero, &[]);
+        assert!(state.cancel_if_unwanted(&poster), "最后一个来源也不要了");
+    }
+
+    /// 失败过的键不再进队列（哪怕它又滚回视口）。
+    #[test]
+    fn failed_keys_never_enter_the_queue_again() {
+        let mut state = RequestState::default();
+        let key = ImageKey::poster("bad");
+        state.failed.insert(key.clone());
+        assert!(state.begin_window(ImageScope::Library, &[key]).is_empty());
+    }
+
+    /// 可见窗口里的键一个都不能少：旧行为是整页 `take(120)`，第 121 张永远轮不到。
+    #[test]
+    fn a_visible_window_is_never_truncated_to_the_old_120_cap() {
+        let mut state = RequestState::default();
+        let window = keys("w", 300);
+        let requested = state.begin_window(ImageScope::Library, &window);
+        assert_eq!(requested.len(), 300, "可见窗口里的 300 张都要请求");
+        assert_eq!(requested.last(), window.last());
+    }
+
+    /// 页面离屏：释放可见窗口后这些键不再受保护，没开始的请求也能取消。
+    ///
+    /// 修复前 `home.slint` 在离屏时一次都不上报、Rust 侧 `request_home_images`
+    /// 又在非首页直接 `return`，所以 `ImageScope::HomeRow(n)` 的 `visible` 集合
+    /// 永远停在离开时的值：`is_wanted` 恒为真、排队中的请求不会取消、这些键
+    /// 在 `ImageStore::trim` 里永远被当成 protect，白占预算。
+    #[test]
+    fn releasing_a_page_clears_its_window_and_unprotects_keys() {
+        let mut state = RequestState::default();
+        let hero = ImageKey::backdrop("hero");
+        let row = keys("p", 4);
+        let library = keys("lib", 2);
+        state.begin_window(ImageScope::HomeHero, std::slice::from_ref(&hero));
+        state.begin_window(ImageScope::HomeRow(0), &row);
+        state.begin_window(ImageScope::HomeRow(1), &keys("q", 2));
+        state.begin_window(ImageScope::Library, &library);
+        assert!(state.is_wanted(&row[0]));
+
+        state.release_home_rows();
+        assert!(!state.is_wanted(&hero), "hero 窗口必须清空");
+        assert!(!state.is_wanted(&row[0]), "HomeRow 窗口必须清空");
+        assert!(
+            state.cancel_if_unwanted(&row[0]),
+            "释放后排队中的请求必须能取消"
+        );
+        assert!(
+            state.is_wanted(&library[0]),
+            "别的页面（Library）的窗口不受影响"
+        );
+
+        state.release(ImageScope::Library);
+        assert!(!state.is_wanted(&library[0]));
+        assert!(state.cancel_if_unwanted(&library[0]));
+
+        // 重新进入页面：释放过的键会重新排进请求（磁盘缓存命中，不重复下载）。
+        let again = state.begin_window(ImageScope::HomeRow(0), &row);
+        assert_eq!(again.len(), row.len(), "释放后重新进入页面要重新上报");
+    }
+
+    /// 同一个键被两个来源要时，释放其中一个不能把它从另一个窗口里拿掉。
+    #[test]
+    fn releasing_one_scope_keeps_keys_wanted_by_another() {
+        let mut state = RequestState::default();
+        let poster = ImageKey::poster("shared");
+        state.begin_window(ImageScope::Detail, std::slice::from_ref(&poster));
+        state.begin_window(ImageScope::HomeHero, std::slice::from_ref(&poster));
+        state.release(ImageScope::Detail);
+        assert!(state.is_wanted(&poster), "首页 hero 还要这张图");
+        assert!(!state.cancel_if_unwanted(&poster));
+        state.release_home_rows();
+        assert!(!state.is_wanted(&poster));
+        assert!(state.cancel_if_unwanted(&poster));
+    }
+
+    /// 只被预取排队的键进入视口时，必须升级为可见窗口请求。
+    ///
+    /// 预取只有 1 个名额；如果 `begin_window` 看到 `started` 已有标记就跳过，
+    /// 可见窗里的图会排在 119 个预取后面（队头阻塞以另一种形式回来）。
+    #[test]
+    fn a_prefetched_key_is_promoted_to_a_visible_request() {
+        let mut state = RequestState::default();
+        let key = ImageKey::poster("queued");
+        // 模拟 `request_prefetch`：已经置位 `started`，但只是预取排队。
+        state.started.insert(key.clone());
+        state.prefetched.insert(key.clone());
+
+        let fresh = state.begin_window(ImageScope::Library, std::slice::from_ref(&key));
+        assert_eq!(
+            fresh,
+            vec![key.clone()],
+            "预取排队的键进入视口时必须 spawn 一个可见任务"
+        );
+        assert!(!state.prefetched.contains(&key), "升级后不再算排队中的预取");
+        assert!(state.started.contains(&key), "仍然只算已请求一次");
+
+        // 已由可见窗口请求过的键再上报，不重复 spawn。
+        assert!(
+            state
+                .begin_window(ImageScope::Library, std::slice::from_ref(&key))
+                .is_empty()
+        );
+    }
+
+    fn poster_item(id: &str) -> MediaItem {
+        let mut item = item_with_images(
+            Some(&format!("http://host/Items/{id}/Images/Primary")),
+            None,
+        );
+        item.id = ItemId::new(id);
+        item
+    }
+
+    /// 一个带服务器 + 条目的真实 `Local`（图片键能解析成 `ImageSpec`）。
+    fn local_with_items(dir: &std::path::Path, ids: &[String]) -> Arc<Local> {
+        {
+            let db = Database::open(dir.join("nova.db")).expect("建库");
+            db.upsert_server(
+                &ServerInfo {
+                    id: ServerId::new("srv-img"),
+                    kind: ServerKind::Jellyfin,
+                    name: "图片测试".to_owned(),
+                    base_url: "http://127.0.0.1:8096".to_owned(),
+                    version: None,
+                    user_id: None,
+                    auth: AuthState::Unauthorized,
+                    metadata_language: Language::undetermined(),
+                },
+                1,
+            )
+            .expect("写服务器");
+            let items: Vec<MediaItem> = ids.iter().map(|id| poster_item(id)).collect();
+            db.upsert_items(&ServerId::new("srv-img"), &items, 1)
+                .expect("写条目");
+        }
+        let env = crate::env::Env {
+            data_dir: dir.to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        Arc::new(Local::open(&env, None).expect("打开状态目录"))
+    }
+
+    /// 阻塞式假下载器：`p` 开头的条目（预取键）会一直等 `gate` 放行，可见键立即返回。
+    struct GatedFetcher {
+        gate: tokio::sync::Semaphore,
+        prefetch_calls: AtomicUsize,
+        visible_calls: AtomicUsize,
+    }
+
+    impl GatedFetcher {
+        fn new() -> Self {
+            Self {
+                gate: tokio::sync::Semaphore::new(0),
+                prefetch_calls: AtomicUsize::new(0),
+                visible_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn is_prefetch(url: &str) -> bool {
+            parse_synthetic_url(url)
+                .map(|parsed| parsed.item_id.starts_with('p'))
+                .unwrap_or(false)
+        }
+    }
+
+    impl Fetcher for GatedFetcher {
+        fn fetch<'a>(&'a self, url: &'a str) -> FetchFuture<'a> {
+            let prefetch = Self::is_prefetch(url);
+            Box::pin(async move {
+                if prefetch {
+                    self.prefetch_calls.fetch_add(1, Ordering::SeqCst);
+                    let _permit = self.gate.acquire().await;
+                } else {
+                    self.visible_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(PNG_1X1.to_vec())
+            })
+        }
+    }
+
+    #[test]
+    fn visible_window_is_not_blocked_by_queued_prefetch() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let mut ids: Vec<String> = (0..MAX_PREFETCH).map(|i| format!("p{i:03}")).collect();
+            ids.push("visible".to_owned());
+            let local = local_with_items(dir.path(), &ids);
+            let db = Arc::new(Database::open_in_memory().expect("内存库"));
+            let cache = Arc::new(
+                ImageCache::new(dir.path().join("images"), db, IMAGE_CACHE_BUDGET)
+                    .expect("缓存目录"),
+            );
+            let fetcher = Arc::new(GatedFetcher::new());
+            let service = Arc::new(ImageService::new(
+                Arc::clone(&cache),
+                fetcher.clone() as Arc<dyn Fetcher>,
+            ));
+            let handle = runtime.handle().clone();
+            let (sender, mut received) = tokio::sync::mpsc::unbounded_channel::<ImageKey>();
+
+            let prefetch_keys: Vec<ImageKey> = ids[..MAX_PREFETCH]
+                .iter()
+                .map(|id| ImageKey::poster(id.clone()))
+                .collect();
+            let prefetch_sender = sender.clone();
+            service.request_prefetch(&local, prefetch_keys, &handle, move |key, _| {
+                let _ = prefetch_sender.send(key);
+            });
+            // 等预取真正开始：第 1 张被 gate 拦住，其余在预取名额上排队。
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let in_flight = fetcher.prefetch_calls.load(Ordering::SeqCst);
+            assert!(in_flight >= 1, "预取应当已经开始（实际 {in_flight} 张）");
+
+            let visible = ImageKey::poster("visible");
+            let visible_sender = sender.clone();
+            service.request_window(
+                &local,
+                ImageScope::Library,
+                std::slice::from_ref(&visible),
+                &handle,
+                move |key, _| {
+                    let _ = visible_sender.send(key);
+                },
+            );
+            let delivered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    if let Some(key) = received.recv().await
+                        && key == visible
+                    {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                delivered.is_ok(),
+                "可见窗口的请求被排队中的预取阻塞了：修复前预取与可见窗口共用 \
+                 Semaphore(4)，120 个预取占满名额后首屏海报要排在它们后面"
+            );
+            assert_eq!(fetcher.visible_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn leaving_home_discards_queued_prefetch() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("临时目录");
+            let ids: Vec<String> = (0..MAX_PREFETCH).map(|i| format!("p{i:03}")).collect();
+            let local = local_with_items(dir.path(), &ids);
+            let db = Arc::new(Database::open_in_memory().expect("内存库"));
+            let cache = Arc::new(
+                ImageCache::new(dir.path().join("images"), db, IMAGE_CACHE_BUDGET)
+                    .expect("缓存目录"),
+            );
+            let fetcher = Arc::new(GatedFetcher::new());
+            let service = Arc::new(ImageService::new(
+                Arc::clone(&cache),
+                fetcher.clone() as Arc<dyn Fetcher>,
+            ));
+            let handle = runtime.handle().clone();
+            let keys: Vec<ImageKey> = ids.iter().map(|id| ImageKey::poster(id.clone())).collect();
+            service.request_prefetch(&local, keys.clone(), &handle, |_, _| {});
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            assert_eq!(fetcher.prefetch_calls.load(Ordering::SeqCst), 1);
+
+            // 离开首页：排队中的预取必须作废。
+            service.cancel_prefetch();
+            fetcher.gate.add_permits(MAX_PREFETCH * 2);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let requested = keys.iter().filter(|key| service.was_requested(key)).count();
+                if requested == 1 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "排队中的预取没有被丢弃：仍有 {requested} 个键处于已请求状态"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                fetcher.prefetch_calls.load(Ordering::SeqCst),
+                1,
+                "离开首页后，尚未开始的预取不能再发下载"
+            );
         });
     }
 }

@@ -13,11 +13,13 @@ use crate::pages::convert;
 use crate::viewmodel::{CardView, SearchView};
 
 /// 把搜索页视图模型写进 Slint。
+///
+/// `current_tab` 是顶栏高亮下标（`-1` = 不选中任何标签）：搜索页不属于任何库。
 pub fn apply(
     ui: &AppWindow,
     view: &SearchView,
     tabs: &[crate::viewmodel::LibraryTab],
-    current_tab: usize,
+    current_tab: i32,
     images: &ImageStore,
 ) {
     ui.set_search_data(convert::search_data(view, tabs, current_tab, images));

@@ -76,6 +76,16 @@ impl LibraryView {
         self.cards.iter().map(CardView::poster_key).collect()
     }
 
+    /// 可见窗口 `[start, start + count)` 内的海报键（大库按视口请求图片用）。
+    pub fn image_window_keys(&self, start: usize, count: usize) -> Vec<ImageKey> {
+        let start = start.min(self.cards.len());
+        let end = start.saturating_add(count).min(self.cards.len());
+        self.cards[start..end]
+            .iter()
+            .map(CardView::poster_key)
+            .collect()
+    }
+
     /// 按列数切出的焦点行。
     pub fn focus_rows(&self, columns: usize) -> Vec<usize> {
         chunked_rows(self.cards.len(), columns)
@@ -164,5 +174,17 @@ mod tests {
         let next = view(&["l01", "l02", "l03"]);
         assert_eq!(rebase_focus(&old, 9, &next), 2);
         assert_eq!(rebase_focus(&old, 0, &next), 0);
+    }
+
+    #[test]
+    fn image_window_keys_cover_only_the_visible_interval() {
+        let view = view(&TWELVE);
+        assert_eq!(
+            view.image_window_keys(10, 5),
+            vec![ImageKey::poster("l11"), ImageKey::poster("l12")],
+            "越界区间要夹住"
+        );
+        assert!(view.image_window_keys(12, 4).is_empty());
+        assert_eq!(view.image_window_keys(0, 2).len(), 2);
     }
 }

@@ -43,6 +43,18 @@ component CardRow inherits Rectangle {
     callback open-item(string);
     // 「查看全部 ›」：切到该行对应的媒体库页。
     callback tab-activated(string);
+    // 可见图片窗口：本行在视口内时上报横向可见区间 `(row, first, count)`，
+    // 不在视口内 / 页面离屏时报 `(-1, 0, 0)` 的空区间（滚出视口的图不再请求）。
+    callback image-window(int, int, int);
+    // 本行在 `HomePage` 里的行号（`0` = 继续观看，`1` = 最近添加，`2 + n` = 库行）。
+    in property <int> image-row: -1;
+    // 首页图片窗口代次（首页数据变化时由 Rust 推一档）。
+    in property <int> image-gen: 0;
+    // 页面是否在屏上（离屏时不请求图片）。
+    in property <bool> page-active: false;
+    // 页面纵向视口在内容坐标里的上沿 / 高度（外层 `Flickable`）。
+    in property <length> page-scroll-top: 0px;
+    in property <length> page-viewport-h: 0px;
     // 悬停到某张卡：把键盘焦点也移过来（之后方向键从这里继续，R2-3）。
     //
     // 焦点数学在 Rust（`move_focus_by`），但悬停只发生在这里；本组件改不了
@@ -357,6 +369,47 @@ component CardRow inherits Rectangle {
     out property <length> poster-height-probe: root.poster-height;
     out property <length> card-total-height: root.card-height;
 
+    // ---- 可见图片窗口 ----
+    //
+    // 首页以前把 hero + 继续观看 + 最近添加 + 各库行的键串成一个 Vec 交给 Rust，
+    // Rust 只能 `take(120)`：第 108 张之后与后续库行永远没图（体检 R6-5）。
+    // 现在每行自己算「纵向是否在页面视口内 + 行内横向可见区间」，把区间报给 Rust，
+    // 由 Rust 按可见窗口请求；区间只在真的变化时上报（滚动事件很密）。
+    property <bool> row-in-viewport: root.page-active
+        && root.image-row >= 0
+        && root.cards.length > 0
+        && root.page-viewport-h > 0px
+        && root.poster-width + root.gap > 0px
+        && root.y + root.cards-top < root.page-scroll-top + root.page-viewport-h
+        && root.y + root.cards-top + root.cards-height > root.page-scroll-top;
+    property <length> card-step: root.poster-width + root.gap;
+    property <length> row-view-left: -flick.content-x;
+    // 可见区间上下各多取一张：卡片边缘跨在视口边界上时不会只剩骨架。
+    property <int> first-visible-card: root.row-in-viewport
+        ? clamp(floor((root.row-view-left - Theme.content-gutter) / root.card-step) - 1,
+            0, root.cards.length - 1)
+        : -1;
+    property <int> last-visible-card: root.row-in-viewport
+        ? clamp(ceil((root.row-view-left + flick.width - Theme.content-gutter) / root.card-step) + 1,
+            0, root.cards.length)
+        : 0;
+    property <int> image-first: root.row-in-viewport ? root.first-visible-card : -1;
+    property <int> image-count: root.row-in-viewport
+        ? max(0, root.last-visible-card - root.first-visible-card) : 0;
+
+    function report-images() {
+        // 离屏（`page-active = false`）时也要上报：各行的 `image-first` / `image-count`
+        // 此时已经是空区间（`row-in-viewport` 为假），把空窗口报给 Rust 才能清掉
+        // `ImageScope::HomeRow(n)` 的可见集合（否则这些键永远被当成在屏上的图保护着）。
+        if (root.image-row >= 0) {
+            root.image-window(root.image-row, root.image-first, root.image-count);
+        }
+    }
+    changed image-gen => { root.report-images(); }
+    changed page-active => { root.report-images(); }
+    changed image-first => { root.report-images(); }
+    changed image-count => { root.report-images(); }
+
     // 行左右箭头：官方 24×80 胶囊（`width:1.5rem;height:5rem;border-radius:16rem`、
     // 底色 `rgba(128,128,128,.4)`），垂直居中于卡区，悬停行时出现；
     // 点击横向滚一屏。箭头叠在行两端（会盖住最外层卡，Netflix 同样如此）。
@@ -466,6 +519,10 @@ export component HomePage inherits Rectangle {
     callback global-shortcut(int);
     // 空状态的“连接服务器”：真正的连接流程在上层（这里只发回调）。
     callback connect-server();
+    // 图片可见窗口（行的上报汇总到上一级）：`row = -1` 是 hero。
+    callback image-window(int, int, int);
+    // 首页图片窗口代次（数据真变了时 Rust 推一档，让行重新上报区间）。
+    in property <int> image-gen: 0;
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
     // 首页自己直接摆放的控件全在条件子树里（hero 按钮）或是子组件（顶栏 / 卡片行 /
@@ -566,6 +623,17 @@ export component HomePage inherits Rectangle {
         + (root.visible-blocks > 0 ? (root.visible-blocks - 1) * Theme.section-gap : 0px)
         + Theme.space-8;
     out property <length> content-h: flick.content-height;
+
+    // ---- 可见图片窗口：hero ----
+    //
+    // hero 的背景图（1280 宽）只在它真的在视口里时请求；页面离屏时清空（`row = -1`）。
+    property <bool> page-active: root.visible;
+    property <bool> hero-in-view: root.page-active && root.data.has-hero
+        && -flick.content-y < root.billboard-slot;
+    property <int> hero-image-count: root.hero-in-view ? 1 : 0;
+    changed hero-image-count => { root.image-window(-1, 0, root.hero-image-count); }
+    changed image-gen => { root.image-window(-1, 0, root.hero-image-count); }
+    changed page-active => { root.image-window(-1, 0, root.hero-image-count); }
 
     // Billboard：官方 56.25vw，用 88vh 封顶（非官方，理由见 `billboard-ratio`）。
     property <length> billboard-height: min(Theme.billboard-height, self.height * root.billboard-ratio);
@@ -965,6 +1033,14 @@ export component HomePage inherits Rectangle {
                 cards: root.data.continue-watching;
                 focused-index: root.continue-focus;
                 nav-active: root.nav-active && root.content-focused;
+                image-row: 0;
+                image-gen: root.image-gen;
+                page-active: root.page-active;
+                page-scroll-top: -flick.content-y;
+                page-viewport-h: flick.height;
+                image-window(row, first, count) => {
+                    root.image-window(row, first, count);
+                }
                 open-item(id) => {
                     root.open-item(id);
                 }
@@ -984,6 +1060,14 @@ export component HomePage inherits Rectangle {
                 cards: root.data.recently-added;
                 focused-index: root.recent-focus;
                 nav-active: root.nav-active && root.content-focused;
+                image-row: 1;
+                image-gen: root.image-gen;
+                page-active: root.page-active;
+                page-scroll-top: -flick.content-y;
+                page-viewport-h: flick.height;
+                image-window(row, first, count) => {
+                    root.image-window(row, first, count);
+                }
                 open-item(id) => {
                     root.open-item(id);
                 }
@@ -1004,6 +1088,14 @@ export component HomePage inherits Rectangle {
                     title: row-data.title;
                     library-id: row-data.library-id;
                     cards: row-data.cards;
+                    image-row: 2 + ri;
+                    image-gen: root.image-gen;
+                    page-active: root.page-active;
+                    page-scroll-top: -flick.content-y;
+                    page-viewport-h: flick.height;
+                    image-window(row, first, count) => {
+                        root.image-window(row, first, count);
+                    }
                     tab-activated(id) => {
                         root.tab-activated(id);
                     }

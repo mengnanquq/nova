@@ -131,6 +131,16 @@ impl SearchView {
         self.cards.iter().map(CardView::poster_key).collect()
     }
 
+    /// 可见窗口 `[start, start + count)` 内的海报键（大库按视口请求图片用）。
+    pub fn image_window_keys(&self, start: usize, count: usize) -> Vec<ImageKey> {
+        let start = start.min(self.cards.len());
+        let end = start.saturating_add(count).min(self.cards.len());
+        self.cards[start..end]
+            .iter()
+            .map(CardView::poster_key)
+            .collect()
+    }
+
     /// 按列数切出的焦点行。
     pub fn focus_rows(&self, columns: usize) -> Vec<usize> {
         chunked_rows(self.cards.len(), columns)
@@ -181,6 +191,22 @@ mod tests {
         assert_eq!(view.total, 0);
         assert!(view.is_empty());
         assert!(view.image_keys().is_empty());
+    }
+
+    #[test]
+    fn image_window_keys_cover_only_the_requested_interval() {
+        let view = SearchView::from_cards(
+            "沙丘",
+            (0..10)
+                .map(|index| card(&format!("s{index}"), "x"))
+                .collect(),
+        );
+        assert_eq!(
+            view.image_window_keys(8, 5),
+            vec![ImageKey::poster("s8"), ImageKey::poster("s9")],
+            "越界区间要夹住"
+        );
+        assert!(view.image_window_keys(10, 3).is_empty());
     }
 
     #[test]

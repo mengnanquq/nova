@@ -74,6 +74,15 @@ export component LibraryPage inherits Rectangle {
         nav.focus-input();
     }
 
+    /// 把结果网格滚回顶部（换库时由 Rust 调用，真机 R6-2）。
+    ///
+    /// 滚动位置是 `Flickable` 的局部状态：同名库的重建 / 后台刷新不能动它
+    /// （用户正在原地浏览）；只有 `LibraryView::id` 变了（换了库）才归零。
+    /// 详情页返回不重建视图，因此也不经过这里。
+    public function reset-scroll() {
+        grid-flick.content-y = 0px;
+    }
+
     /// 键盘焦点移出可视区时，把网格滚到焦点卡**完全可见**。
     ///
     /// 由 Rust 在每次方向键移动之后调用（见 `pages/app.rs` 的 `move_focus_by`）：

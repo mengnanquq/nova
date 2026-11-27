@@ -202,6 +202,9 @@ export component AppWindow inherits Window {
         : search-page.targets;
     // testing 快照用：压缩首页 billboard，让行区进入首屏。
     in-out property <float> billboard-ratio: 0.88;
+    // 首页图片窗口代次：数据真变了时 Rust 推一档，让每个卡片行重新上报可见区间
+    // （行内的可见区间是事件驱动的，数据变化不一定改几何）。
+    in-out property <int> home-image-gen: 0;
 
     // 回调只把事件送出去，业务判断留在 Rust。
     callback open-item(string);
@@ -227,6 +230,9 @@ export component AppWindow inherits Window {
     // 网格实例化窗口（大库窗口化）：页面报视口变化，Rust 据此重算实例化区间。
     callback library-grid-viewport-changed();
     callback search-grid-viewport-changed();
+    // 首页某一行（或 hero，`row = -1`）当前可见的图片区间：`(row, first, count)`。
+    // 只在区间变化 / 行重新进入视口 / 首页数据更新时发，Rust 据此按可见窗口请求海报。
+    callback home-image-window(int, int, int);
     callback tab-activated(string);
     callback source-selected(string);
     // 「我的列表」切换（本地持久化，Rust 侧处理）。
@@ -430,6 +436,10 @@ export component AppWindow inherits Window {
                 nav-focus: root.nav-active && root.focus-layer == 2 ? root.nav-focus : -1;
                 search-focused: root.search-focused;
                 search-text <=> root.search-text;
+                image-gen: root.home-image-gen;
+                image-window(row, first, count) => {
+                    root.home-image-window(row, first, count);
+                }
                 open-item(id) => {
                     root.focus-global();
                     root.open-item(id);
@@ -747,6 +757,11 @@ export component AppWindow inherits Window {
     /// 把媒体库 / 搜索页的结果网格滚到键盘焦点卡（方向键移动后由 Rust 调用）。
     public function scroll-library-to-index(index: int) {
         lib-page.scroll-to-index(index);
+    }
+
+    /// 换库时把媒体库网格滚回顶部（R6-2）。同名库的刷新 / 详情返回不走这里。
+    public function reset-library-scroll() {
+        lib-page.reset-scroll();
     }
 
     /// 同上，搜索页。

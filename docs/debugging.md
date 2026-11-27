@@ -25,7 +25,7 @@ printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 | `{"cmd":"open","item":"<id>"}` | 打开条目详情（走界面导航，会切页并拉数据） |
 | `{"cmd":"route","value":"home"\|"library"}` | 切到首页 / 第一个媒体库 |
 | `{"cmd":"route","value":"detail","item":"<id>"}` | 同上，直达详情 |
-| `{"cmd":"tab","library":"<id>"}` | 切媒体库标签（空串=首页） |
+| `{"cmd":"tab","library":"<id>"}` | 切媒体库标签；`"library":"@home"` = 首页，空串 / 缺省也按首页处理（R6-12，合成「全部」库不再能从这条命令直达） |
 | `{"cmd":"search","term":"..."}` | 用本地缓存过滤首页（旧行为，兼容保留） |
 | `{"cmd":"search","term":"...","page":true}` | 进搜索页并把查询词填好（本地缓存立即出结果，同时打一次服务端搜索） |
 | `{"cmd":"screenshot","path":"/tmp/x.png"}` | 窗口自截（见下），**异步**：等文件出现；无显示器 / 锁屏时约 200ms 后自动改走离屏渲染，不必等帧回调 |

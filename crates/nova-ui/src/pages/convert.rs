@@ -105,8 +105,8 @@ pub fn home_data(view: &HomeView, images: &ImageStore) -> HomeData {
         library_rows: model(library_rows),
         library_row_count,
         tabs: model(view.library_tabs.iter().map(tab_data).collect()),
-        // 首页顶栏常驻高亮第一个标签（「首页」）；搜索页的当前标签由
-        // `App::set_search` 从 `State::nav_current_tab` 传入，不从这里借。
+        // 首页顶栏常驻高亮第一个标签（「首页」）；搜索页不属于任何库，
+        // `search_data` 的 `current_tab` 固定传 `-1`（无高亮）。
         current_tab: 0,
         empty: view.is_empty(),
     }
@@ -135,10 +135,16 @@ pub fn library_data(view: &LibraryView, images: &ImageStore) -> LibraryData {
 ///
 /// 结果头的两行文案在 Rust 侧拼好（`「沙丘」的搜索结果` / `共 5 部`），
 /// 与媒体库页的 `title + count-text` 同构。
+///
+/// `current_tab` 是顶栏高亮下标：**搜索页不属于任何库**，调用方传 `-1`
+/// （`Navbar` 用 `i == current-index` 判断选中，`-1` 永不命中 → 无高亮）。
+///
+/// 命中数（`view.total`）可能大于本页卡片数（搜索上限 60）：这时必须把
+/// 「显示前 N 部」写出来，否则「共 60 部」会让用户以为真的只有 60 条。
 pub fn search_data(
     view: &SearchView,
     tabs: &[LibraryTab],
-    current_tab: usize,
+    current_tab: i32,
     images: &ImageStore,
 ) -> SearchData {
     // 没有查询词时不显示引号（空搜索框的 Idle 态）。
@@ -149,10 +155,10 @@ pub fn search_data(
     };
     SearchData {
         tabs: model(tabs.iter().map(tab_data).collect()),
-        current_tab: current_tab as i32,
+        current_tab,
         term: view.term.clone().into(),
         title: title.into(),
-        count_text: format!("共 {} 部", view.total).into(),
+        count_text: search_count_text(view.total, view.cards.len()).into(),
         cards: model(
             view.cards
                 .iter()
@@ -161,6 +167,18 @@ pub fn search_data(
         ),
         state: view.state.index(),
         error: view.state.error_message().unwrap_or_default().into(),
+    }
+}
+
+/// 搜索结果头的命中数文案。
+///
+/// 命中数大于本页卡片数（搜索上限 60）时补一句「显示前 N 部」，
+/// 否则用户看到「共 60 部」会以为真的只有 60 条（真机 R6-10）。
+fn search_count_text(total: usize, shown: usize) -> String {
+    if total > shown {
+        format!("共 {total} 部 · 显示前 {shown} 部")
+    } else {
+        format!("共 {total} 部")
     }
 }
 
@@ -264,5 +282,35 @@ pub fn player_data(view: &PlayerView, images: &ImageStore, item_id: &str) -> Pla
         controls_visible: view.controls_visible,
         has_frame: frame.size().width > 0,
         frame,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::viewmodel::{CardView, SearchView};
+
+    /// 搜索页命中数被上限截断时，文案必须说出「显示前 N 部」（R6-10）。
+    #[test]
+    fn search_count_text_mentions_the_visible_prefix_when_truncated() {
+        assert_eq!(search_count_text(5, 5), "共 5 部");
+        assert_eq!(search_count_text(0, 0), "共 0 部");
+        assert_eq!(search_count_text(348, 60), "共 348 部 · 显示前 60 部");
+    }
+
+    /// 搜索页顶栏不选中任何库标签：数据层收到 `-1` 就原样写进 `current-tab`。
+    #[test]
+    fn search_data_passes_the_no_highlight_sentinel() {
+        let view = SearchView::from_cards(
+            "沙丘",
+            vec![
+                CardView::new("s01", "沙丘"),
+                CardView::new("s02", "沙丘：第二部"),
+            ],
+        );
+        let images = ImageStore::new();
+        let data = search_data(&view, &[], -1, &images);
+        assert_eq!(data.current_tab, -1, "−1 = 顶栏无高亮");
+        assert_eq!(data.count_text.as_str(), "共 2 部");
     }
 }

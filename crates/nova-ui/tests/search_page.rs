@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use common::{home_filled, init_backend, library_view, search_view};
-use nova_ui::{App, AppWindow, Page};
+use nova_ui::{App, AppWindow, CardView, FocusLayer, KeyCommand, Page, SearchView};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
@@ -97,18 +97,76 @@ fn escape_after_enter_still_clears_from_the_page() {
     assert_eq!(*clears.borrow(), 1, "搜索页的 Esc 必须是清空语义");
 }
 
+/// 搜索页不属于任何库：三个入口进去后顶栏都不应有选中标签（R6-4）。
+///
+/// 修复前 `nav_current_tab()` 的 Search 分支返回“上一次进的库”，从「动画电影」
+/// Ctrl+F 进搜索后顶栏仍亮着「动画电影」，看着像搜索结果属于那个库。
 #[test]
-fn search_page_keeps_the_current_navbar_tab() {
-    let app = setup();
+fn search_page_has_no_highlighted_navbar_tab() {
+    let app = std::rc::Rc::new(setup());
 
-    // 用户在媒体库切到第 2 个标签后进入搜索页：顶栏高亮必须沿用这个下标。
+    // 上层替身：输入即打开搜索页（与 `Shell::begin_search` 同一条链路）。
+    {
+        let weak = std::rc::Rc::downgrade(&app);
+        app.on_search_changed(move |text| {
+            if let Some(app) = weak.upgrade() {
+                let view = SearchView::from_cards(text, vec![CardView::new("s1", "沙丘")]);
+                app.open_search(&view);
+            }
+        });
+    }
+
+    // 入口 1：首页 Ctrl+F → 输入。
     app.set_home(&home_filled());
+    app.show_home();
+    assert!(app.handle_key(KeyCommand::Search));
+    type_text(&app, "沙");
+    assert_eq!(app.page(), Page::Search);
+    assert_eq!(
+        app.ui().get_search_data().current_tab,
+        -1,
+        "首页进搜索：顶栏不能高亮任何库标签"
+    );
+
+    // 入口 2：媒体库（当前是第 2 个标签）Ctrl+F → 输入。
     let mut library = library_view();
     library.current_tab = 2;
     app.set_library(&library);
-    app.set_search(&search_view());
+    app.open_library(&library);
+    assert!(app.handle_key(KeyCommand::Search));
+    type_text(&app, "丘");
+    assert_eq!(app.page(), Page::Search);
+    assert_eq!(
+        app.ui().get_search_data().current_tab,
+        -1,
+        "库页进搜索：顶栏不能保留未离开前的高亮"
+    );
 
-    assert_eq!(app.ui().get_search_data().current_tab, 2);
+    // 离开搜索回到库页：库标签高亮恢复成它自己的当前标签。
+    assert!(app.go_back());
+    assert_eq!(app.page(), Page::Library);
+    assert_eq!(
+        app.ui().get_library().current_tab,
+        2,
+        "回到库页后高亮要恢复"
+    );
+
+    // 入口 3：顶栏搜索按钮 → 输入。
+    app.show_home();
+    app.ui().invoke_search();
+    type_text(&app, "沙");
+    assert_eq!(app.page(), Page::Search);
+    assert_eq!(
+        app.ui().get_search_data().current_tab,
+        -1,
+        "顶栏搜索按钮进搜索：顶栏不能高亮任何库标签"
+    );
+
+    // 高亮为空，但键盘仍有合理起点：从第一行按 ↑ 进顶栏，焦点落在第 0 个标签
+    // （不是“无高亮”就等于“顶栏不可聚焦”）。
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Navbar);
+    assert_eq!(app.nav_focus(), 0, "无高亮时顶栏焦点从第一个标签开始");
 }
 
 #[test]

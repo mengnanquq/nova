@@ -48,7 +48,7 @@ pub(crate) enum Command {
     Open {
         item: String,
     },
-    /// 切换媒体库标签（`library` 为空串表示首页）。
+    /// 切换媒体库标签。空串按文档口径映射到首页哨兵（`local::HOME_TAB_ID`）。
     Tab {
         library: String,
     },
@@ -170,9 +170,18 @@ impl Command {
             "open" => Ok(Self::Open {
                 item: text("item").ok_or_else(|| "open 需要 item".to_owned())?,
             }),
-            "tab" => Ok(Self::Tab {
-                library: text("library").unwrap_or_default(),
-            }),
+            "tab" => {
+                // 文档口径：空串 = 首页（R6-12）。首页在 `Local::tabs` 里用
+                // `@home` 哨兵（不是空串——空串在离线分支里表示合成的「全部」库），
+                // 所以在这里归一化，命令层与文档保持一致。
+                let library = text("library").unwrap_or_default();
+                let library = if library.is_empty() {
+                    crate::local::HOME_TAB_ID.to_owned()
+                } else {
+                    library
+                };
+                Ok(Self::Tab { library })
+            }
             "search" => Ok(Self::Search {
                 term: text("term").unwrap_or_default(),
                 // 可选参数：缺省保持旧行为（只过滤首页），`"page":true` 进搜索页。
@@ -358,6 +367,25 @@ mod tests {
             Command::parse(r#"{"cmd":"tab","library":"abc"}"#),
             Ok(Command::Tab {
                 library: "abc".to_owned()
+            })
+        );
+        // 文档口径：空串（或缺省）是首页，归一化成 `@home` 哨兵（R6-12）。
+        assert_eq!(
+            Command::parse(r#"{"cmd":"tab","library":""}"#),
+            Ok(Command::Tab {
+                library: crate::local::HOME_TAB_ID.to_owned()
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"tab"}"#),
+            Ok(Command::Tab {
+                library: crate::local::HOME_TAB_ID.to_owned()
+            })
+        );
+        assert_eq!(
+            Command::parse(r#"{"cmd":"tab","library":"@home"}"#),
+            Ok(Command::Tab {
+                library: "@home".to_owned()
             })
         );
         assert_eq!(

@@ -255,6 +255,11 @@ pub fn is_search_kind(kind: MediaKind) -> bool {
     SEARCH_KINDS.contains(&kind)
 }
 
+/// 搜索页收录的类型（本地计数 / 搜索共用同一份）。
+pub fn search_kinds() -> &'static [MediaKind] {
+    &SEARCH_KINDS
+}
+
 /// 媒体条目 → 搜索结果卡片。
 ///
 /// 复用 [`card_view`]（首页/媒体库同一个映射函数），只额外过滤类型。
@@ -285,8 +290,12 @@ pub fn search_view(
     term: &str,
     limit: usize,
 ) -> Result<SearchView, nova_storage::StorageError> {
-    let items = db.search_items(server_id, &SEARCH_KINDS, term, limit)?;
-    Ok(search_view_from_items(term, &items))
+    // 单次遍历同时拿到前 `limit` 条与精确总数：以前命中数 ≥ limit 时还要再跑
+    // 一次 `search_item_count`，宽泛词（“的”/“大”/“a”）在真实库上要多扫一遍全表。
+    let (items, total) = db.search_items_with_count(server_id, &SEARCH_KINDS, term, limit)?;
+    // 结果头必须能说出真实总数，而不是本页卡片数：否则会显示“共 60 部”，
+    // 用户不知道后面还有（R6-10）。没被截断时 `total == items.len()`。
+    Ok(search_view_from_items(term, &items).with_total(total))
 }
 
 /// 用本地缓存构建详情页；条目不在缓存里时返回 `None`。
@@ -943,6 +952,38 @@ mod tests {
         assert!(view.is_empty());
     }
 
+    /// 本地搜索结果被 `limit` 截断时，`total` 仍是真实命中数（R6-10）。
+    ///
+    /// 修复前：`search_view_from_items` 的 `total` = 本页卡片数，界面会把
+    /// “共 60 部”当成真实总数，用户不知道后面还有。
+    #[test]
+    fn cached_search_total_is_not_truncated_by_the_limit() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-1");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let movies: Vec<MediaItem> = (1..=7)
+            .map(|index| {
+                movie_with(
+                    &format!("m{index}"),
+                    &format!("沙丘 {index}"),
+                    &format!("沙丘 {index}"),
+                    Some(2021),
+                )
+            })
+            .collect();
+        db.upsert_items(&server.info.id, &movies, 1)
+            .expect("写条目");
+
+        let limited = search_view(&db, &server.info.id, "沙丘", 2).expect("本地搜索");
+        assert_eq!(limited.cards.len(), 2, "本页只给 limit 条");
+        assert_eq!(limited.total, 7, "总数不能被 limit 截成 2");
+
+        // 没触发截断时总数就是卡片数（不多跑一次计数）。
+        let full = search_view(&db, &server.info.id, "沙丘", SEARCH_LIMIT).expect("本地搜索");
+        assert_eq!(full.cards.len(), 7);
+        assert_eq!(full.total, 7);
+    }
+
     #[test]
     fn cached_search_matches_titles_and_skips_episodes() {
         let db = Database::open_in_memory().expect("内存库");
@@ -993,9 +1034,10 @@ mod tests {
             .collect();
         assert_eq!(ids, vec!["a", "c"], "大小写不敏感，且不含集");
 
-        // limit 生效。
+        // limit 生效；`total` 仍是真实命中数（2 条命中，不是本页的 1 条）。
         let limited = search_view(&db, &server.info.id, "dune", 1).expect("本地搜索");
-        assert_eq!(limited.total, 1);
+        assert_eq!(limited.cards.len(), 1);
+        assert_eq!(limited.total, 2);
 
         // 没有命中 → Empty（不是 Error）。
         let none = search_view(&db, &server.info.id, "zzz", SEARCH_LIMIT).expect("本地搜索");
@@ -1048,9 +1090,10 @@ mod tests {
             "库归属的电影 / 剧集都要搜到，季 / 集不要"
         );
 
-        // limit 在 SQL / 迭代上生效（不是先全取再截断）。
+        // limit 在 SQL / 迭代上生效（不是先全取再截断）；`total` 仍是真实命中数。
         let limited = search_view(&db, &server.info.id, "沙丘", 1).expect("本地搜索");
-        assert_eq!(limited.total, 1);
+        assert_eq!(limited.cards.len(), 1);
+        assert_eq!(limited.total, 2);
         assert_eq!(limited.cards[0].item_id, "m1");
 
         let none = search_view(&db, &server.info.id, "不存在的片", SEARCH_LIMIT).expect("本地搜索");

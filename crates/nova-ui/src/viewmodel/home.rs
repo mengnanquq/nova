@@ -59,16 +59,43 @@ impl HomeView {
     /// 首页需要的图片键：hero 需要背景图与海报兜底，卡片需要海报。
     pub fn image_keys(&self) -> Vec<ImageKey> {
         let mut keys = Vec::new();
-        if let Some(hero) = &self.hero {
-            keys.push(ImageKey::new(hero.item_id.clone(), ImageKind::Backdrop));
-            keys.push(hero.poster_key());
-        }
+        keys.extend(self.hero_image_keys());
         keys.extend(self.continue_watching.iter().map(CardView::poster_key));
         keys.extend(self.recently_added.iter().map(CardView::poster_key));
         for row in &self.library_rows {
             keys.extend(row.items.iter().map(CardView::poster_key));
         }
         keys
+    }
+
+    /// hero 需要的图（背景图 + 海报兜底）；没有 hero 时为空。
+    pub fn hero_image_keys(&self) -> Vec<ImageKey> {
+        match &self.hero {
+            Some(hero) => vec![
+                ImageKey::new(hero.item_id.clone(), ImageKind::Backdrop),
+                hero.poster_key(),
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    /// 首页某一行在 `[first, first + count)` 区间内的图片键。
+    ///
+    /// `row` 与 [`crate::ImageScope::HomeRow`] 同一套编号：`0` = 继续观看、`1` =
+    /// 最近添加、`2 + n` = 第 `n` 个库行。区间由 `.slint` 侧的可见几何算出
+    /// （行内 `content-x` 与卡宽 + 页面纵向可见的行），越界区间会被夹住。
+    pub fn row_image_keys(&self, row: usize, first: usize, count: usize) -> Vec<ImageKey> {
+        let cards: &[CardView] = match row {
+            0 => &self.continue_watching,
+            1 => &self.recently_added,
+            _ => match self.library_rows.get(row - 2) {
+                Some(row) => &row.items,
+                None => return Vec::new(),
+            },
+        };
+        let start = first.min(cards.len());
+        let end = start.saturating_add(count).min(cards.len());
+        cards[start..end].iter().map(CardView::poster_key).collect()
     }
 
     /// 焦点行：继续观看是一行，最近添加按列数切行。
@@ -136,5 +163,51 @@ mod tests {
         assert!(keys.contains(&ImageKey::backdrop("hero")));
         assert!(keys.contains(&ImageKey::poster("hero")));
         assert!(keys.contains(&ImageKey::poster("x")));
+    }
+
+    #[test]
+    fn row_image_keys_select_the_visible_interval_of_each_row() {
+        let mut home = HomeView::new();
+        home.continue_watching = (0..3)
+            .map(|index| CardView::new(format!("c{index}"), "C"))
+            .collect();
+        home.recently_added = (0..10)
+            .map(|index| CardView::new(format!("r{index}"), "R"))
+            .collect();
+        home.library_rows = vec![LibraryRowView {
+            library_id: "lib".to_owned(),
+            title: "库".to_owned(),
+            items: (0..4)
+                .map(|index| CardView::new(format!("l{index}"), "L"))
+                .collect(),
+        }];
+
+        assert_eq!(
+            home.row_image_keys(0, 1, 2),
+            vec![ImageKey::poster("c1"), ImageKey::poster("c2")],
+            "继续观看行"
+        );
+        assert_eq!(
+            home.row_image_keys(1, 8, 5),
+            vec![ImageKey::poster("r8"), ImageKey::poster("r9")],
+            "越界区间要夹住"
+        );
+        assert_eq!(
+            home.row_image_keys(2, 0, 4),
+            vec![
+                ImageKey::poster("l0"),
+                ImageKey::poster("l1"),
+                ImageKey::poster("l2"),
+                ImageKey::poster("l3"),
+            ],
+            "库行"
+        );
+        assert!(home.row_image_keys(3, 0, 1).is_empty(), "越界的行");
+        assert!(home.row_image_keys(0, 9, 1).is_empty(), "区间整体在行外");
+    }
+
+    #[test]
+    fn hero_image_keys_are_empty_without_hero() {
+        assert!(HomeView::new().hero_image_keys().is_empty());
     }
 }

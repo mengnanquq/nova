@@ -170,6 +170,22 @@ export component DetailPage inherits Rectangle {
                 visible: root.data.backdrop.width > 0;
             }
 
+            // 文字可读性保护（R6-7）：与首页 hero 同款的**左侧横向压暗**
+            // （`Theme.scrim` → 透明，不引入新颜色）。
+            //
+            // 现有底部渐变从 backdrop 的 40% 才开始，而小窗口（800×600）下
+            // 内容块被底端锚定顶到导航栏下沿：标题 / 原片名 / 元信息行落在
+            // 渐变还很淡的亮背景（白墙、灯笼、人物）上，几乎不可读。文案列
+            // 从左边缘开始，所以左侧压暗能盖住它们，而画面中右侧主体不受影响。
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width * 0.78;
+                height: root.backdrop-height;
+                background: @linear-gradient(90deg, Theme.scrim 0%, #00000000 100%);
+                visible: root.data.backdrop.width > 0;
+            }
+
             // ---- 内容列（单一纵向布局，叠在 hero 下半部）----
             //
             // 不可破坏的不变量：**这里的每个子项都不写 `y`**，先后顺序 + `spacing`

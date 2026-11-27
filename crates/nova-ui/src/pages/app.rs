@@ -7,7 +7,7 @@
 //! `viewmodel` 中完成，`.slint` 里不写业务判断。
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -207,6 +207,12 @@ type TrackHandler = Rc<dyn Fn(u32)>;
 type SubtitleHandler = Rc<dyn Fn(Option<u32>)>;
 type SecondsHandler = Rc<dyn Fn(f64)>;
 type MarginHandler = Rc<dyn Fn(i64)>;
+/// 网格可见窗口的图片键。
+type ImagesHandler = Rc<dyn Fn(&[ImageKey])>;
+/// 首页某一行的可见图片窗口：`(row, first, count)`，`row = -1` 表示 hero。
+type RowImagesHandler = Rc<dyn Fn(i32, i32, i32)>;
+/// 页面切换（`set_page` 真正换页后调用）。
+type PageHandler = Rc<dyn Fn(Page)>;
 
 #[derive(Default)]
 struct Callbacks {
@@ -241,6 +247,12 @@ struct Callbacks {
     player_exit: Option<SeekHandler>,
     player_subtitle_delay: Option<SecondsHandler>,
     player_subtitle_margin: Option<MarginHandler>,
+    // 图片按可见窗口请求：网格上报自己的窗口键；首页逐行上报区间。
+    library_images: Option<ImagesHandler>,
+    search_images: Option<ImagesHandler>,
+    home_images: Option<RowImagesHandler>,
+    /// 页面切换（上层据此释放离开页面的图片可见窗口）。
+    page_changed: Option<PageHandler>,
     connect_server: Option<VoidHandler>,
     // 添加服务器：参数是（地址，用户名，密码明文）——密码只在这一次函数调用里存在。
     add_server_submit: Option<SubmitHandler>,
@@ -293,9 +305,7 @@ struct State {
     detail: DetailView,
     player: PlayerView,
     search: SearchView,
-    // 当前顶栏标签下标：首页恒为 0，媒体库取 `LibraryView::current_tab`。
-    // 搜索页没有自己的标签数据，顶栏高亮沿用离开前的那一项。
-    nav_current_tab: usize,
+
     player_fullscreen: bool,
     // 当前顶部横幅；`None` 表示隐藏。
     banner: Option<BannerData>,
@@ -303,6 +313,9 @@ struct State {
     // 窗口尺寸也要进缓存键：引擎按**画面**（letterbox 后）高度换算百分比，
     // 窗口一变百分比就变了，像素没变也得重推一次。
     subtitle_margin: Option<(i64, (u32, u32))>,
+    // 上一次上报给图片层的可见窗口键：窗口没变就不重复上报（滚动事件很密）。
+    last_library_images: Vec<ImageKey>,
+    last_search_images: Vec<ImageKey>,
     // 与 `App::images` 同一个 `Rc`：播放页刷新时要从这里取背景图（首帧前的铺底画面）。
     images: Rc<RefCell<ImageStore>>,
     add_server: AddServerView,
@@ -322,10 +335,11 @@ impl Default for State {
             detail: DetailView::default(),
             player: PlayerView::default(),
             search: SearchView::default(),
-            nav_current_tab: 0,
             player_fullscreen: false,
             banner: None,
             subtitle_margin: None,
+            last_library_images: Vec::new(),
+            last_search_images: Vec::new(),
             images: Rc::new(RefCell::new(ImageStore::new())),
             add_server: AddServerView::new(),
             callbacks: Callbacks::default(),
@@ -871,6 +885,17 @@ impl App {
         self.images.borrow_mut().set(key.clone(), image);
     }
 
+    /// 按字节预算淘汰最旧的图（保护 `protect` 里在屏上的键），返回被淘汰的键。
+    ///
+    /// 参数顺序与 [`ImageStore::trim`] 一致（`protect` 在前、`budget` 在后），
+    /// 避免两个调用点把预算当成保护集合。
+    ///
+    /// 上层拿到返回值后要解除这些键的"已请求"标记，它们重新进入视口时才会
+    /// 再装载（磁盘缓存命中，很快）。
+    pub fn trim_images(&self, protect: &HashSet<ImageKey>, budget: u64) -> Vec<ImageKey> {
+        self.images.borrow_mut().trim(protect, budget)
+    }
+
     /// 推入一张海报。
     pub fn set_poster(&self, item_id: impl Into<String>, image: slint::Image) {
         self.images.borrow_mut().set_poster(item_id, image);
@@ -888,36 +913,57 @@ impl App {
             home::apply(&self.ui, view, &images);
         }
         let mut state = self.state.borrow_mut();
+        // 首页按行上报可见图片窗口是事件驱动的（滚动 / 布局变化）；数据本身变化
+        // 不一定改几何，所以数据真变了时推一行代次，让每行重新上报自己的区间。
+        // （`apply_image` 每次到图都会重贴**同一份**视图，那不该触发一整轮上报。）
+        let changed = state.home != *view;
         state.home = view.clone();
-        // 首页顶栏常驻高亮第一个标签（「首页」）。
-        state.nav_current_tab = 0;
         if state.focus.home >= view.card_count() {
             state.focus.home = 0;
         }
         let focus = state.focus.home;
         drop(state);
         self.ui.set_home_focus(focus as i32);
+        if changed {
+            let next = self.ui.get_home_image_gen().wrapping_add(1);
+            self.ui.set_home_image_gen(next);
+        }
     }
 
     /// 设置媒体库视图并刷新界面。
     ///
-    /// 替换视图时把焦点**按条目 id** 重新定位（[`rebase_focus`]）：后台刷新会补齐
-    /// 条目、重排顺序，沿用旧下标会让焦点落到另一条内容上。
+    /// 同一个库**重建 / 后台刷新**时，把焦点**按条目 id** 重新定位
+    /// （[`rebase_focus`]）：补齐条目、重排顺序后，沿用旧下标会让焦点落到另一条
+    /// 内容上；滚动位置保留（用户正在原地浏览，刷新不该把人弹回顶部）。
+    ///
+    /// **换了库**（`view.id` 变了）则是另一回事：滚动位置属于上一个库，必须回到
+    /// 顶部、焦点回到第 0 张（真机 R6-2：从动画电影滚到 -1080 再切到海外电影，
+    /// 新库直接落在半空中）。只在换库时复位，详情页返回（同库、不重建）仍然保留。
     pub fn set_library(&self, view: &LibraryView) {
         {
             let images = self.images.borrow();
             library::apply(&self.ui, view, &images);
         }
         let mut state = self.state.borrow_mut();
-        let focus = rebase_focus(&state.library, state.focus.library, view);
+        let library_changed = state.library.id != view.id;
+        let focus = if library_changed {
+            0
+        } else {
+            rebase_focus(&state.library, state.focus.library, view)
+        };
         state.library = view.clone();
-        // 顶栏高亮跟随媒体库当前选中的标签，供后续搜索页沿用。
-        state.nav_current_tab = view.current_tab;
         // `rebase_focus` 已经保证下标落在新卡片范围内（新列表为空时是 0）。
         state.focus.library = focus;
         drop(state);
         self.ui.set_library_focus(focus as i32);
+        if library_changed {
+            // 网格的 `content-y` 是 `.slint` 局部滚动状态，只有换库时才归零。
+            self.ui.invoke_reset_library_scroll();
+        }
         // 数据一落地就按当前视口窗口化（否则首帧还是"全部实例化"）。
+        // 顺便清掉"上次上报的图片窗口"：换了视图要重新上报一次（即使可见的
+        // 卡片 id 恰好与旧视图相同，例如刷新前缓存里还没有这些条目）。
+        self.state.borrow_mut().last_library_images.clear();
         sync_grid_window(&self.ui, &self.state, Page::Library);
     }
 
@@ -928,13 +974,12 @@ impl App {
     pub fn set_search(&self, view: &SearchView) {
         // 先只读地取出顶栏数据：`state` 的 borrow 在进入 `apply` 之前结束，
         // 保证这里不会同时持有 `state` 与 `images` 两个 borrow。
-        let (tabs, current_tab) = {
-            let state = self.state.borrow();
-            (state.home.library_tabs.clone(), state.nav_current_tab)
-        };
+        // 搜索页不属于任何库标签：`-1` = 顶栏不高亮任何一项（真机 R6-4：从
+        // 「动画电影」进来后顶栏仍亮着它，看着像搜索结果属于那个库）。
+        let tabs = self.state.borrow().home.library_tabs.clone();
         {
             let images = self.images.borrow();
-            search::apply(&self.ui, view, &tabs, current_tab, &images);
+            search::apply(&self.ui, view, &tabs, -1, &images);
         }
         let mut state = self.state.borrow_mut();
         state.search = view.clone();
@@ -944,7 +989,8 @@ impl App {
         let focus = state.focus.search;
         drop(state);
         self.ui.set_search_focus(focus as i32);
-        // 与媒体库同口径：数据一落地就按视口窗口化。
+        // 与媒体库同口径：数据一落地就按视口窗口化，并重新上报一次图片窗口。
+        self.state.borrow_mut().last_search_images.clear();
         sync_grid_window(&self.ui, &self.state, Page::Search);
         // 用户正在输入框里打字时不回填：视图可能晚到一拍，回填会把
         // 光标位置与已输入文本重置成旧查询词。
@@ -1345,6 +1391,36 @@ impl App {
     pub fn on_player_subtitle_margin(&self, handler: impl Fn(i64) + 'static) {
         self.state.borrow_mut().callbacks.player_subtitle_margin = Some(Rc::new(handler));
     }
+
+    /// 媒体库网格当前可见窗口的图片键（滚动时补发新进入视口的卡）。
+    ///
+    /// 只在上报的窗口确实变化时调用：网格窗口化后图片也只该按可见范围请求，
+    /// 否则一个 4546 张的库永远只有前 120 张有海报（体检 R6-5）。
+    pub fn on_library_images(&self, handler: impl Fn(&[ImageKey]) + 'static) {
+        self.state.borrow_mut().callbacks.library_images = Some(Rc::new(handler));
+    }
+
+    /// 搜索页网格当前可见窗口的图片键（与媒体库同一套窗口化口径）。
+    pub fn on_search_images(&self, handler: impl Fn(&[ImageKey]) + 'static) {
+        self.state.borrow_mut().callbacks.search_images = Some(Rc::new(handler));
+    }
+
+    /// 首页某一行的可见图片窗口：`(row, first, count)`。
+    ///
+    /// `row = -1` 是 hero（`count = 1` 表示它在视口内），`0` = 继续观看，
+    /// `1` = 最近添加，`2 + n` = 第 n 个库行；`first/count` 是该行的横向可见区间。
+    /// 只在该行可见区间变化、重新进入视口或首页数据更新时发。
+    pub fn on_home_images(&self, handler: impl Fn(i32, i32, i32) + 'static) {
+        self.state.borrow_mut().callbacks.home_images = Some(Rc::new(handler));
+    }
+
+    /// 页面切换回调：`set_page` 真正换页后调用，参数是**新页面**。
+    ///
+    /// 上层用它释放离开页面的图片可见窗口（否则 `ImageScope::HomeRow(n)` 的
+    /// `visible` 集合停在离开时的值，那些键永远被当成在屏上的图保护着）。
+    pub fn on_page_changed(&self, handler: impl Fn(Page) + 'static) {
+        self.state.borrow_mut().callbacks.page_changed = Some(Rc::new(handler));
+    }
 }
 
 fn page_of_route(route: Option<&Route>) -> Page {
@@ -1375,6 +1451,17 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         ui.on_search_grid_viewport_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 sync_grid_window(&ui, &state, Page::Search);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        // 首页行自己按可见区间上报（行内 content-x / 卡宽 + 页面纵向可见的行）。
+        ui.on_home_image_window(move |row, first, count| {
+            // 不拿着 state 的 borrow 回调：上层收到后可能重建视图。
+            let handler = state.borrow().callbacks.home_images.clone();
+            if let Some(handler) = handler {
+                handler(row, first, count);
             }
         });
     }
@@ -1874,6 +1961,10 @@ fn set_focus(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page, index: usiz
 /// 2. 页面报"视口 / 几何变了"（`PosterGrid.viewport-changed`）：滚动、窗口 resize、
 ///    列数变化、卡片总数变化；
 /// 3. 键盘焦点移动后 `scroll-to-index` 改了滚动偏移（同样走第 2 条）。
+///
+/// 同一个窗口还会作为**图片请求的来源**（[`Callbacks::library_images`] /
+/// [`Callbacks::search_images`]）：只请求可见行 ± 缓冲行里的海报，窗口没变就不
+/// 重复上报。这是 R6-5 的修法——以前按整页 `take(120)` 截断，视口外的键永远轮不到。
 fn sync_grid_window(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
     let columns = ui.get_grid_columns().max(1) as usize;
     let (total, scroll_y, viewport_h, grid_top, row_height, set_start, set_count) = match page {
@@ -1901,6 +1992,36 @@ fn sync_grid_window(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
     let window = grid_window(scroll_y, viewport_h, grid_top, row_height, columns, total);
     set_start(ui, window.start as i32);
     set_count(ui, window.count as i32);
+
+    // 图片：只要可见窗口里的键（与实例化区间同一个几何口径）。
+    let (keys, changed, handler) = {
+        let mut state = state.borrow_mut();
+        match page {
+            Page::Library => {
+                let keys = state.library.image_window_keys(window.start, window.count);
+                let changed = state.last_library_images != keys;
+                if changed {
+                    state.last_library_images = keys.clone();
+                }
+                (keys, changed, state.callbacks.library_images.clone())
+            }
+            Page::Search => {
+                let keys = state.search.image_window_keys(window.start, window.count);
+                let changed = state.last_search_images != keys;
+                if changed {
+                    state.last_search_images = keys.clone();
+                }
+                (keys, changed, state.callbacks.search_images.clone())
+            }
+            Page::Home | Page::Detail | Page::Player => return,
+        }
+    };
+    if !changed {
+        return;
+    }
+    if let Some(handler) = handler {
+        handler(&keys);
+    }
 }
 
 fn handle_key(ui: &AppWindow, state: &Rc<RefCell<State>>, command: KeyCommand) -> bool {
@@ -2069,16 +2190,14 @@ fn enter_hero(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
 
 /// 顶栏**当前高亮**的标签下标（必须与页面真正画出来的一致）。
 ///
-/// 首页写死 0（`convert::home_data` 的 `current-tab` 就是 0），不能读
-/// `State::nav_current_tab`：它是"上一次进的库"，从媒体库返回首页后还留着旧值，
-/// 拿它当焦点起点会落在「首页」高亮旁边的标签上（真机实测：首页顶栏焦点从
-/// 第 2 个标签开始）。
+/// 首页写死 0（`convert::home_data` 的 `current-tab` 就是 0）；搜索页不属于任何
+/// 库，没有高亮项（真机 R6-4 的 `current-tab` 传 `-1`），但键盘进入顶栏时仍要
+/// 有一个合理起点，所以这里返回第一个标签（0）。
 fn nav_current_tab(state: &State, page: Page) -> usize {
     match page {
         Page::Home => 0,
         Page::Library => state.library.current_tab,
-        Page::Search => state.nav_current_tab,
-        Page::Detail | Page::Player => 0,
+        Page::Search | Page::Detail | Page::Player => 0,
     }
 }
 
@@ -2363,6 +2482,43 @@ fn set_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
         set_focus_layer(ui, state, FocusLayer::Content);
         set_nav_focus_index(ui, state, 0);
         set_hero_focus_index(ui, state, 0);
+        // 图片晚到时只重贴**当前路由**的视图（一批图一次，见 `nova-app` 的
+        // `drain`）：离屏期间到达的图因此不会进入别的页面的模型。切回这一页时
+        // 在这里统一补一次，两边的语义才对得上。
+        reapply_page(ui, state, page);
+        // 媒体库 / 搜索页的网格可见窗口在离屏时被上层释放了：换回来时清掉
+        // "上次上报"并重新上报（`begin_window` 会去重，不会重复下载）。
+        match page {
+            Page::Library => {
+                state.borrow_mut().last_library_images.clear();
+                sync_grid_window(ui, state, Page::Library);
+            }
+            Page::Search => {
+                state.borrow_mut().last_search_images.clear();
+                sync_grid_window(ui, state, Page::Search);
+            }
+            Page::Home | Page::Detail | Page::Player => {}
+        }
+        let handler = state.borrow().callbacks.page_changed.clone();
+        if let Some(handler) = handler {
+            handler(page);
+        }
+    }
+}
+
+/// 把某一页当前持有的视图重新写进 Slint（用于切页时补上离屏期间晚到的图）。
+///
+/// 只碰 Slint 属性，不重建视图模型、不改焦点 / 滚动状态。
+fn reapply_page(ui: &AppWindow, state: &Rc<RefCell<State>>, page: Page) {
+    let state = state.borrow();
+    let images = state.images.borrow();
+    match page {
+        Page::Home => home::apply(ui, &state.home, &images),
+        Page::Library => library::apply(ui, &state.library, &images),
+        Page::Detail => detail::apply(ui, &state.detail, &images),
+        // 搜索页不属于任何库标签（`-1` = 顶栏无高亮），与 `App::set_search` 同口径。
+        Page::Search => search::apply(ui, &state.search, &state.home.library_tabs, -1, &images),
+        Page::Player => {}
     }
 }
 
@@ -2394,16 +2550,13 @@ fn focus_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 /// `search-input` 回调（体检 R5-4）。视图用 Idle（与搜索页「×」清空后一致），
 /// 顶栏标签数据沿用当前页。
 fn open_empty_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    let (tabs, current_tab, images) = {
+    let (tabs, images) = {
         let state = state.borrow();
-        (
-            state.home.library_tabs.clone(),
-            state.nav_current_tab,
-            state.images.clone(),
-        )
+        (state.home.library_tabs.clone(), state.images.clone())
     };
     let view = SearchView::default();
-    search::apply(ui, &view, &tabs, current_tab, &images.borrow());
+    // 搜索页顶栏无高亮（`-1`），与 `set_search` 同一口径（真机 R6-4）。
+    search::apply(ui, &view, &tabs, -1, &images.borrow());
     {
         let mut state = state.borrow_mut();
         state.search = view;
@@ -2424,16 +2577,13 @@ fn open_empty_search(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 /// 路由不变，只换一份空视图（Idle）：否则清空后结果网格还留着上一轮的卡片。
 fn clear_search_input(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     // 先只读地取出顶栏数据，`state` 的 borrow 在 `apply` 前结束（同 `set_search`）。
-    let (tabs, current_tab, images) = {
+    let (tabs, images) = {
         let state = state.borrow();
-        (
-            state.home.library_tabs.clone(),
-            state.nav_current_tab,
-            state.images.clone(),
-        )
+        (state.home.library_tabs.clone(), state.images.clone())
     };
     let view = SearchView::default();
-    search::apply(ui, &view, &tabs, current_tab, &images.borrow());
+    // 搜索页顶栏无高亮（`-1`），与 `set_search` 同一口径（真机 R6-4）。
+    search::apply(ui, &view, &tabs, -1, &images.borrow());
     {
         let mut state = state.borrow_mut();
         state.search = view;
