@@ -115,13 +115,20 @@ export component Navbar inherits Rectangle {
     // 被裁掉的标签时要把它滚进可见区（见标签元素的 `ensure-visible`）。
     //
     // 焦点标签的位置由**焦点那个标签自己**写进来（`for` 元素无法从父组件按下标访问），
-    // 下面五个 `probe-*` 把它换算成**标签区视口坐标**报出去：
+    // 记的是**标签行内容坐标**（`self.x`，滚动不会改它）；下面四个 `probe-*` 再
+    // 换算成**标签区视口坐标**报出去：
     // `0 <= probe-focus-tab-left && probe-focus-tab-right <= probe-tabs-viewport-w`
-    // 就是"焦点标签完整可见"。（`content-x` 向下 / 向右滚时为负，所以要加回来。）
+    // 就是"焦点标签完整可见"。
+    //
+    // 以前这里记的是 `absolute-position`（**已经含滚动偏移**），探针又加了一遍
+    // `content-x`：同一个标签报出的左右沿会随"按下方向键那一刻已经滚到哪儿"漂移
+    // （体检 R8-A1：搜索页 800×600 报 `focus_tab_right=643.2 > tabs_viewport_w=623`，
+    // 首页同尺寸却"正常"；其实两页标签行宽度与最大滚动量完全一致，差异全部来自这个
+    // 双算）。内容坐标 + 当前 `content-x` 才是标签此刻真正的视口位置（向右滚时为负）。
     in-out property <length> focus-tab-left: 0px;
     in-out property <length> focus-tab-width: 0px;
-    out property <length> probe-focus-tab-left: root.focus-tab-left - tabs-view.absolute-position.x
-        + tabs-view.content-x;
+    // 视口相对坐标：内容坐标 + 滚动偏移（`content-x` 向右滚时为负）。
+    out property <length> probe-focus-tab-left: root.focus-tab-left + tabs-view.content-x;
     out property <length> probe-focus-tab-right: root.probe-focus-tab-left + root.focus-tab-width;
     out property <length> probe-tabs-viewport-w: tabs-view.width;
     out property <length> probe-tabs-scroll-x: tabs-view.content-x;
@@ -270,9 +277,26 @@ export component Navbar inherits Rectangle {
                             // 窄窗口下标签行比标签区宽：把焦点标签横向滚入可见区
                             // （`ensure-visible` 滚的是包着它的 `tabs-view`）。
                             self.ensure-visible(ScrollBehavior.smooth);
-                            // 把几何报给顶栏的探针（见 `probe-focus-tab-*`）。
-                            root.focus-tab-left = self.absolute-position.x;
-                            root.focus-tab-width = self.width;
+                        }
+                        // 把几何报给顶栏的探针（见 `probe-focus-tab-*`）。
+                        self.report-geometry();
+                    }
+
+                    // 布局坐标镜像一份：窗口宽度变化时标签行会重排（`nav-link-gap`
+                    // 随宽度缩放、字重影响 label 宽度），探针不能停在按下方向键那一刻。
+                    property <length> layout-left: self.x;
+                    property <length> layout-width: self.width;
+                    changed layout-left => {
+                        self.report-geometry();
+                    }
+                    changed layout-width => {
+                        self.report-geometry();
+                    }
+
+                    function report-geometry() {
+                        if (self.keyboard-focused) {
+                            root.focus-tab-left = self.layout-left;
+                            root.focus-tab-width = self.layout-width;
                         }
                     }
 

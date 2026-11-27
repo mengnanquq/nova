@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use common::{init_backend, library_view};
-use nova_ui::{App, AppWindow, CardView, LibraryView, Page};
+use common::{home_filled, init_backend, library_view};
+use nova_ui::{App, AppWindow, CardView, LibraryView, Page, Route};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
 
@@ -180,4 +180,67 @@ fn tab_activated_click_resets_scroll_and_focus() {
     scroll_down(&app);
     app.ui().invoke_tab_activated("lib-a".into());
     assert_at_top(&app, "tab-activated 海外电影 → 动画电影");
+}
+
+/// R8-A2：换库必须**替换路由栈顶**，不能把旧库留在栈上。
+///
+/// 修复前：`open_library` 只在"栈顶不是 `Route::Library`"时才压栈，于是切库后
+/// `App::current_route()` 仍是**第一个进的库**——调试通道 `view.route` 报旧 id
+/// （真机：页面已经是「海外电影」4546 部，`route` 还写着 `动画电影`），
+/// 任何"当前路由 == 某个库"的判断（例如快照重建）也会对着旧 id 做。
+/// 修复后换库走"弹出旧的、压入新的"，栈深度不变。
+#[test]
+fn switching_library_replaces_the_route_in_place() {
+    let a = library("lib-a", "动画电影", "a");
+    let b = library("lib-b", "海外电影", "b");
+    init_backend();
+    let app = App::new_with(AppWindow::new().expect("创建窗口"));
+    app.ui().set_window_w(W);
+    app.ui().set_window_h(H);
+    app.ui().window().set_size(slint::LogicalSize::new(W, H));
+    app.set_home(&home_filled());
+    app.show_home();
+    app.open_library(&a);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(500));
+
+    let route_a = Route::Library {
+        id: "lib-a".to_owned(),
+        title: "动画电影".to_owned(),
+    };
+    assert_eq!(
+        app.current_route(),
+        Some(route_a.clone()),
+        "前提：首页 → 库 A"
+    );
+    let depth = app.navigator().len();
+    assert_eq!(depth, 2, "前提：栈里是 [首页, 库]");
+
+    app.open_library(&b);
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Library {
+            id: "lib-b".to_owned(),
+            title: "海外电影".to_owned(),
+        }),
+        "换库后当前路由必须是新库（`view.route` 读的就是它）"
+    );
+    assert_eq!(app.navigator().len(), depth, "换库是替换栈顶，不是再压一层");
+
+    // 同一个库重贴（后台刷新 / 详情返回）：栈顶不变，也不新增。
+    app.open_library(&b);
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Library {
+            id: "lib-b".to_owned(),
+            title: "海外电影".to_owned(),
+        }),
+        "同库重建后当前路由不变"
+    );
+    assert_eq!(app.navigator().len(), depth, "同库重建不能再压一层");
+
+    // 换库不影响返回：一次返回就到下一层（首页），不会先回到旧库。
+    assert!(app.go_back(), "库页可以返回");
+    assert_eq!(app.page(), Page::Home, "返回落在首页而不是旧库");
+    assert_eq!(app.current_route(), Some(Route::Home));
 }

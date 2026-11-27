@@ -2996,6 +2996,76 @@ mod tests {
         );
     }
 
+    /// 体检 R8-A2：调试通道 `tab` 切库后，`view.route` 必须报**新库**。
+    ///
+    /// 修复前 `App::open_library` 只在"栈顶不是 `Route::Library`"时压栈，切库后
+    /// 栈顶仍是第一个进的库：页面、`current_tab`、标题都对，只有 `view.route`
+    /// （`App::current_route()` 的 `Debug` 输出）停在旧 id 上。那是真的路由栈没更新，
+    /// 不只是探针取值不对——快照重建之类的"当前路由 == 某库"判断会因此对着旧库做。
+    #[test]
+    fn tab_command_moves_the_route_to_the_new_library() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(crate::local::Local::open(&env, None).expect("打开本地状态"));
+        // 两个库标签：离线也能走 `activate_tab` → `Local::library` 这条真实路径。
+        local.set_libraries(vec![
+            library("lib-a", "动画电影"),
+            library("lib-b", "海外电影"),
+        ]);
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        app.ui()
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        app.ui().set_window_w(1280.0);
+        app.ui().set_window_h(800.0);
+        app.set_home(&local.home(None).expect("首页"));
+        app.show_home();
+        app.ui().show().expect("显示窗口");
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(600));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shell = super::Shell::for_test(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+        );
+
+        let route = |id: &str, title: &str| {
+            format!(
+                "{:?}",
+                Some(Route::Library {
+                    id: id.to_owned(),
+                    title: title.to_owned(),
+                })
+            )
+        };
+
+        for (id, title) in [("lib-a", "动画电影"), ("lib-b", "海外电影")] {
+            let report = shell.debug_execute(crate::debug::Command::Tab {
+                library: id.to_owned(),
+            });
+            assert_eq!(report["ok"], serde_json::json!(true), "{report}");
+            let view = shell.debug_execute(crate::debug::Command::View);
+            assert_eq!(
+                view["route"],
+                serde_json::json!(route(id, title)),
+                "`tab {id}` 之后 `view.route` 必须是新库（页面与高亮已经切过去了）：{view}"
+            );
+            assert_eq!(shell.app.page(), Page::Library);
+        }
+
+        // 每次切库都是替换栈顶：返回仍然只回一层（首页）。
+        assert_eq!(shell.app.navigator().len(), 2, "栈里是 [首页, 库]");
+        assert!(shell.app.go_back());
+        assert_eq!(shell.app.page(), Page::Home, "返回落在首页，不需要先回旧库");
+    }
+
     /// 体检 R7-D4：扫描改了音量 / 静音而恢复**没生效**时必须留下 warn。
     ///
     /// `Shell::sweep` 需要真实事件循环才能构造，所以这里走它调用的同一个包装。

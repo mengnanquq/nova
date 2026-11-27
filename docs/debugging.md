@@ -143,13 +143,14 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 
 | 字段 | 含义 |
 |---|---|
+| `route` | 路由栈**顶**（`Some(Home)` / `Some(Library { id, title })` / …）。它跟随真实导航：`tab` 换库是**替换栈顶**，所以切库后这里就是新库的 id / 标题；`route` 还停在旧库 id 就是路由栈没更新（体检 R8-A2，已修） |
 | `status` | 连接状态（`nova_app::status::Status` 的 `Debug` 输出）：`Connected { … }` / `NoServer` / `MissingToken { … }` / `Expired { … }` / `RefreshFailed { … }`。横幅背后真正的状态，离线排查先看它 |
 | `search_focused` | 顶栏搜索框是否真的持有焦点（Ctrl+F / 点击搜索后的交接态） |
 | `focus_layer` | 键盘焦点层：`content` / `hero` / `navbar`（体检 R2-2b）。纯键盘 / 遥控器能不能到顶栏与 hero 按钮看它 |
 | `nav_focus` | 顶栏焦点下标：`0..nav_tabs-1` = 库标签，`nav_tabs` = 搜索按钮，`-1` = 不在顶栏 |
 | `hero_focus` | hero 按钮行的焦点：`0` = 「▶ 播放」，`1` = 「更多信息」（只在 `focus_layer == "hero"` 时有意义） |
 | `nav_tabs` / `home.hero_item` / `home.hero_overview_len` | 顶栏标签个数；hero 的条目 id 与简介字符数（简介为 0 时 hero 没有两个按钮，`↑` 会跳过 hero 层直接去顶栏——不是 bug） |
-| `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签在标签区视口里的左右沿与标签区滚动量：窄窗口下 `0 ≤ left && right ≤ viewport_w` 就是“焦点标签已经滚入可见区” |
+| `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签在标签区视口里的左右沿与标签区滚动量：窄窗口下 `0 ≤ left && right ≤ viewport_w` 就是“焦点标签已经滚入可见区”。左右沿是**即时**值（内容坐标 + 当前 `content-x`），不受“按下方向键那一刻已经滚到哪儿”影响；标签行宽度等于标签区内容宽度（末端无额外余量），所以 800px 下滚到底时 `focus_tab_right == tabs_viewport_w` 是正常现象 |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |
 | `dialog.open` / `address` / `user` / `password_len` / `error` | 「添加服务器」对话框的字段与错误文案；**密码只报字符长度**，不回显明文 |
 | `player.playing` / `player.buffering` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。注意 `view.player` **没有** `ended` 字段（播完判定在界面侧是 `PlayerView::ended && !playing`）：要确认“是不是真的播完了”看 `playing: false` + `position_ms` 到底 + `error: null`，或看日志 |

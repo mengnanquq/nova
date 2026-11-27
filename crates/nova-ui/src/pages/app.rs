@@ -1152,11 +1152,25 @@ impl App {
         leave_player_before_navigating(&self.ui, &self.state);
         self.set_library(view);
         let mut state = self.state.borrow_mut();
-        if !matches!(state.nav.current(), Some(Route::Library { .. })) {
-            state.nav.push(Route::Library {
+        match state.nav.current() {
+            // 同一个库重建（后台刷新 / 详情返回）或重复点同一个标签：栈不动。
+            Some(Route::Library { id, title }) if *id == view.id && *title == view.title => {}
+            // 换库：**替换**栈顶，不是留着旧的那个（体检 R8-A2）。以前只在
+            // “栈顶不是 Library”时压栈，于是切库后 `current_route()` 永远是第一个
+            // 进的库：调试通道 `view.route` 报旧 id，`restore_route` 之类的
+            // “当前路由 == 某库”判断也会对着旧 id 做。返回仍然只回一层
+            // （与 `open_search` 换查询词同一做法）。
+            Some(Route::Library { .. }) => {
+                state.nav.pop();
+                state.nav.push(Route::Library {
+                    id: view.id.clone(),
+                    title: view.title.clone(),
+                });
+            }
+            _ => state.nav.push(Route::Library {
                 id: view.id.clone(),
                 title: view.title.clone(),
-            });
+            }),
         }
         drop(state);
         set_page(&self.ui, &self.state, Page::Library);

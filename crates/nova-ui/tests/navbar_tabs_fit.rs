@@ -17,7 +17,7 @@ mod common;
 use std::time::Duration;
 
 use common::{home_filled, init_backend, library_view, search_view};
-use nova_ui::{App, AppWindow, LibraryTab, Page, TargetInfo, Theme};
+use nova_ui::{App, AppWindow, FocusLayer, LibraryTab, Page, TargetInfo, Theme};
 use slint::ComponentHandle;
 
 /// 真实媒体库的标签行（10 个库 + 「首页」）：只有这么多标签才会在 800px 下溢出。
@@ -244,4 +244,109 @@ fn narrow_window_drops_the_tabs_that_do_not_fit() {
             search.x
         );
     }
+}
+
+/// R8-A1：最后一个标签滚到底后必须**完整**落在标签区里，首页与搜索页表现一致。
+///
+/// 修复前：探针记的是 `absolute-position`（已含滚动偏移），又加了一遍 `content-x`，
+/// 报出的左右沿随"按下方向键那一刻已经滚到哪儿"漂移。真机 800×600 搜索页报
+/// `focus_tab_right=643.2 > tabs_viewport_w=623`（首页同尺寸却是 574.6 ≤ 587）——
+/// 看着像"搜索页标签行少算了一段余量"，其实两页标签行宽度、最大滚动量完全一致
+/// （`content-width` = 标签行 `preferred-width`，两者贴合）。改成内容坐标 +
+/// 当前滚动偏移后，滚到底的探针位置就是标签真正的位置：右沿贴视口右沿。
+#[test]
+fn last_tab_scrolls_fully_into_the_tabs_viewport() {
+    for (width, height) in [(800.0f32, 600.0f32), (1920.0, 1080.0)] {
+        for page in [Page::Home, Page::Search] {
+            let (left, right, viewport, scroll_x) = last_tab_geometry(page, width, height);
+            let label = format!("{page:?} {width}x{height}");
+            assert!(
+                left >= -0.5 && right <= viewport + 0.5,
+                "{label}: 焦点标签要完整落在标签区里：left={left} right={right} viewport={viewport} scroll_x={scroll_x}"
+            );
+            if width < 1000.0 {
+                assert!(
+                    scroll_x < 0.0,
+                    "{label}: 800px 下标签行必须已经横向滚动（content-x = {scroll_x}）"
+                );
+                // 滚到底 = Flickable 的滚动钳制处；标签行末端与内容宽度齐平，
+                // 所以最后一个标签的右沿应当**贴住**视口右沿，不是差一截。
+                assert!(
+                    (viewport - right).abs() <= 1.0,
+                    "{label}: 滚到底后最后一个标签的右沿 {right} 应贴住视口右沿 {viewport}（探针偏了 {}px）",
+                    viewport - right
+                );
+            } else {
+                assert!(
+                    scroll_x.abs() < 0.5,
+                    "{label}: 1920px 下标签全都放得下，不该有滚动（content-x = {scroll_x}）"
+                );
+            }
+        }
+    }
+}
+
+/// 把键盘焦点推到最后一个标签，返回 `(focus_tab_left, focus_tab_right,
+/// tabs_viewport_w, tabs_scroll_x)`（都是顶栏探针的原样输出）。
+fn last_tab_geometry(page: Page, width: f32, height: f32) -> (f32, f32, f32, f32) {
+    init_backend();
+    let app = App::new_with(AppWindow::new().expect("创建窗口"));
+    app.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(width, height));
+    app.ui().set_window_w(width);
+    app.ui().set_window_h(height);
+
+    let tabs = real_tabs();
+    let mut home = home_filled();
+    home.library_tabs = tabs.clone();
+    app.set_home(&home);
+    app.show_page(Page::Home);
+    // 搜索页的顶栏标签来自首页视图（`App::set_search` 直接复用 `home.library_tabs`）。
+    let search = search_view();
+    app.set_search(&search);
+    if page == Page::Search {
+        app.open_search(&search);
+    }
+    assert_eq!(app.page(), page);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+
+    // 进顶栏层（首页可能先经过 hero 按钮行）。
+    for _ in 0..3 {
+        if app.focus_layer() == FocusLayer::Navbar {
+            break;
+        }
+        press(&app, slint::platform::Key::UpArrow);
+    }
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Navbar,
+        "{page:?} {width}x{height}: 顶栏层要能被方向键到达"
+    );
+    // 逐步移到最后一个标签：每一步都触发一次 `ensure-visible`（平滑滚动）。
+    for _ in 0..(tabs.len() - 1) {
+        press(&app, slint::platform::Key::RightArrow);
+    }
+    assert_eq!(
+        app.nav_focus(),
+        tabs.len() - 1,
+        "{page:?} {width}x{height}: 焦点要能到最后一个标签"
+    );
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+
+    (
+        app.ui().get_nav_focus_tab_left(),
+        app.ui().get_nav_focus_tab_right(),
+        app.ui().get_nav_tabs_viewport_w(),
+        app.ui().get_nav_tabs_scroll_x(),
+    )
+}
+
+/// 发一个键并让动画走一小步（50ms：`ensure-visible` 的平滑滚动还在途中，
+/// 焦点刚落到标签上时 `content-x` 还没到钳制位置——这正是修复前探针漂移的来源）。
+fn press(app: &App, key: slint::platform::Key) {
+    let text: slint::SharedString = key.into();
+    app.press_key(text).expect("按键");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(50));
 }
