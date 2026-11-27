@@ -198,8 +198,8 @@ pub struct Provider {
     /// 每个条目最近一次 `PlaybackInfo` 给出的 `PlaySessionId`。
     ///
     /// 上报进度必须带它，否则服务端把上报当成"无媒体信息的会话"直接忽略（实测）。
-    /// 由 `sources()` 写入；上报时只当作**兼容兜底**：进度里已经带着入队那一刻的
-    /// 标识（见 `PlaybackProgress::play_session_id`），这里只给没有标识的旧条目用。
+    /// 由 `sources()` 写入；上报时只当作**兼容兜底**：进度里已经带着起播时按会话快照的
+    /// 标识（见 `PlaybackProgress::play_session_id`），这里只给没有标识的进度用。
     play_sessions: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
@@ -600,7 +600,7 @@ impl Provider {
 
     /// 上报要带的会话标识。
     ///
-    /// 优先用进度里携带的那一个：它是**入队那一刻**按会话快照的，同一部片重播时
+    /// 优先用进度里携带的那一个：它是**起播时**按会话快照的（见 `Player::play_session_id`），同一部片重播时
     /// 新会话的 `PlaybackInfo` 不会把它改成新会话的标识（旧会话的 `stop` 带新标识，
     /// 服务端关掉的就是新会话，旧会话一直留着）。没有携带（旧版本落盘的待发文件、
     /// 没取过 `PlaybackInfo`）才退回"这个条目最近一次"的老行为。
