@@ -326,11 +326,45 @@ pub fn player_view(
     server_id: &ServerId,
     item_id: &str,
 ) -> Result<Option<PlayerShellView>, nova_storage::StorageError> {
+    player_view_with_preferences(db, server_id, item_id, &preferences_or_default(db))
+}
+
+/// 用**已经读好**的偏好构建播放外壳。
+///
+/// 起播路径（`Shell::play`）用它：播放页初始位置与 `begin()` 的续播位置 / 轨道
+/// 必须用同一份偏好，偏好只读一次；两次读之间用户改过偏好就会出现“播放页停在
+/// 12:34，起播却从头”的不一致。
+pub fn player_view_with_preferences(
+    db: &Database,
+    server_id: &ServerId,
+    item_id: &str,
+    prefs: &UserPreferences,
+) -> Result<Option<PlayerShellView>, nova_storage::StorageError> {
     let Some(item) = db.item(server_id, &ItemId::new(item_id))? else {
         return Ok(None);
     };
-    let prefs = db.preferences()?;
-    Ok(Some(player_from_item(&item, &prefs)))
+    Ok(Some(player_from_item(&item, prefs)))
+}
+
+/// 读用户偏好；读失败时打 warn 并退回默认偏好。
+///
+/// 偏好只影响续播位置 / 轨道这类“锦上添花”的选择：偏好行损坏（JSON 解析失败）
+/// 不该让播放页整页失败（以前 `player_view` 直接 `?` 上抛，播放外壳变成错误页）。
+pub fn preferences_or_default(db: &Database) -> UserPreferences {
+    preferences_or_default_with(|| db.preferences())
+}
+
+/// [`preferences_or_default`] 的可测接缝：构建播放页时怎么处理读偏好的失败。
+fn preferences_or_default_with(
+    read: impl FnOnce() -> Result<UserPreferences, nova_storage::StorageError>,
+) -> UserPreferences {
+    match read() {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            tracing::warn!(%error, "读取用户偏好失败，播放页退回默认偏好");
+            UserPreferences::default()
+        }
+    }
 }
 
 /// 把一条媒体条目压成卡片。
@@ -974,6 +1008,55 @@ mod tests {
             player.position,
             Duration::ZERO,
             "播放页初始位置必须与详情文案同源（同一份数据库偏好）"
+        );
+    }
+
+    /// 偏好行损坏（JSON 解析失败）时，播放页不能整页失败：`player_view` 退回默认偏好，
+    /// 标题与时长照常。以前 `db.preferences()?` 会把错误一路抛给上层，播放外壳变成错误页。
+    ///
+    /// 损坏的行不好在测试里直接造（`Database` 只暴露编码后的写入），所以这里走与
+    /// `player_view` **同一个**兜底接缝（[`preferences_or_default_with`]），断言兜底之后的
+    /// 外壳仍然拿得到标题与时长。
+    #[test]
+    fn player_view_still_shows_title_and_duration_when_preferences_fail() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-prefs-broken");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let movie = item(
+            "a",
+            "沙丘",
+            MediaKind::Movie,
+            Duration::from_secs(754),
+            Some(8280),
+        );
+        db.upsert_items(&server.info.id, &[movie], 1)
+            .expect("写条目");
+
+        let prefs = preferences_or_default_with(|| {
+            Err(nova_storage::StorageError::CorruptPayload {
+                table: "preferences",
+                key: "preferences".to_owned(),
+                source: serde_json::from_str::<serde_json::Value>("{").expect_err("坏 JSON"),
+            })
+        });
+        assert!(
+            prefs == UserPreferences::default(),
+            "偏好读失败必须退回默认偏好"
+        );
+
+        let player = player_view_with_preferences(&db, &server.info.id, "a", &prefs)
+            .expect("偏好坏了也不能让播放页报错")
+            .expect("条目存在");
+        assert_eq!(player.title, "沙丘", "标题照常上屏");
+        assert_eq!(
+            player.duration,
+            Some(Duration::from_secs(8280)),
+            "时长照常上屏"
+        );
+        assert_eq!(
+            player.position,
+            Duration::from_secs(754),
+            "默认偏好下按原续播点继续（754s 高于默认阈值 30s）"
         );
     }
 

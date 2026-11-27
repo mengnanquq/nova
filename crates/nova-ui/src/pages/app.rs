@@ -2536,19 +2536,28 @@ fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
 }
 
 fn play(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> bool {
-    let handler = {
+    let (target, handler) = {
         let mut state = state.borrow_mut();
-        let already_playing = matches!(state.nav.current(), Some(Route::Player { .. }));
-        if !already_playing {
-            state.nav.push(Route::Player {
-                item_id: item_id.to_string(),
-            });
+        // 起播条目以**路由**为准：详情页按钮传上来的是渲染出来的 `detail.item-id`
+        // （`app.slint` 的 `root.play-item(root.detail.item-id)`）。路由与渲染数据
+        // 分叉的那一帧（迟到的详情刚被丢弃、界面还没重贴）按渲染数据起播会播错片
+        // （体检 R7-D3）。已经在播放页时以调用方给的 id 为准（换片）。
+        let target = match state.nav.current() {
+            Some(Route::Detail { item_id }) => item_id.clone(),
+            _ => item_id.to_owned(),
+        };
+        // 已经在播放页再播另一条：**替换**栈顶而不是叠加，返回仍然只回一层。
+        if matches!(state.nav.current(), Some(Route::Player { .. })) {
+            state.nav.pop();
         }
-        state.callbacks.play.clone()
+        state.nav.push(Route::Player {
+            item_id: target.clone(),
+        });
+        (target, state.callbacks.play.clone())
     };
     set_page(ui, state, Page::Player);
     if let Some(handler) = handler {
-        handler(item_id);
+        handler(&target);
     }
     true
 }

@@ -718,7 +718,16 @@ impl Player {
     ///
     /// 只做本地准备（条目 / 版本 / 轨道 / 续播位置），取直链的网络请求在 tokio 上，
     /// 结果通过 `post` 回到主线程。
-    pub(crate) fn begin(&mut self, item_id: &str, source_id: Option<String>, post: &Post) {
+    ///
+    /// `prefs` 是起播路径**已经读好**的偏好（`Shell::play` 与播放页初始位置共用同一份，
+    /// 偏好只读一次）；`None` 时自己读数据库（重试等自发起播）。
+    pub(crate) fn begin(
+        &mut self,
+        item_id: &str,
+        source_id: Option<String>,
+        prefs: Option<UserPreferences>,
+        post: &Post,
+    ) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.error = None;
@@ -794,16 +803,24 @@ impl Player {
         // 续播阈值 / 轨道偏好以**数据库里的当前值**为准，而不是启动时的快照：
         // 详情页（`views::detail_view`）每次读 `db.preferences()`，起播若用启动快照，
         // 运行中改过偏好就会出现“详情说从头播、起播却续在那里”。
-        // 读失败才退回启动快照（离线优先：不因偏好读失败拦住起播）。
-        let prefs = match self.local.db.preferences() {
-            Ok(prefs) => {
+        // 起播路径（`Shell::play`）已经把偏好读好并传进来，与播放页初始位置同源；
+        // 只有自己发起的起播（重试）才读数据库，读失败退回启动快照
+        // （离线优先：不因偏好读失败拦住起播）。
+        let prefs = match prefs {
+            Some(prefs) => {
                 self.prefs = prefs.clone();
                 prefs
             }
-            Err(error) => {
-                tracing::warn!(%error, "读取用户偏好失败，沿用启动快照");
-                self.prefs.clone()
-            }
+            None => match self.local.db.preferences() {
+                Ok(prefs) => {
+                    self.prefs = prefs.clone();
+                    prefs
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "读取用户偏好失败，沿用启动快照");
+                    self.prefs.clone()
+                }
+            },
         };
         let resume_at = resume_position_for_item(&item, &prefs);
         let duration = source.runtime.or(item.runtime);
@@ -1327,7 +1344,7 @@ impl Player {
             let target = self.pending.clone().or_else(|| self.target.clone());
             if let (Some(post), Some(target)) = (post, target) {
                 let source = Some(target.source_id.as_str().to_owned());
-                self.begin(target.item_id.as_str(), source, &post);
+                self.begin(target.item_id.as_str(), source, None, &post);
             }
             return;
         };
@@ -1759,7 +1776,7 @@ mod tests {
         player.subtitle_delay = 0.5;
 
         // 新会话：条目不在本地缓存 → 不碰引擎的失败早退。
-        player.begin("999999999", None, &post);
+        player.begin("999999999", None, None, &post);
 
         let view = player.live_view();
         assert!(view.error.is_some(), "应停在错误态：{:?}", view.error);
@@ -1787,11 +1804,19 @@ mod tests {
 
     /// 起播前的本地准备：一个 `Played = true`、带 45:47 续播点的条目，
     /// `Local` 已打开（启动快照是默认偏好），返回可直接调用 `begin()` 的播放器。
-    fn resume_fixture() -> ResumeFixture {
+    ///
+    /// `with_token` 为 `false` 时**不写令牌**：起播会在 `stream_target` 拿到
+    /// [`nova_provider::ProviderError::NoToken`]，`OpenReady` 带着错误回来。
+    /// 无令牌的用例用另一个服务器标识，避免蹭到进程内共享凭证存储里别的用例写的令牌。
+    fn resume_fixture(with_token: bool) -> ResumeFixture {
         init_test_backend();
         let dir = tempfile::tempdir().expect("临时目录");
         let server = nova_core::ServerInfo {
-            id: nova_core::ServerId::new("srv-player-resume"),
+            id: nova_core::ServerId::new(if with_token {
+                "srv-player-resume"
+            } else {
+                "srv-player-resume-nocreds"
+            }),
             kind: nova_core::ServerKind::Jellyfin,
             name: "续播测试".to_owned(),
             base_url: "http://127.0.0.1:1".to_owned(),
@@ -1802,13 +1827,15 @@ mod tests {
         };
         // provider 在**构造时**从凭证存储读一次令牌；进程内存储是整个进程共享的，
         // 所以这里写进去的令牌能被接下来 `Local::open` 构造的 provider 看到。
-        crate::env::open_credentials(crate::env::CredentialMode::Memory)
-            .store
-            .set(
-                &format!("jellyfin/{}/token", server.id.as_str()),
-                &nova_secrets::SecretString::new("test-token"),
-            )
-            .expect("写测试令牌");
+        if with_token {
+            crate::env::open_credentials(crate::env::CredentialMode::Memory)
+                .store
+                .set(
+                    &format!("jellyfin/{}/token", server.id.as_str()),
+                    &nova_secrets::SecretString::new("test-token"),
+                )
+                .expect("写测试令牌");
+        }
         {
             let db = nova_storage::Database::open(dir.path().join("nova.db")).expect("建库");
             db.upsert_server(&server, 1).expect("写服务器");
@@ -1885,6 +1912,9 @@ mod tests {
     ///
     /// 固定 sleep 50ms 在慢 CI 上不稳定：机器一忙，tokio 任务还没跑完就断言，
     /// 测试会偶发红灯。轮询有结果就立刻返回，超时才失败。
+    ///
+    /// 引擎返回 `Err` 时**立刻**失败并把错误打出来：以前只认 `Ok`，取直链失败会被
+    /// 2 秒超时掩盖成“没等到 OpenReady”，真正的失败原因反而看不到。
     fn wait_for_resume_at(posted: &Arc<std::sync::Mutex<Vec<Message>>>) -> Duration {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1893,14 +1923,11 @@ mod tests {
                     Ok(queue) => queue,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                if let Some(resume_at) = queue.iter().find_map(|message| match message {
-                    Message::OpenReady {
-                        request: Ok(request),
-                        ..
-                    } => Some(request.resume_at),
-                    _ => None,
-                }) {
-                    return resume_at;
+                if let Some(Message::OpenReady { request, .. }) = queue.first() {
+                    match request {
+                        Ok(request) => return request.resume_at,
+                        Err(error) => panic!("引擎返回错误（begin() 失败）：{error}"),
+                    }
                 }
             }
             assert!(
@@ -1920,9 +1947,9 @@ mod tests {
     /// “起播不被网络卡住”的设计。
     #[test]
     fn begin_resumes_a_played_item_with_a_mid_resume_point() {
-        let (_dir, _local, mut player, _runtime, posted) = resume_fixture();
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
         let post = post_to(&posted);
-        player.begin("item-1", None, &post);
+        player.begin("item-1", None, None, &post);
         let resume_at = wait_for_resume_at(&posted);
         assert_eq!(
             resume_at,
@@ -1936,12 +1963,49 @@ mod tests {
         );
     }
 
+    /// 取直链失败时 `wait_for_resume_at` 必须**立刻**把引擎错误抛出来。
+    ///
+    /// 以前它只认 `OpenReady` 里的 `Ok`，`Err` 会被 2 秒超时掩盖成
+    /// “没等到 OpenReady”（测试还得多等 2 秒），真正的失败原因（这里是没有令牌）
+    /// 在断言里完全看不到。
+    #[test]
+    fn engine_error_fails_the_wait_immediately() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(false);
+        let post = post_to(&posted);
+        player.begin("item-1", None, None, &post);
+
+        let started = Instant::now();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_resume_at(&posted);
+        }));
+        let message = panic_message(failure.expect_err("引擎错误必须让等待立刻失败"));
+        assert!(
+            message.contains("引擎返回错误") && message.contains("未登录"),
+            "要直接把引擎错误打出来（不是超时）：{message}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "必须立刻失败，不能空转到 2 秒超时"
+        );
+    }
+
+    /// `catch_unwind` 的 payload → 可断言的文本。
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        match payload.downcast_ref::<String>() {
+            Some(message) => message.clone(),
+            None => payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .unwrap_or_default(),
+        }
+    }
+
     /// 起播与详情页必须读同一个偏好来源：详情每次读 `db.preferences()`，
     /// 起播以前用的是 `Local::open` 时的启动快照。运行中把 `resume_min_position`
     /// 调高后，旧实现会出现“详情写播放、起播却续在 45:47”。
     #[test]
     fn begin_reads_preferences_from_the_database_not_the_startup_snapshot() {
-        let (_dir, local, mut player, _runtime, posted) = resume_fixture();
+        let (_dir, local, mut player, _runtime, posted) = resume_fixture(true);
         // 启动快照是默认 30s；改成“续播点至少 3000s 才算”后，2747s 不该再续播。
         let mut prefs = local.preferences.clone();
         prefs.resume_min_position = Duration::from_secs(3000);
@@ -1952,7 +2016,7 @@ mod tests {
         assert_eq!(detail.play_label, "播放");
 
         let post = post_to(&posted);
-        player.begin("item-1", None, &post);
+        player.begin("item-1", None, None, &post);
         let resume_at = wait_for_resume_at(&posted);
         assert_eq!(
             resume_at,
@@ -2109,7 +2173,7 @@ mod tests {
         player.rate = 1.25;
 
         // 直接播放 B：首帧（引擎事件）还没到，先看界面看到了什么。
-        player.begin("b", None, &post);
+        player.begin("b", None, None, &post);
         let view = player.live_view();
         assert_eq!(view.title, "新片 B", "不能闪现上一部的标题");
         assert_eq!(

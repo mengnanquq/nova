@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use common::{detail_view, init_backend, player_controls_hidden, player_error, player_view};
-use nova_ui::{App, AppWindow, Page, PlayerKey};
+use nova_ui::{App, AppWindow, Page, PlayerKey, Route};
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, Model};
 
@@ -652,4 +652,62 @@ fn arrow_keys_do_not_fake_a_seek_in_the_error_state() {
         before,
         "错误态进度不该被乐观改写"
     );
+}
+
+/// 体检 R7-D3：详情页还贴着一帧前的 A 时点「播放」，真正起播的必须是路由里的 B。
+///
+/// `app.slint` 传上来的是渲染出来的 `detail.item-id`（`root.play-item(root.detail.item-id)`）。
+/// `play()` 在压栈前就按路由纠正 id，所以回调拿到的已经是纠正过的值——
+/// `nova-app` 不再自己按路由重算（那里的校验是循环的，等于没有防线）。
+#[test]
+fn play_uses_the_detail_route_item_when_the_view_lags_behind() {
+    init_backend();
+    let app = App::new_with(AppWindow::new().unwrap());
+    // 界面数据还停在 A（迟到的详情刚被丢弃、还没重贴）。
+    let mut stale = detail_view();
+    stale.item_id = "a".to_owned();
+    stale.title = "上一部".to_owned();
+    app.set_detail(&stale);
+    app.open_detail("b");
+
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    // 点的是渲染数据里的 A。
+    assert!(app.play("a"));
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["b"],
+        "回调必须拿到路由里的 B（已经被纠正过）"
+    );
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Player {
+            item_id: "b".to_owned()
+        })
+    );
+    assert_eq!(app.page(), Page::Player);
+}
+
+/// 已经在播放页 A 时再播 B：替换栈顶，不叠一层（返回仍然只回一层）。
+#[test]
+fn play_replaces_the_player_route_instead_of_stacking() {
+    init_backend();
+    let app = App::new_with(AppWindow::new().unwrap());
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    assert!(app.play("a"));
+    let depth = app.navigator().len();
+    assert!(app.play("b"));
+    assert_eq!(app.navigator().len(), depth, "换片不能多叠一层播放页");
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Player {
+            item_id: "b".to_owned()
+        })
+    );
+    assert_eq!(played.borrow().as_slice(), ["a", "b"]);
 }

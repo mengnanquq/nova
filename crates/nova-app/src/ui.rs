@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 
-use nova_core::{ItemId, MediaKind};
+use nova_core::{ItemId, MediaKind, UserPreferences};
 use nova_images::DecodedImage;
 use nova_provider::{ItemQuery, MediaProvider};
 use nova_secrets::SecretString;
@@ -569,6 +569,7 @@ impl Shell {
         item_id: &str,
         source_id: Option<String>,
         capture: Option<player::CaptureOptions>,
+        prefs: UserPreferences,
         post: &Post,
     ) {
         let mut slot = self.player.borrow_mut();
@@ -583,7 +584,7 @@ impl Shell {
             ));
         }
         if let Some(player) = slot.as_mut() {
-            player.begin(item_id, source_id, post);
+            player.begin(item_id, source_id, Some(prefs), post);
         }
         drop(slot);
         // 播放页进场：之后 mpv 才允许往窗口 back buffer 上画。
@@ -1175,7 +1176,10 @@ impl Shell {
     fn sweep(&self, dead_only: bool) -> serde_json::Value {
         let was_fullscreen = self.app.player_fullscreen();
         let had_player = self.player.borrow().is_some();
-        let (_, report) = sweep_preserving_audio(&self.app, || self.app.sweep());
+        let (restored, report) = sweep_preserving_audio(&self.app, || self.app.sweep());
+        // 恢复结果不再丢掉：`restored == false` 时扫描没碰音量 / 静音（正常），
+        // 真正的恢复失败已经由 [`sweep_preserving_audio`] 打了 warn；这里把结果一并
+        // 带回给调试通道，体检时能看出音频到底被没被动过。
         if self.app.player_fullscreen() != was_fullscreen {
             self.app.ui().window().set_fullscreen(was_fullscreen);
         }
@@ -1216,6 +1220,7 @@ impl Shell {
             "changed": report.entries.iter().filter(|entry| entry.changed).count(),
             "dead": dead,
             "aborted": report.aborted,
+            "audio_restored": restored,
             "results": shown,
         })
     }
@@ -1945,16 +1950,24 @@ impl Shell {
     }
 
     fn play(self: &Rc<Self>, item_id: &str) {
-        // 起播的条目以**路由**为准：`app.slint` 传的是渲染出来的 `detail.item-id`，
-        // 路由与渲染数据不一致时（迟到的详情结果被 [`accept_detail`] 丢弃之前的那一帧），
-        // 按渲染数据起播就会播错片（体检 R7-D3）。
-        let item_id = play_target_item(self.app.current_route().as_ref(), item_id);
-        let item_id = item_id.as_str();
+        // 起播条目直接用**回调传进来的 id**：nova-ui 的 `play()` 已经按路由纠正过
+        // （当前路由是 `Detail{id}` 时用路由里的 id，压 `Player{target}` 之后才回调），
+        // 这里再按路由重算只会得到同一个值（以前那个“从播放页路由里取 id”的
+        // 校验是循环的，等于没有防线）。
+        //
+        // 两道防线保证这个 id 是对的：
+        // 1. [`accept_detail`]：迟到的详情在写回模型之前就被丢掉，界面不会贴上一部
+        //    片子的 `detail.item-id`；
+        // 2. nova-ui 的 `play()`：就算界面数据还差一帧没跟上，它也按当前路由纠正
+        //    起播条目（体检 R7-D3）。
         if item_id == STATUS_ITEM_ID {
             return;
         }
+        // 偏好只读一次：播放页初始位置与起播的续播位置 / 轨道用**同一份**，
+        // 运行中改过偏好时两边不会分叉（体检 R7-D2）。
+        let prefs = views::preferences_or_default(&self.local.db);
         let generation = self.next_detail_generation();
-        match self.local.player(item_id) {
+        match self.local.player_with_preferences(item_id, &prefs) {
             Ok(Some(player)) => {
                 self.app.set_player(&player);
                 self.state.borrow_mut().player = Some(player);
@@ -1982,7 +1995,7 @@ impl Shell {
             has_capture = capture.is_some(),
             "开始播放条目"
         );
-        self.play_item(item_id, source, capture, &post);
+        self.play_item(item_id, source, capture, prefs, &post);
         // 标题/进度需要真实条目；顺手刷新一次。
         self.spawn_detail(item_id.to_owned(), generation);
     }
@@ -2615,9 +2628,25 @@ pub fn restore_player_audio(app: &App, snapshot: PlayerAudio) -> bool {
 /// 只单独测 [`restore_player_audio`] 的话，把这里的恢复调用删掉测试照样过，
 /// 等于没有覆盖。
 pub(crate) fn sweep_preserving_audio<R>(app: &App, sweep: impl FnOnce() -> R) -> (bool, R) {
+    sweep_with_audio_guard(app, restore_player_audio, sweep)
+}
+
+/// [`sweep_preserving_audio`] 的可测内核：`restore` 是恢复动作的接缝（真实路径是
+/// [`restore_player_audio`]）。
+///
+/// 恢复之后音量 / 静音仍与快照不同就是**恢复失败**——以前 `Shell::sweep` 把
+/// `restored` 丢掉，用户偏好被一次体检改掉也不会留下任何日志。
+fn sweep_with_audio_guard<R>(
+    app: &App,
+    restore: impl FnOnce(&App, PlayerAudio) -> bool,
+    sweep: impl FnOnce() -> R,
+) -> (bool, R) {
     let snapshot = PlayerAudio::from_view(&app.player_view());
     let result = sweep();
-    let restored = restore_player_audio(app, snapshot);
+    let restored = restore(app, snapshot);
+    if PlayerAudio::from_view(&app.player_view()) != snapshot {
+        tracing::warn!("交互扫描改了音量 / 静音，恢复后仍与扫描前不同：用户偏好可能已被改掉");
+    }
     (restored, result)
 }
 
@@ -2662,23 +2691,6 @@ pub(crate) fn accept_detail(
             current == item_id
         }
         _ => false,
-    }
-}
-
-/// 详情页「播放」要播哪个条目：以**路由**为准。
-///
-/// 界面传上来的是渲染出来的 `detail.item-id`。路由与渲染数据分叉时（迟到的详情
-/// 结果刚被丢弃、界面还没重贴），按渲染数据起播就会播错片（体检 R7-D3）。
-///
-/// 第一道防线是 [`accept_detail`]：迟到的详情结果在写回模型之前就被丢掉；
-/// 第二道防线在 nova-ui 的 `play()`：它按当前路由取条目 id，并且先把
-/// `Route::Player { item_id }` 压栈、再回调这里。所以回调到达时当前路由已经是
-/// 播放页，这里读 `Route::Player` 作为最后一道校验；只有不在播放页时
-/// （`--play` 直达时路由可能还是首页）才用调用方传进来的条目。
-pub(crate) fn play_target_item(route: Option<&Route>, requested: &str) -> String {
-    match route {
-        Some(Route::Player { item_id }) => item_id.clone(),
-        _ => requested.to_owned(),
     }
 }
 
@@ -2756,9 +2768,9 @@ mod tests {
         PlayerAudio, accept_search_result, debounce_still_current, refresh_library_target,
         sweep_preserving_audio,
     };
-    use super::{accept_detail, play_target_item};
-    use std::sync::Arc;
+    use super::{accept_detail, sweep_with_audio_guard};
     use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex};
 
     use nova_ui::{App, AppWindow};
 
@@ -2849,20 +2861,6 @@ mod tests {
         assert!(!accept_detail(1, 1, player.as_ref(), "a"));
     }
 
-    /// 体检 R7-D3：起播回调到达时 nova-ui 已经把 `Route::Player` 压栈，
-    /// 即使 `app.slint` 传上来的 detail.item-id 还是 A，起播也必须是路由里的 B。
-    #[test]
-    fn play_uses_the_player_route_item_when_the_detail_view_lags_behind() {
-        let route = Some(Route::Player {
-            item_id: "b".to_owned(),
-        });
-        // `app.slint` 传上来的是渲染出来的 detail.item-id（此时还是 A）。
-        assert_eq!(play_target_item(route.as_ref(), "a"), "b");
-        // 不在播放页（`--play` 直达时路由可能还是首页）：用传进来的条目。
-        assert_eq!(play_target_item(Some(&Route::Home), "a"), "a");
-        assert_eq!(play_target_item(None, "a"), "a");
-    }
-
     /// 体检 R7-D4：`Shell::sweep` 的保护包装必须真的调用恢复。
     ///
     /// 这里直接走包装（与 `Shell::sweep` 同一条实现），模拟扫描点到音量滑杆 /
@@ -2891,6 +2889,86 @@ mod tests {
             before,
             "扫描结束后音量与静音都要回到扫描前的值"
         );
+    }
+
+    /// 体检 R7-D4：扫描改了音量 / 静音而恢复**没生效**时必须留下 warn。
+    ///
+    /// `Shell::sweep` 需要真实事件循环才能构造，所以这里走它调用的同一个包装。
+    /// 以前 `restored` 被直接丢掉，恢复失败完全静默（用户偏好被体检改掉也没人知道）。
+    #[test]
+    fn sweep_warns_when_the_audio_never_came_back() {
+        init_test_backend();
+        let app = App::new_with(AppWindow::new().expect("窗口"));
+        let mut view = app.player_view();
+        view.volume = 0.42;
+        app.set_player(&view);
+
+        // 恢复动作故意“失败”（不写回界面）：与真实恢复走同一条判定。
+        let logs = capture_logs(|| {
+            let (restored, _) = sweep_with_audio_guard(
+                &app,
+                |_app, _snapshot| false,
+                || app.ui().invoke_player_volume_set(0.93),
+            );
+            assert!(!restored, "恢复没生效时不能返回 true");
+        });
+        assert!(
+            logs.contains("恢复后仍与扫描前不同"),
+            "恢复失败必须留下 warn：{logs}"
+        );
+
+        // 正常路径（真实恢复）不报警：否则每次体检都刷一条假失败。
+        let quiet = capture_logs(|| {
+            let (restored, _) = sweep_preserving_audio(&app, || {
+                app.ui().invoke_player_volume_set(0.31);
+            });
+            assert!(restored);
+        });
+        assert!(quiet.is_empty(), "正常恢复不该有 warn：{quiet}");
+    }
+
+    /// 收集一段代码产生的日志（`with_default` 只在本线程与当前 scope 生效）。
+    fn capture_logs(run: impl FnOnce()) -> String {
+        /// 把日志写进共享缓冲。
+        #[derive(Clone, Default)]
+        struct LogSink(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogSink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let mut buffer = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                buffer.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+            type Writer = Self;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(sink.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = sink
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     fn init_test_backend() {

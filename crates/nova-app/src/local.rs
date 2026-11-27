@@ -366,6 +366,23 @@ impl Local {
         Ok(views::player_view(&self.db, &server.info.id, item_id)?)
     }
 
+    /// 用缓存构建播放外壳（偏好由调用方读好：起播路径只读一次偏好）。
+    pub fn player_with_preferences(
+        &self,
+        item_id: &str,
+        prefs: &UserPreferences,
+    ) -> Result<Option<PlayerShellView>, AppError> {
+        let Some(server) = self.server() else {
+            return Ok(None);
+        };
+        Ok(views::player_view_with_preferences(
+            &self.db,
+            &server.info.id,
+            item_id,
+            prefs,
+        )?)
+    }
+
     /// 界面图片键 → 具体请求（条目没有这张图时返回 `None`）。
     pub fn image_spec(&self, key: &ImageKey) -> Option<ImageSpec> {
         let server = self.server()?;
