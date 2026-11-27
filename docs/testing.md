@@ -69,10 +69,29 @@ const KNOWN_DEAD: &[(&str, &str, &str)] = &[
 真机（Wayland 窗口 + 调试通道）验证一律用真实数据目录 `NOVA_DATA_DIR=$HOME/.local/share/nova`
 与真实服务器，不用副本——副本会掩盖真实数据才有的问题（库规模、归属、凭证状态）。约束：
 
-- 同一时刻只跑**一个**写真实目录的实例，用完 `{"cmd":"quit"}` 退出；
-- 不执行 `nova login`、不写密钥环、不手改 `servers.auth_state`；
-- 播放会向服务端提交进度：固定用少数几个条目（例如 6489 / 47156 / 6857），并记录改动过的续播点；
-- 会改变 schema 或批量删写缓存的改动，测试前先 `sqlite3 nova.db ".backup /tmp/…"` 备份。
+- 同一时刻只跑**一个**写真实目录的实例：统一用 `flock /tmp/nova-real.lock <命令>` 启动，后来者自动排队；
+  用完 `{"cmd":"quit"}` 退出，只结束自己启动的进程；
+- 真实目录只能用默认凭证模式；`NOVA_CREDENTIALS=memory` 会让 GUI 在没有令牌时运行，只允许用在副本上；
+- 不执行 `nova login`、不写密钥环、不手改 `servers.auth_state`；不使用 `--show-url`；
+- 播放会向服务端提交进度：只用少数指定条目，开始前记录基线、结束后列出改动过的续播点；
+- 会改变 schema 或批量删写缓存的改动，测试前先 `sqlite3 nova.db ".backup /tmp/…"` 备份；
+  断网、过期、无令牌这类破坏性场景只在副本上做（`.backup` 数据库 + 复制 `images/`）。
+
+## 并行开发：一个任务一个分支
+
+多个人（或多个代理）同时改代码时，每个任务独占一个 worktree，互不共享工作区：
+
+```bash
+git worktree add ../nova-wt/<任务> -b fix/<任务> master
+cd ../nova-wt/<任务>
+export CARGO_TARGET_DIR=$PWD/../../nova/target/w-<任务>   # 独立构建目录，避免互相锁
+```
+
+- 只在自己的 worktree 里修改、测试、提交；不推送、不动 master；
+- 审查通过后合并进 master，在 master 上跑全量测试、clippy、fmt，再推送；
+- **任务结束立即清理**：`git worktree remove ../nova-wt/<任务>`、`git branch -d fix/<任务>`、
+  `rm -rf target/w-<任务>`，以及该任务在 `/tmp` 下留下的截图、日志、socket 与副本。
+  每个构建目录动辄几十 GB，不清理会很快吃满磁盘。
 
 ## 起一个真实 Jellyfin
 
