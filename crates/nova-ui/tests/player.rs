@@ -781,8 +781,8 @@ fn playing_the_item_already_on_screen_changes_nothing() {
 ///
 /// 回归：`play()` 只按“路由里的条目等于当前条目”就提前返回，播完的片子
 /// 按 Enter 一点反应也没有，用户只能先退出播放页再进来。
-/// `PlayerView` 没有 `ended` 标志，`Ended` 时位置被推到时长（`Session::handle`），
-/// 所以这里用 `position >= duration` 引出“已播完”态。
+/// “播完”直接读 `PlayerView::ended`（由 `SessionState::Ended` 直传），
+/// 不再用 `position >= duration` 推。
 #[test]
 fn ended_playback_restarts_the_same_item() {
     let app = player_app();
@@ -790,15 +790,9 @@ fn ended_playback_restarts_the_same_item() {
     let sink = played.clone();
     app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
 
-    let mut finished = player_view();
-    finished.position = finished.duration.unwrap_or_default();
-    finished.playing = false;
+    let finished = player_view().with_ended(true).with_playing(false);
     app.set_player(&finished);
-    assert_eq!(
-        app.player_view().position,
-        app.player_view().duration.unwrap_or_default(),
-        "用例前提：位置已推到时长"
-    );
+    assert!(app.player_view().ended, "用例前提：视图已标记播完");
 
     assert!(app.play("dune"), "重播也算处理掉了");
     assert_eq!(
@@ -831,4 +825,94 @@ fn error_state_playback_replays_the_same_item() {
         ["dune"],
         "错误态下按 Enter 必须重新起播（不能走提前返回）"
     );
+}
+
+/// 时长未知的片源播完（`Ended`）后再按 Enter：同样必须重新起播。
+///
+/// 回归（复审 🟡1）：旧实现用 `position >= duration` 判“播完”，`duration` 为
+/// `None` 时永远返回 false（`Session::handle(Ended)` 里 `if let Some(total)` 才推
+/// 位置），于是播完按 Enter 一点反应也没有。
+#[test]
+fn ended_playback_without_known_duration_restarts_on_enter() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+
+    // 时长未知：控制层退化为不确定态，`position` 停在最后读到的地方。
+    let mut finished = player_view().with_ended(true).with_playing(false);
+    finished.duration = None;
+    app.set_player(&finished);
+    assert!(app.player_view().duration.is_none(), "用例前提：时长未知");
+
+    assert!(app.play("dune"), "重播也算处理掉了");
+    assert_eq!(
+        played.borrow().as_slice(),
+        ["dune"],
+        "时长未知时播完按 Enter 也必须重新起播"
+    );
+}
+
+/// 续播点贴着片尾、会话还在 `Opening`（位置已 >= 时长）：按 Enter 不能重开。
+///
+/// 回归（复审 🟡2）：旧实现用 `position >= duration` 判“播完”，于是从续播点
+/// 起播的首帧（甚至缓冲中）就被当成已结束，Enter 把片子从头重开。
+#[test]
+fn near_end_position_while_opening_does_not_restart_on_enter() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+    let before = app.navigator();
+
+    // 续播点在某些片子里会保留在片尾之后（服务端钳位差异），位置因此 >= 时长。
+    let mut opening = player_view().with_playing(true).with_ended(false);
+    let total = opening.duration.unwrap_or_default();
+    opening.position = total + Duration::from_secs(1);
+    app.set_player(&opening);
+
+    assert!(app.play("dune"), "同一个条目也算处理掉了");
+    assert!(
+        played.borrow().is_empty(),
+        "起播中（Opening）不能当成播完重开：{:?}",
+        played.borrow()
+    );
+    assert_eq!(app.navigator(), before, "重开会让播放页弹了再压");
+}
+
+/// 正常播放中（未播完）按 Enter：不能重开。
+///
+/// 含缓冲态：缓冲首帧的位置也可能已经跨过时长，旧实现会把这种情况判成播完。
+#[test]
+fn normal_playback_does_not_restart_on_enter() {
+    let app = player_app();
+    let played = Rc::new(RefCell::new(Vec::new()));
+    let sink = played.clone();
+    app.on_play(move |id| sink.borrow_mut().push(id.to_owned()));
+    let before = app.navigator();
+
+    // 播到一半。
+    let playing = player_view().with_playing(true).with_ended(false);
+    app.set_player(&playing);
+    assert!(app.play("dune"), "同一个条目也算处理掉了");
+    assert!(
+        played.borrow().is_empty(),
+        "正常播放中按 Enter 不能重开：{:?}",
+        played.borrow()
+    );
+
+    // 缓冲中（画面保留，算播放中）：位置已跨过时长，也不能当播完。
+    let mut buffering = player_view()
+        .with_buffering(true)
+        .with_playing(true)
+        .with_ended(false);
+    buffering.position = buffering.duration.unwrap_or_default() + Duration::from_secs(1);
+    app.set_player(&buffering);
+    assert!(app.play("dune"), "同一个条目也算处理掉了");
+    assert!(
+        played.borrow().is_empty(),
+        "缓冲中按 Enter 不能重开：{:?}",
+        played.borrow()
+    );
+    assert_eq!(app.navigator(), before, "栈不能变");
 }

@@ -2521,13 +2521,15 @@ fn open_detail(ui: &AppWindow, state: &Rc<RefCell<State>>, item_id: &str) -> boo
 
 /// 播放页上的这一条是否已经播完（引擎报过 `Ended`）。
 ///
-/// `PlayerView` 没有 `ended` 标志，但 `Player::fill_view` 在 `SessionState::Ended`
-/// 时把位置推到时长（`Session::handle(Ended)` 同样），所以 `position >= duration`
-/// 是现有字段里唯一可靠的读数。时长未知时不判满（宁可不动，也不把正在放的
-/// 片子当“播完”重开）。
+/// 只看 `PlayerView::ended`——它由 nova-app 的 `Player::fill_view` 从
+/// `SessionState::Ended` 直传，不靠位置推。`position >= duration` 不可靠：时长
+/// 未知时位置推不到时长（永远判为 false，播完 Enter 没反应），续播点贴片尾时位置
+/// 在 Opening / 缓冲首帧里就已 >= 时长（误判成播完，Enter 把片子重开）。
+///
+/// `!playing` 是防御：正在缓冲 / 起播的会话即使上一拍留下了 `ended`，也不能当
+/// 播完。
 fn player_finished(view: &PlayerView) -> bool {
-    view.duration
-        .is_some_and(|total| !total.is_zero() && view.position >= total)
+    view.ended && !view.playing
 }
 
 fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {

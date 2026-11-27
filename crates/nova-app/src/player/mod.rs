@@ -1123,17 +1123,9 @@ impl Player {
         *self.capture_out.borrow_mut() = Some(outcome);
 
         // 捕获模式直接退事件循环，绕过了 exit()，所以这里要自己把进度交出去，
-        // 否则服务端收不到 Stop，续播点永远是 0（实测）。
-        if let Some(progress) = self.build_progress() {
-            self.progress.submit(ProgressTrigger::Exit, progress);
-        }
-        if let Some(outcome) = self.progress.flush() {
-            tracing::info!(
-                flushed = outcome.sent,
-                failed = outcome.failed,
-                "捕获结束：进度已提交"
-            );
-        }
+        // 否则服务端收不到 Stop，续播点永远是 0（实测）。退出路径复用 `end_session`
+        // （与正常退出同一套日志文案与补发逻辑），不再在这里手写一份。
+        self.end_session(SessionEnd::Exit);
 
         self.request_redraw();
         if let Err(error) = slint::quit_event_loop() {
@@ -1682,6 +1674,9 @@ impl Player {
         let state = self.session.state();
         view.position = self.session.position();
         view.duration = self.session.duration();
+        // 显式的"播完"标志：时长未知时位置推不到时长，续播点贴片尾时位置又会
+        // 在 Opening 首帧里就 >= 时长，两者都不能用 `position >= duration` 判定。
+        view.ended = state == SessionState::Ended;
         view.buffering = state == SessionState::Buffering || self.session.show_spinner();
         view.playing = matches!(
             state,
@@ -2315,6 +2310,35 @@ mod tests {
         assert!(view.playing, "起播期间视为播放中（不是上一部的暂停态）");
     }
 
+    /// 复审 🟡1/🟡2：`PlayerView::ended` 必须由 `SessionState::Ended` 直传，
+    /// 不能靠 `position >= duration` 推。
+    ///
+    /// 两种旧实现判错的场景：续播点贴在片尾、还在 `Opening` 时位置已 >= 时长
+    /// （旧逻辑误判成播完）；时长未知时 `Ended` 推不动位置（旧逻辑永远判 false）。
+    #[test]
+    fn ended_state_is_carried_to_the_player_view_without_guessing_from_position() {
+        let (_dir, _local, mut player, _runtime) = switch_fixture();
+
+        // 续播点贴着片尾、首帧还没到：位置 >= 时长，但不是播完。
+        player
+            .session
+            .begin(Duration::from_secs(5400), Some(Duration::from_secs(5400)));
+        let opening = player.live_view();
+        assert!(
+            !opening.ended,
+            "Opening 中不能因为位置满了就标成播完：{opening:?}"
+        );
+        assert!(opening.playing, "Opening 算播放中");
+
+        // 时长未知 + Ended：位置推不到时长，只能靠显式标志。
+        player.session.begin(Duration::ZERO, None);
+        player.session.handle(EngineEvent::Ended);
+        let ended = player.live_view();
+        assert!(ended.ended, "Ended 必须传到视图：{ended:?}");
+        assert!(ended.duration.is_none(), "用例前提：时长未知");
+        assert!(!ended.playing, "播完后不再算播放中");
+    }
+
     /// 记录上报调用的假 sink（换片收尾必须能被观测到）。
     ///
     /// `stop` 只应发生在 `Exit` 那一条上报之后：它是服务端落盘续播点的唯一入口。
@@ -2492,7 +2516,11 @@ mod tests {
 
         // 换片路径不再阻塞等补发（那是界面线程上的 `block_on`），`Exit` 只交给
         // worker：上报与 `stop` 是异步发生的，所以这里轮询等它做完。
-        wait_until(|| recorder.stops().len() == 1);
+        assert!(
+            wait_until(|| recorder.stops().len() == 1),
+            "Exit 必须被 worker 处理掉（否则服务端收不到 stop）: {:?}",
+            recorder.stops()
+        );
         assert_eq!(
             recorder.reports(),
             vec![("a".to_owned(), Duration::from_secs(600))],

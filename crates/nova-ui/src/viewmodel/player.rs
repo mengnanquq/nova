@@ -99,6 +99,11 @@ pub struct PlayerView {
     pub playing: bool,
     /// 是否正在缓冲（画面保留，角落提示，控件不自动隐藏）。
     pub buffering: bool,
+    /// 会话是否已经播到结尾（引擎报过 `Ended`）。
+    ///
+    /// 不能靠 `position >= duration` 推断：时长未知时位置永远推不到时长，
+    /// 续播点贴着片尾时又会在 Opening / 缓冲的首帧里就"满"了。
+    pub ended: bool,
     /// 音量 `0.0..=1.0`。
     pub volume: f32,
     /// 是否静音。
@@ -197,6 +202,12 @@ impl PlayerView {
     /// 设置缓冲态。
     pub fn with_buffering(mut self, buffering: bool) -> Self {
         self.buffering = buffering;
+        self
+    }
+
+    /// 设置"已播完"标志。
+    pub fn with_ended(mut self, ended: bool) -> Self {
+        self.ended = ended;
         self
     }
 
