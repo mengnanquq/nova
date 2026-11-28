@@ -200,7 +200,9 @@ export struct Target {
 - `AppWindow.targets` 是"当前页面的那份清单"（非当前页为空）；
 - **重复元素**（卡片 / 库标签 / 版本行 / 音轨字幕行）和**条件子树**（hero 按钮 / 空态 /
   横幅动作 / 对话框 / 菜单）没法写进父组件的数组（Slint 1.19 的数组属性没有推导、没有拼接），
-  它们在 `TargetBus.gen` 变化时调用 `TargetBus.register(...)` 自报坐标；
+  它们在 `TargetBus.gen` 变化时调用 `TargetBus.register(...)` 自报坐标。详情页的「播放」
+  按钮与「播放版本」入口也都是条件子树（按条目类型 / 片源有无实例化），同样走
+  `TargetBus.register`；
 - 这两路在 `nova-ui` 的 `App::targets()` 里合并、按当前页命名空间过滤、去掉被窗口裁掉的项。
 
 **登记依赖实例化**：Slint 1.19 的 `for` 项是**惰性创建**的——只有 item tree 被遍历
@@ -272,7 +274,9 @@ export struct Target {
 | 搜索页 `Esc` | 清空查询并回首页 |
 
 详情页没有顶栏（页内就是 hero + 按钮行），它的按钮与版本行本来就在内容层的扁平焦点
-里，`↑` 仍是行间上移。播放页有自己的快捷键表，见 `docs/debugging.md`。
+里，`↑` 仍是行间上移。**剧集详情没有播放按钮**（见「详情页」一节）：`focus_rows` 只剩
+「我的列表」一行，焦点 `0` 就是它，`←` / `→` / `↑` / `↓` 不动焦点，`Enter` 激活
+「我的列表」。播放页有自己的快捷键表，见 `docs/debugging.md`。
 
 `Tab` **不参与**页面导航：那是 Slint 内建的表单遍历，会和输入框 / 顶栏搜索框抢焦点。
 
@@ -340,6 +344,30 @@ model，库行按 `library_id` 匹配，所以行内 `PosterCard` 实例不会�
 
 `zoom-index` 的优先级顺序是 `hot` → （指针在放大层 / 箭头上时）锁存的 `latch` → 键盘焦点，
 所以鼠标与键盘同时存在时悬停优先。
+
+## 详情页：没有播放入口的剧集，按片源实例化的版本区
+
+**剧集详情目前没有播放入口（选集还没做）。** 片源挂在单集上，剧集本体没有任何可播
+版本；真机实测（R9-A2：真实数据目录、条目 `18778`「X局密档」、`kind = series`、
+`sources = []`）点「播放」只会压入一个 `Player` 路由，页面显示错误卡
+「这个条目没有可播放的版本：确认服务端上文件还在」。所以：
+
+- `DetailView.playable` 由生产方（`nova-app` 的 `detail_from_item`）按
+  **条目类型**填写：只有 `MediaKind::Series` 是 `false`。**不能按「片源为空」判断**：
+  电影离线时 `sources` 也可能为空，联网后能播，播放按钮要保留。
+- `playable = false` 时 `ui/detail.slint` 里播放按钮**整个不实例化**（`if (root.data.playable)`），
+  也不登记 `detail.play`。只写 `visible: false` 不够：不可见的 Slint 元素仍有宽高，仍会被
+  命中测试判为可点，清单里也照样留着它。
+- 焦点模型跟着缩成一行：`pages::detail::focus_rows` 返回 `vec![1]`（焦点 `0` = 「我的
+  列表」，只有能播时才是 `1 + sources.len()`，`0` = 播放）。键盘 `Enter` 由
+  `play_current` 门控到「我的列表」，不会复活一个界面上不存在的按钮。
+- 电影（`MediaKind::Movie`）不受影响：`sources` 为空时播放按钮照常在。
+
+**版本区只在有片源时显示。** 整段版本入口（`NETFLIX` 风格的下拉 + 展开面板）包在
+`if (root.data.sources.length > 0)` 里：片源为空时既没有版本行，也没有那个只剩
+「播放版本：  ▾」的空下拉（R9-A2 的原始症状）。`detail.drop` 与展开后的
+`detail.source.N` 一样在条件子树里经 `TargetBus.register` 登记，入口消失时一起从
+`targets` 里消失（调试通道 `targets` / `sweep` 都看不到它）。
 
 ## 视觉规范
 

@@ -20,8 +20,9 @@ export component DetailPage inherits Rectangle {
     callback my-list-toggle();
 
     // ---- 调试通道：可交互目标（见 docs/ui-architecture.md）----
-    // 返回 / 播放 / 我的列表 / 版本下拉是页面直接摆放的常驻控件 → 声明式列出；
-    // 展开后的版本行是条件子树里的重复元素 → 各自登记到 `TargetBus`。
+    // 返回 / 我的列表是页面直接摆放的常驻控件 → 声明式列出；
+    // 播放按钮（只在有播放入口的条目上实例化）、版本入口（只在有片源时实例化）
+    // 和展开后的版本行都在条件子树里 → 各自登记到 `TargetBus`。
     out property <[Target]> targets: [
         {
             id: "detail.back",
@@ -33,15 +34,6 @@ export component DetailPage inherits Rectangle {
             height: back-area.height,
         },
         {
-            id: "detail.play",
-            kind: "button",
-            label: root.data.play-label,
-            x: play-area.absolute-position.x,
-            y: play-area.absolute-position.y,
-            width: play-area.width,
-            height: play-area.height,
-        },
-        {
             id: "detail.my-list",
             kind: "toggle",
             label: root.in-my-list ? "已在列表" : "+  我的列表",
@@ -49,15 +41,6 @@ export component DetailPage inherits Rectangle {
             y: list-area.absolute-position.y,
             width: list-area.width,
             height: list-area.height,
-        },
-        {
-            id: "detail.drop",
-            kind: "toggle",
-            label: "播放版本：" + root.data.selected-source-label,
-            x: drop-area.absolute-position.x,
-            y: drop-area.absolute-position.y,
-            width: drop-area.width,
-            height: drop-area.height,
         },
     ];
 
@@ -294,6 +277,12 @@ export component DetailPage inherits Rectangle {
                     spacing: Theme.space-3;
 
                     // ▶ 播放：白底黑字。
+                    // 只在有播放入口的条目上实例化：剧集（选集尚未实现）没有
+                    // 可播版本，点「播放」只会落到错误卡（真机 R9-A2 实测），所以
+                    // 整个按钮不实例化——不能只写 `visible:false`：不可见的元素
+                    // 仍有宽高，仍会被命中测试判为可点。电影离线时片源可能为空，
+                    // 但联网后能播，播放按钮照常保留。
+                    if (root.data.playable) :
                     Rectangle {
                         width: root.data.play-label == "播放" ? Theme.play-button-width
                             : play-label.preferred-width + Theme.space-5;
@@ -344,6 +333,22 @@ export component DetailPage inherits Rectangle {
                             clicked => {
                                 root.focus-index = 0;
                                 root.play();
+                            }
+                        }
+
+                        // 「播放」在条件子树里，跟版本行一样经 `TargetBus` 登记。
+                        property <int> target-gen: TargetBus.gen;
+                        changed target-gen => {
+                            if (root.visible) {
+                                TargetBus.register({
+                                    id: "detail.play",
+                                    kind: "button",
+                                    label: root.data.play-label,
+                                    x: play-area.absolute-position.x,
+                                    y: play-area.absolute-position.y,
+                                    width: play-area.width,
+                                    height: play-area.height,
+                                });
                             }
                         }
 
@@ -406,10 +411,27 @@ export component DetailPage inherits Rectangle {
                                 root.my-list-toggle();
                             }
                         }
+
+                        // 不能播（剧集）时「我的列表」是按钮行里唯一可用控件，
+                        // 顶到焦点 `0` 上（`focus_rows` 的单行模型）：没有播放
+                        // 按钮，焦点不能落在不存在的按钮上（R9-A2）。
+                        FocusRing {
+                            x: -Theme.focus-offset;
+                            y: -Theme.focus-offset;
+                            width: parent.width + Theme.focus-offset * 2;
+                            height: parent.height + Theme.focus-offset * 2;
+                            active: !root.data.playable && root.focus-index == 0;
+                            ring-radius: Theme.radius-button + Theme.focus-offset;
+                        }
                     }
                 }
 
                 // 版本下拉：一行 NETFLIX 风格入口 + 展开面板。
+                // 只在有片源时实例化：剧集一律没有片源（挂在单集上），电影离线时
+                // 也可能还没有直链——空的下拉既没法用也会被点，标签只剩
+                // 「播放版本：  ▼」（R9-A2）。同样不能只写 `visible:false`：
+                // 不可见的元素仍有宽高，仍会被判为可点。
+                if (root.data.sources.length > 0) :
                 VerticalLayout {
                     width: parent.width > 640px ? 640px : parent.width;
                     spacing: Theme.space-2;
@@ -435,6 +457,22 @@ export component DetailPage inherits Rectangle {
                         drop-area := TouchArea {
                             clicked => {
                                 root.drop-open = !root.drop-open;
+                            }
+                        }
+
+                        // 条件子树里的登记：片源为空时入口跟著一起消失。
+                        property <int> target-gen: TargetBus.gen;
+                        changed target-gen => {
+                            if (root.visible) {
+                                TargetBus.register({
+                                    id: "detail.drop",
+                                    kind: "toggle",
+                                    label: "播放版本：" + root.data.selected-source-label + "  ▼",
+                                    x: drop-area.absolute-position.x,
+                                    y: drop-area.absolute-position.y,
+                                    width: drop-area.width,
+                                    height: drop-area.height,
+                                });
                             }
                         }
                     }

@@ -13,7 +13,13 @@ pub fn apply(ui: &AppWindow, view: &DetailView, images: &ImageStore) {
     ui.set_detail(convert::detail_data(view, images));
 }
 
-/// 详情页焦点行：播放按钮 + 每个版本一格。
+/// 详情页焦点行：能播时是「播放按钮 + 每个版本一格」（`0` = 播放，`1..N` = 版本
+/// 行）；不能播（剧集，R9-A2）时播放按钮没有实例化，焦点不能落在不存在的按钮
+/// 上——唯一的按钮行控件「我的列表」顶到 `0` 上（焦点环见 `detail.slint`）。
 pub fn focus_rows(view: &DetailView) -> Vec<usize> {
-    vec![1 + view.sources.len()]
+    if view.playable {
+        vec![1 + view.sources.len()]
+    } else {
+        vec![1]
+    }
 }

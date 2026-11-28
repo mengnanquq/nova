@@ -124,6 +124,13 @@ fn escape_closes_the_source_dropdown_before_leaving_detail() {
     app.ui().show().expect("显示窗口");
 
     // 展开版本下拉（点击入口，与用户操作同一条路径）。
+    // 入口在条件子树里（`sources.length > 0`，R9-A2），靠 `TargetBus` 代次登记：
+    // 先让 item tree 实例化、再推代次才能看到它（与 `interaction_targets` 的
+    // `settle` 同一口径）。
+    for _ in 0..2 {
+        app.refresh_targets();
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+    }
     let drop = app.target("detail.drop").expect("版本下拉入口没登记");
     app.click_at(drop.center().0, drop.center().1)
         .expect("点击版本下拉");
@@ -138,4 +145,55 @@ fn escape_closes_the_source_dropdown_before_leaving_detail() {
     // 第二次 Esc：正常返回。
     press(&app, Key::Escape);
     assert_eq!(app.page(), Page::Library, "第二次 Esc 才返回上一页");
+}
+
+/// R9-A2（真机实测）：剧集详情没有播放按钮（选集未做），键盘焦点从「我的列表」
+/// 开始（不能落在不存在的播放按钮上），Enter 激活「我的列表」而不是起播。
+#[test]
+fn series_detail_focus_starts_on_my_list_and_enter_does_not_play() {
+    init_backend();
+    let app = App::new_with(AppWindow::new().unwrap());
+    app.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(1280.0, 800.0));
+
+    let library = library_view();
+    app.set_library(&library);
+    app.open_library(&library);
+    let mut detail = detail_view();
+    detail.playable = false;
+    detail.sources.clear();
+    app.set_detail(&detail);
+    app.open_detail("dune");
+    assert_eq!(app.page(), Page::Detail);
+    app.ui().show().expect("显示窗口");
+
+    // 进详情默认焦点 0：这里就是「我的列表」。
+    assert_eq!(app.ui().get_detail_focus(), 0, "焦点应从第一个可用按钮开始");
+    // 单项行：方向键不动，焦点不会落到不存在的按钮上。
+    press(&app, Key::RightArrow);
+    press(&app, Key::LeftArrow);
+    press(&app, Key::DownArrow);
+    press(&app, Key::UpArrow);
+    assert_eq!(
+        app.ui().get_detail_focus(),
+        0,
+        "唯一可用控件上方向键不该移动焦点"
+    );
+    assert_eq!(app.page(), Page::Detail, "方向键不该离开详情页");
+
+    // Enter 激活「我的列表」，不去起播：页面留在详情页、路由不进播放页。
+    let toggled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let flag = toggled.clone();
+    app.on_detail_my_list_toggle(move || flag.set(true));
+    press(&app, Key::Return);
+    assert!(toggled.get(), "Enter 应激活「我的列表」");
+    assert_eq!(app.page(), Page::Detail, "Enter 不该离开详情页");
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Detail {
+            item_id: "dune".to_string()
+        }),
+        "Enter 不该压入播放路由"
+    );
 }

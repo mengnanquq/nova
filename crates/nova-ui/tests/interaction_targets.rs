@@ -944,6 +944,62 @@ fn detail_targets_cover_buttons_and_source_rows() {
     }
 }
 
+/// R9-A2：电影在片源为空（离线 / 直链还没取到）时，空的「播放版本」入口和
+/// 展开行都不该出现，但播放按钮保留（能不能播按条目类型判断，不按片源判断）。
+#[test]
+fn detail_without_sources_hides_the_version_drop_but_keeps_play() {
+    let app = window();
+    install_backdrops(&app, &["dune"]);
+    let mut view = detail_view();
+    view.sources.clear();
+    app.set_detail(&view);
+    app.show_page(Page::Detail);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+
+    let targets = settle(&app, 80);
+    assert_invariants("detail-no-sources", &targets);
+    assert!(
+        app.target("detail.play").is_some(),
+        "片源为空的电影仍要保留播放按钮"
+    );
+    assert!(
+        app.target("detail.drop").is_none(),
+        "片源为空时不该有「播放版本」入口"
+    );
+    assert!(
+        app.target("detail.source.0").is_none(),
+        "片源为空时不该有版本行"
+    );
+}
+
+/// R9-A2（真机实测）：剧集没有片源（片源挂在单集上）、选集未做，剧集详情页
+/// 播放按钮整个不实例化，也不登记为目标；焦点顶到「我的列表」上。
+#[test]
+fn series_detail_has_no_play_or_drop_target_but_keeps_my_list() {
+    let app = window();
+    install_backdrops(&app, &["dune"]);
+    let mut view = detail_view();
+    view.playable = false;
+    view.sources.clear();
+    app.set_detail(&view);
+    app.show_page(Page::Detail);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+
+    let targets = settle(&app, 80);
+    assert_invariants("detail-series", &targets);
+    assert!(
+        app.target("detail.play").is_none(),
+        "剧集详情不该有播放按钮"
+    );
+    assert!(
+        app.target("detail.drop").is_none(),
+        "剧集没有片源，不该有「播放版本」入口"
+    );
+    assert!(app.target("detail.my-list").is_some(), "「我的列表」要保留");
+}
+
 /// 暂停时中央大播放图标必须出现在清单里、且能被点到（它此前没有 TouchArea，
 /// 点击会穿透到整屏命中层，只唤醒控制层——典型的"死按钮"）。
 #[test]

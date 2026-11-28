@@ -2921,6 +2921,18 @@ fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
             _ => None,
         }
     };
+    // 剧集详情没有播放按钮（`DetailView.playable` = false，R9-A2）：键盘 Enter
+    // 不能复活一个界面上不存在的按钮，落到焦点所在的「我的列表」上（与
+    // `focus_rows` 的单行模型一致）。
+    if let Some(Route::Detail { .. }) = state.borrow().nav.current() {
+        if !state.borrow().detail.playable {
+            let handler = state.borrow().callbacks.detail_my_list_toggle.clone();
+            if let Some(handler) = handler {
+                handler();
+            }
+            return true;
+        }
+    }
     match item_id {
         Some(item_id) => play(ui, state, &item_id),
         None => false,

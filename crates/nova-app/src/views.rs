@@ -411,6 +411,10 @@ pub fn detail_from_item(
     prefs: &UserPreferences,
 ) -> DetailView {
     let mut view = DetailView::new(item.id.as_str(), item.title.clone());
+    // 播放入口按条目类型下架，与「片源是否为空」无关：剧集一律没有片源（挂在
+    // 单集上），选集尚未实现，点「播放」只会落到错误卡（真机 R9-A2 实测）；电影
+    // 离线时片源也可能为空，但联网后能播，不能一并下架（R9-A2）。
+    view.playable = !matches!(item.kind, MediaKind::Series);
     view.original_title = item.original_title.clone();
     view.meta_line = detail_meta_line(item.year, item.runtime, &item.genres);
     view.overview = item.overview.clone();
@@ -986,6 +990,33 @@ mod tests {
         assert_eq!(player.engine_line.as_deref(), Some(PLAYER_STATUS));
         assert_eq!(player.position, Duration::from_secs(754));
         assert_eq!(player.duration, Some(Duration::from_secs(8280)));
+    }
+
+    /// R9-A2：播放入口只按条目类型判断，不看片源——剧集（片源挂在单集上、选集未做）
+    /// 没有播放入口；电影离线时片源可能为空，但联网后能播，播放按钮照常保留。
+    #[test]
+    fn detail_playable_follows_item_kind_not_source_count() {
+        let db = Database::open_in_memory().expect("内存库");
+        let server = server("srv-kind");
+        db.upsert_server(&server.info, 1).expect("写服务器");
+        let movie = item("m", "沙丘", MediaKind::Movie, Duration::ZERO, Some(8280));
+        let series = item("s", "X局密档", MediaKind::Series, Duration::ZERO, None);
+        db.upsert_items(&server.info.id, &[movie, series], 1)
+            .expect("写条目");
+
+        let movie_detail = detail_view(&db, &server.info.id, "m")
+            .expect("读详情")
+            .expect("条目存在");
+        assert!(movie_detail.sources.is_empty(), "本用例的电影没有片源");
+        assert!(
+            movie_detail.playable,
+            "电影即使暂时没有片源也要保留播放入口"
+        );
+
+        let series_detail = detail_view(&db, &server.info.id, "s")
+            .expect("读详情")
+            .expect("条目存在");
+        assert!(!series_detail.playable, "剧集详情不该有播放入口");
     }
 
     /// 播放页初始位置与详情页文案必须读同一份偏好（都是 `db.preferences()`）：

@@ -57,6 +57,16 @@ pub struct DetailView {
     pub overview: Option<String>,
     /// 播放按钮文案：`"播放"` / `"从 12:34 继续"`。
     pub play_label: String,
+    /// 是否有播放入口：**只有剧集（`MediaKind::Series`）没有**——片源挂在单集上，
+    /// 剧集本体没有任何可播版本，点「播放」只会落到错误卡上（真机 R9-A2 实测：
+    /// 「这个条目没有可播放的版本」）。选集尚未实现，所以剧集详情不下架播放按钮
+    /// 就没有可用的播放入口。电影离线时也可能暂时没有片源，但联网后能播，
+    /// 不能按「片源为空」下架，只能按条目类型判断。
+    ///
+    /// 由生产方（nova-app 的 `detail_from_item`）按条目类型填；界面上没有
+    /// 播放按钮的条目，键盘 Enter 也不会复活它（见 `play_current` 的门控，
+    /// Enter 落到「我的列表」上）。
+    pub playable: bool,
     /// 是否已在「我的列表」（本地持久化，不同步服务端）。
     pub in_my_list: bool,
     /// 可播放版本。
@@ -76,6 +86,9 @@ impl Default for DetailView {
             meta_line: String::new(),
             overview: None,
             play_label: "播放".to_string(),
+            // 默认按「能播」处理：这个结构大多由测试 / 演示直接构造，缺省值
+            // 保持旧行为；nova-app 的装配函数会按条目类型覆写。
+            playable: true,
             in_my_list: false,
             sources: Vec::new(),
             genres: Vec::new(),

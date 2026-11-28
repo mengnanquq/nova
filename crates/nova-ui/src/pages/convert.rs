@@ -276,6 +276,7 @@ pub fn detail_data(view: &DetailView, images: &ImageStore) -> DetailData {
                 .collect(),
         ),
         play_label: view.play_label.clone().into(),
+        playable: view.playable,
         badge: view.badge.clone().unwrap_or_default().into(),
         initial: CardView::new(view.item_id.clone(), view.title.clone())
             .initial()

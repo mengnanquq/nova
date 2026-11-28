@@ -92,6 +92,9 @@ export struct DetailData {
     overview: string,
     genres: [string],
     play-label: string,
+    // 是否有播放入口：只有剧集没有（片源挂在单集上，选集尚未实现），
+    // 电影离线时片源可能暂时为空但仍能播。false 时播放按钮不实例化。
+    playable: bool,
     badge: string,
     initial: string,
     poster: image,
