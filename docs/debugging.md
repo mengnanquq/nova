@@ -160,7 +160,7 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 | `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签（本体）在标签区视口里的左右沿与标签区滚动量。窄窗口下“焦点标签完整可见”要连焦点环一起算：`left - focus-offset ≥ 0 && right + focus-offset ≤ viewport_w`，`focus-offset` / `focus-width` 从 `Theme` 取（当前 4px / 2px），**不在探针里重复上报**。左右沿是**即时**值（内容坐标 + 当前 `content-x`），不受“按下方向键那一刻已经滚到哪儿”影响；标签行左右各留 `Theme.focus-offset` 内边距并算进 `content-width`，所以 800px 下滚到底时 `focus_tab_right == tabs_viewport_w - focus-offset`（环外沿贴住视口右沿） |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |
 | `dialog.open` / `address` / `user` / `password_len` / `error` | 「添加服务器」对话框的字段与错误文案；**密码只报字符长度**，不回显明文 |
-| `player.playing` / `player.buffering` / `player.ended` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。`ended` 是**引擎侧**的“已播完”（`SessionState::Ended` 直传，不靠“位置 ≥ 时长”猜）；界面侧的播完判定是 `ended && !playing`。要确认“是不是真的播完了”就看这三个字段，或看日志。播完后 `Enter` / 播放键 / 拖动进度条都已生效：重播会把 `position_ms` 拉回 0（新会话），拖动会落到目标位置并回到 `playing: true`。**从片尾往回拖之后必须仍是 `playing: true` 且位置在中段**；如果拖完立刻变回 `playing: false` + 位置到底，就是引擎又把旧 `eof-reached=true` 当成了一次新片尾（日志里会有一条 `忽略重复 / 过期的 eof-reached=true`）。片尾后**直接拖到 100%**（或 `→` 连按到片尾）时 `ended` 可能仍是 `false`（mpv 不会为“seek 到时长”再报一次 `Ended`），但 `position_ms` 会钉在时长上：宿主按“停在片尾”处理（`playing_at_end`），所以此时按播放 / `Enter` 仍是**从头重播**而不是从片尾恢复一秒 |
+| `player.playing` / `player.buffering` / `player.ended` / `player.position_ms` / `player.error` / `player.volume` / `player.muted` | 播放页即时状态。`ended` 是**引擎侧**的“已播完”（`SessionState::Ended` 直传，不靠“位置 ≥ 时长”猜）；界面侧的播完判定是 `ended && !playing`。要确认“是不是真的播完了”就看这三个字段，或看日志。播完后 `Enter` / 播放键 / 拖动进度条都已生效：重播会把 `position_ms` 拉回 0（新会话），拖动会落到目标位置并回到 `playing: true`。**从片尾往回拖之后必须仍是 `playing: true` 且位置在中段**；如果拖完立刻变回 `playing: false` + 位置到底，就是引擎又把旧 `eof-reached=true` 当成了一次新片尾（日志里会有一条 `忽略重复 / 过期的 eof-reached=true`）。片尾后**直接拖到 100%**（或 `→` 连按到片尾）时 `ended` 可能仍是 `false`（mpv 不会为“seek 到时长”再报一次 `Ended`），但 `position_ms` 会钉在时长上：宿主按“停在片尾”处理（`Player::at_end_of_media`：位置距时长一帧以内，**或**引擎自己已报到 `eof-reached`——后者兜底“元数据时长比真实文件长”，这时 `position_ms` 会停在真实 EOF、离元数据时长还差一截），所以此时按播放 / `Enter` 仍是**从头重播**而不是从片尾恢复一秒 |
 | `player.controls_visible` | 控制层当前是否可见。**隐藏时 `targets` 里绝大多数 `player.*` 会消失**（控制块不再布局，只剩 `player.mute` 这类登记总线的快照），按 id 点它们会得到 `unknown target`：先发一个唤醒键（例如 `{"cmd":"key","key":"Down"}`，控制层可见时 `↑` / `↓` 才是音量键）或一次 `hover` / `click` 再点。验证“片尾 / 隐藏控制层”的分支时先读这个字段，别靠猜 |
 | `player.fullscreen` | 窗口**真实**的全屏状态（`Window::is_fullscreen()`，不是 nova-ui 侧“想切”的标记）。点 `player.fullscreen` 或用 `F` 后应变成 `true`，再点一次（先唤醒控制层）变回 `false`。若点击后一直是 `false`，就是窗口全屏没生效，而不是界面状态没跟上 |
 | `player.audio_track` / `player.subtitle_track` | 当前选中的音轨 / 字幕轨：`{"index": <mpv aid/sid>, "label": "…"}`；`null` = 字幕「关闭」或引擎还没枚举到轨道 |
@@ -170,6 +170,9 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 
 从播放页用 `route` / `open` / `tab` 切走时，播放会话会像 Esc 一样先收尾（提交进度、
 复位错误 / 轨道 / 标题）——所以 `view.player` 不会把上一部片子的错误带进下一个详情页。
+收尾后（含 Esc）`view.player` 是 `null`：`nova-app` 的播放器**对象**仍留在槽里以复用引擎与
+音量 / 静音，但会话已经不是“活会话”（`Player::session_alive` 为假），降级与正常两条读取
+路径都按“活会话”判，不按“槽里有没有对象”判。
 
 设计取舍：
 

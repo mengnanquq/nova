@@ -372,6 +372,18 @@ impl MpvEngine {
         self.lock_shared().dropped_frames
     }
 
+    /// mpv 是否已经到达片尾（`eof-reached` 属性，**实时**播放状态）。
+    ///
+    /// 与 [`MpvEngine::diagnostics`] 分开：诊断是起播期的快照，而这个是随播放推进
+    /// 变化的状态。宿主用它兜底“停在片尾”的判定：元数据里的时长可能比真实文件长
+    /// （差几十毫秒到几秒），这时位置永远贴不到时长，只看位置判不出播完。
+    ///
+    /// `eof-reached` 由 worker 的属性观察落到共享状态（`keep-open=yes` 下 mpv 到片尾
+    /// 只送这条、不送 `end-file`）；新文件 / 往回拖之后 mpv 会送 `eof-reached=false`。
+    pub fn eof_reached(&self) -> bool {
+        self.lock_shared().eof
+    }
+
     /// 首帧耗时（从 `open` 被接受，到第一帧真的渲染进纹理）。
     pub fn first_frame_latency(&self) -> Option<Duration> {
         let shared = self.lock_shared();

@@ -178,12 +178,21 @@ pub(crate) struct Shell {
     /// 若旧 margin 还排在 FIFO 里，补跑时会把它盖回去（见
     /// [`Shell::set_player_subtitle_margin`]）。
     pending_subtitle_margin: RefCell<Option<i64>>,
-    /// 播放器槽里是否**确实**有播放器。
+    /// 播放是不是还有一个**活会话**（起播后到收尾前为 `true`）。
     ///
     /// 借用期间不能借用 `player` 判断（[`Shell::has_player`] /
     /// [`Shell::live_player_view`] 的降级分支），所以单独维护一个标志：
-    /// 它只在动作真正改槽时更新，不参与 `RefCell` 借用。
-    player_present: Rc<Cell<bool>>,
+    /// 它只在动作真正改槽时按 [`Player::session_alive`] 更新，不参与 `RefCell` 借用。
+    ///
+    /// 注意它**不是**“槽里有没有对象”：`Esc` 退出播放页后播放器对象仍留在槽里
+    /// （复用引擎与音量 / 静音偏好），但会话已经收尾，此时两个访问器都必须报告
+    /// “没有播放”（复审 🟡1）。
+    player_live: Rc<Cell<bool>>,
+    /// 补跑达到上限的 warn 是否已经打过（同一次连续超限只打一条）。
+    ///
+    /// 没有它时每次心跳都打一条，真机日志会被刷满；恢复正常后重新武装，
+    /// 下一次超限还打一条（见 [`Shell::after_player_borrow`]）。
+    catch_up_warned: Cell<bool>,
     /// 播放心跳（8ms）：事件泵、会话 tick、帧 watchdog。
     timer: slint::Timer,
     /// `--play` 指定的捕获参数（等 `App::play` 回调到 [`Shell::play`] 时消费）。
@@ -328,7 +337,8 @@ pub fn run_window(
         player: RefCell::new(None),
         pending_player_actions: RefCell::new(VecDeque::new()),
         pending_subtitle_margin: RefCell::new(None),
-        player_present: Rc::new(Cell::new(false)),
+        player_live: Rc::new(Cell::new(false)),
+        catch_up_warned: Cell::new(false),
         timer: slint::Timer::default(),
         pending_capture: RefCell::new(None),
         pending_source: RefCell::new(None),
@@ -605,7 +615,6 @@ impl Shell {
         // 起播也要走重入安全的入口：`Player::new` / `begin` 会读本地库、起 tokio 任务，
         // 重入时（见 [`Shell::with_player`] 的注释）不能把动作丢掉，只能延后。
         let weak = Rc::downgrade(self);
-        let present = Rc::clone(&self.player_present);
         let post = Arc::clone(post);
         let item_id = item_id.to_owned();
         self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
@@ -621,7 +630,6 @@ impl Shell {
                     capture,
                     Rc::clone(&shell.capture_out),
                 ));
-                present.set(true);
             }
             if let Some(player) = slot.as_mut() {
                 player.begin(&item_id, source_id, Some(prefs), &post);
@@ -694,8 +702,17 @@ impl Shell {
             return false;
         };
         action(&mut slot);
-        self.player_present.set(slot.is_some());
+        self.note_player_live(&slot);
         true
+    }
+
+    /// 按槽里的实际情况刷新「活会话」标志（见 [`Shell::player_live`]）。
+    ///
+    /// 每次动作真的改完槽都要调一次：起播把它置 `true`，退出播放页 / 收尾置
+    /// `false`（槽里可能还留着播放器对象，但会话已经是 `Idle`）。
+    fn note_player_live(&self, slot: &Option<Player>) {
+        self.player_live
+            .set(slot.as_ref().is_some_and(Player::session_alive));
     }
 
     /// 提交排队的视图，再补跑被重入挡下的动作。
@@ -706,7 +723,8 @@ impl Shell {
     ///
     /// 一次最多补跑 [`MAX_CATCH_UP_ACTIONS`] 个：动作可能在执行时又入队（或触发
     /// reflow 再入队），没有上限时同一次 drain 会自激循环、卡死主线程。
-    /// 到上限打 warn，剩下的留给下一拍心跳。
+    /// 到上限打 warn（**节流**：同一次连续超限只打一条，排空后再打一条恢复日志），
+    /// 剩下的留给下一拍心跳。
     fn after_player_borrow(&self) {
         self.apply_pending_view();
         for _ in 0..MAX_CATCH_UP_ACTIONS {
@@ -722,21 +740,39 @@ impl Shell {
             } else {
                 let next = self.pending_player_actions.borrow_mut().pop_front();
                 let Some(action) = next else {
+                    self.note_player_live(&slot);
+                    drop(slot);
+                    // 队列已经排空：超限状态恢复，下一次再超限要重新打 warn。
+                    self.note_catch_up_recovered();
                     return;
                 };
                 action(&mut slot);
             }
-            self.player_present.set(slot.is_some());
+            self.note_player_live(&slot);
             drop(slot);
             self.apply_pending_view();
         }
         let remaining = self.pending_player_actions.borrow().len();
         if remaining > 0 || self.pending_subtitle_margin.borrow().is_some() {
-            tracing::warn!(
-                remaining,
-                limit = MAX_CATCH_UP_ACTIONS,
-                "一次补跑达到上限，剩余播放器动作留到下一拍"
-            );
+            // 节流：同一次连续超限只打一条（心跳每 8ms 一拍，不节流会把日志刷满）。
+            if !self.catch_up_warned.get() {
+                self.catch_up_warned.set(true);
+                tracing::warn!(
+                    remaining,
+                    limit = MAX_CATCH_UP_ACTIONS,
+                    "一次补跑达到上限，剩余播放器动作留到下一拍"
+                );
+            }
+        } else {
+            self.note_catch_up_recovered();
+        }
+    }
+
+    /// 补跑排队排空后重新武装超限告警，并留下一条恢复日志（只打一次）。
+    fn note_catch_up_recovered(&self) {
+        if self.catch_up_warned.get() {
+            self.catch_up_warned.set(false);
+            tracing::info!("播放器动作补跑已恢复正常（不再超限）");
         }
     }
 
@@ -760,25 +796,30 @@ impl Shell {
         self.after_player_borrow();
     }
 
-    /// 播放器槽是否已有会话。
+    /// 播放是不是还有**活会话**（起播后到收尾前）。
     ///
-    /// 借用中不能借用 `player`：按 [`Shell::player_present`] 判断，而不是无条件
-    /// `true`——槽里从来没有播放器（还没起播 / 已经收尾）时要如实返回 `false`。
+    /// 借用中不能借用 `player`：按 [`Shell::player_live`] 判断，而不是无条件
+    /// `true`——槽里从来没有播放器（还没起播）、或者会话已经收尾（`Esc` 退出后
+    /// 槽里仍留着播放器对象复用引擎）时都要如实返回 `false`。
     fn has_player(&self) -> bool {
         match self.player.try_borrow() {
-            Ok(slot) => slot.is_some(),
-            Err(_) => self.player_present.get(),
+            Ok(slot) => slot.as_ref().is_some_and(Player::session_alive),
+            Err(_) => self.player_live.get(),
         }
     }
 
-    /// 调试通道用：读播放器的即时视图（若有播放会话）。
+    /// 调试通道用：读播放器的即时视图（若有**活**播放会话）。
     ///
-    /// 借用中（同一拍里重入）退回界面镜像，但只有**确实有过播放器**时才这样做：
-    /// 槽本来就是空的就返回 `None`，不能凭镜像报出一个陈旧的会话。
+    /// 借用中（同一拍里重入）退回界面镜像，但只有**确实有活会话**时才这样做：
+    /// 会话已经收尾（典例：`Esc` 退出后播放器对象还在槽里）就返回 `None`，
+    /// 不能凭镜像报出一个已经结束的会话。
     fn live_player_view(&self) -> Option<nova_ui::PlayerView> {
         match self.player.try_borrow_mut() {
-            Ok(mut slot) => slot.as_mut().map(Player::live_view),
-            Err(_) if !self.player_present.get() => None,
+            Ok(mut slot) => slot
+                .as_mut()
+                .filter(|player| player.session_alive())
+                .map(Player::live_view),
+            Err(_) if !self.player_live.get() => None,
             // 借用中（同一拍里重入）：退回界面镜像，宁可少一拍新数据也不 panic。
             Err(_) => {
                 tracing::debug!("播放器正被借用，view.player 退回界面镜像");
@@ -802,6 +843,20 @@ impl Shell {
         }
     }
 
+    /// `Esc` 退出播放页（`nova-ui` 已先提交进度并补发，然后才回到详情页）。
+    ///
+    /// 播放器**对象**留在槽里：它带着引擎级状态（音量 / 静音属于用户偏好，本次运行内
+    /// 跨会话保留），下次起播直接复用（见 `docs/ui-architecture.md`）。但会话已经收尾
+    /// （`Player::exit` → `Session::reset` → `Idle`），所以
+    /// [`Shell::player_live`] 会被刷成 `false`：`has_player()` / `live_player_view()`
+    /// 不再把 `session 已收尾` 的播放器当成一个正在播的会话（复审 🟡1）。
+    fn exit_player(&self, position: std::time::Duration) {
+        self.with_player(move |player| player.exit(position));
+        self.timer.stop();
+        // 播放页退场：停止往窗口画 mpv，否则回到首页会是最后一帧视频。
+        self.host.borrow_mut().set_player_active(false);
+    }
+
     /// 退出播放页 / 关窗时的收尾。
     ///
     /// 约定：**外层持有 `self.player` 借用的调用方必须调用 [`Shell::after_player_borrow`]**。
@@ -809,12 +864,16 @@ impl Shell {
     /// 后的视图提交与补跑都由 `after_player_borrow` 负责；漏调就是“退出后动作不生效”。
     fn stop_playback(&self) {
         self.timer.stop();
+        // 先丢掉残留的排队动作与字幕值，**再**排 stop：队列是先清后排的，所以 stop
+        // 自己是队列里第一条（旧动作不会跑到 stop 前面去），而 stop 之后也不会有
+        // 上一会话的 Play/Pause/Seek 或 margin 落到下一个会话里（复审 💡3）。
+        // 注意不能反过来：先排 stop 再清队列，stop 自己在借用中也会进队列，会连它一起清掉。
+        self.pending_player_actions.borrow_mut().clear();
+        *self.pending_subtitle_margin.borrow_mut() = None;
         // 先把播放器从槽里拿走再收尾：`shutdown()` 会阻塞等进度补发落盘，
         // 这段不能占着 `self.player` 的借用（收尾期间播放页回调还要用它）。
-        let present = Rc::clone(&self.player_present);
         self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
             if let Some(mut player) = slot.take() {
-                present.set(false);
                 player.shutdown();
             }
         }));
@@ -1365,7 +1424,8 @@ impl Shell {
             player: RefCell::new(None),
             pending_player_actions: RefCell::new(VecDeque::new()),
             pending_subtitle_margin: RefCell::new(None),
-            player_present: Rc::new(Cell::new(false)),
+            player_live: Rc::new(Cell::new(false)),
+            catch_up_warned: Cell::new(false),
             timer: slint::Timer::default(),
             pending_capture: RefCell::new(None),
             pending_source: RefCell::new(None),
@@ -1379,9 +1439,12 @@ impl Shell {
     }
 
     /// 测试用：塞一个真播放器进槽（不建 mpv 引擎，`Player::new` 只做准备）。
+    ///
+    /// 同时开一个占位会话：槽里有播放器但会话 `Idle`（已经收尾的那种）不算
+    /// “有播放”，`has_player` / `live_player_view` 见 `player_live`。
     #[cfg(test)]
     fn install_player_for_test(self: &Rc<Self>) {
-        let player = Player::new(
+        let mut player = Player::new(
             Rc::clone(&self.app),
             Arc::clone(&self.local),
             self.runtime.clone(),
@@ -1389,8 +1452,9 @@ impl Shell {
             None,
             Rc::clone(&self.capture_out),
         );
+        player.start_session_for_test();
         *self.player.borrow_mut() = Some(player);
-        self.player_present.set(true);
+        self.player_live.set(true);
     }
 
     /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
@@ -2639,10 +2703,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_exit(move |position| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(move |player| player.exit(position));
-                shell.timer.stop();
-                // 播放页退场：停止往窗口画 mpv，否则回到首页会是最后一帧视频。
-                shell.host.borrow_mut().set_player_active(false);
+                shell.exit_player(position);
             }
         });
     }
@@ -3557,6 +3618,11 @@ mod tests {
 
     /// 收集一段代码产生的日志（`with_default` 只在本线程与当前 scope 生效）。
     fn capture_logs(run: impl FnOnce()) -> String {
+        capture_logs_at(tracing::Level::WARN, run)
+    }
+
+    /// 同上，但可以调最低级别（需要看 `info` 级的恢复日志时用）。
+    fn capture_logs_at(level: tracing::Level, run: impl FnOnce()) -> String {
         /// 把日志写进共享缓冲。
         #[derive(Clone, Default)]
         struct LogSink(Arc<Mutex<Vec<u8>>>);
@@ -3587,7 +3653,7 @@ mod tests {
         let sink = LogSink::default();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(level)
             .with_writer(sink.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, run);
@@ -3776,6 +3842,123 @@ mod tests {
             "有播放器时借用中退回镜像，而不是 None"
         );
         drop(guard);
+    }
+
+    /// 复审 🟡1：`Esc` 退出后槽里仍有播放器对象（复用引擎与音量），但会话已经收尾——
+    /// 两个访问器（含借用中的降级分支）都必须报告“没有播放”。
+    #[test]
+    fn esc_exit_reports_no_live_player_even_though_the_slot_keeps_the_object() {
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+        assert!(shell.has_player(), "用例前提：起播后有活会话");
+
+        shell.exit_player(std::time::Duration::ZERO);
+
+        // 播放器对象**留在**槽里（构造时播放器只存在这里，`.Some` 为证）：
+        // 它带着引擎级状态（音量 / 静音）等下一次起播复用。
+        assert!(
+            shell.player.borrow().is_some(),
+            "播放器对象必须留在槽里复用引擎与音量"
+        );
+        assert!(!shell.has_player(), "会话收尾后 has_player 必须是 false");
+        assert!(
+            shell.live_player_view().is_none(),
+            "会话收尾后不能再报出一个陈旧的会话"
+        );
+
+        // 借用中（同一拍里重入）的降级分支也要按“活会话”判，而不是“槽里有对象”。
+        let guard = shell.player.borrow_mut();
+        assert!(
+            !shell.has_player(),
+            "借用中也不能把已收尾的播放器当成活会话"
+        );
+        assert!(
+            shell.live_player_view().is_none(),
+            "借用中不能退回镜像报出已经结束的会话"
+        );
+        drop(guard);
+    }
+
+    /// 复审 💡3：`stop_playback` 要丢掉残留的排队动作与字幕值，但**自己**不能被清掉。
+    #[test]
+    fn stop_playback_drops_queued_actions_but_runs_its_own_stop() {
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+        let hits: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // 借用中：普通动作与字幕值都只能排队，收尾动作也会进队列。
+        let guard = shell.player.borrow_mut();
+        let sink = Rc::clone(&hits);
+        shell.with_player(move |_player| sink.borrow_mut().push("stale"));
+        shell.set_player_subtitle_margin(0);
+        shell.stop_playback();
+
+        assert_eq!(
+            shell.pending_player_actions.borrow().len(),
+            1,
+            "队列里只应剩下 stop 自己（旧动作已被清掉），而且它在队首"
+        );
+        assert!(
+            shell.pending_subtitle_margin.borrow().is_none(),
+            "残留的字幕值不能带进下一个会话"
+        );
+        drop(guard);
+
+        shell.after_player_borrow();
+
+        assert!(
+            hits.borrow().is_empty(),
+            "旧动作不能跑到 stop 前面去（更不能带进新会话）：{:?}",
+            hits.borrow()
+        );
+        assert!(
+            shell.player.borrow().is_none(),
+            "stop 自己必须真的执行（播放器已从槽里收走）"
+        );
+        assert!(!shell.has_player());
+    }
+
+    /// 复审 💡4：补跑超限的 warn 要节流（同一次连续超限只打一条），排空后再打一条
+    /// 恢复日志，并且重新武装（下一次超限还要打）。
+    #[test]
+    fn catch_up_warning_is_throttled_and_rearmed_after_recovery() {
+        fn requeue(shell: &Rc<super::Shell>, runs: Rc<std::cell::Cell<usize>>) {
+            let weak = Rc::downgrade(shell);
+            shell.run_player_action(Box::new(move |_slot| {
+                runs.set(runs.get() + 1);
+                if let Some(shell) = weak.upgrade() {
+                    requeue(&shell, Rc::clone(&runs));
+                }
+            }));
+        }
+
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+        let runs = Rc::new(std::cell::Cell::new(0usize));
+        let logs = capture_logs_at(tracing::Level::INFO, || {
+            requeue(&shell, Rc::clone(&runs));
+            // 连续两拍都超限：只该有一条 warn。
+            shell.after_player_borrow();
+            shell.after_player_borrow();
+            assert!(shell.catch_up_warned.get(), "超限后要记住已经警告过");
+
+            // 队列排空（新一拍不再自激）：恢复日志一条，标志重新武装。
+            shell.pending_player_actions.borrow_mut().clear();
+            shell.after_player_borrow();
+            assert!(!shell.catch_up_warned.get(), "排空后重新武装告警");
+
+            // 再超限一次：又该打一条（说明恢复后确实重新武装了）。
+            requeue(&shell, Rc::clone(&runs));
+            shell.after_player_borrow();
+        });
+
+        assert_eq!(
+            logs.matches("达到上限").count(),
+            2,
+            "两次超限各一条 warn，中间那拍不能重复刷：{logs}"
+        );
+        assert_eq!(
+            logs.matches("补跑已恢复正常").count(),
+            1,
+            "恢复只打一条日志：{logs}"
+        );
     }
 
     fn init_test_backend() {
