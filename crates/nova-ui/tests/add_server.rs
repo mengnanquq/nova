@@ -496,6 +496,41 @@ fn every_error_kind_lands_in_the_error_area() {
     );
 }
 
+/// 体检 R9-C10：对话框关着时收到迟到的失败（用户连接中途关框 / `sweep` 把对话框
+/// 按扫描前对齐成关着）不该写回视图模型，也不该留在 UI 的错误区里。
+///
+/// 修复前 `set_add_server_error` 不看 `open`，照样 `apply`：关着的框被写进一条错误，
+/// 下次打开时状态机 / 字段看起来像是这次尝试的产物。
+#[test]
+fn late_failure_after_closing_the_dialog_is_dropped() {
+    let app = setup();
+    app.open_add_server("https://media.example.com", "me");
+    app.begin_add_server_connecting();
+    app.close_add_server();
+    assert!(!app.add_server_open(), "前提：对话框已关闭");
+
+    assert!(
+        !app.set_add_server_error(AddServerError::with_detail(
+            AddServerErrorKind::Auth,
+            "服务器拒绝了这次登录",
+        )),
+        "关着的对话框不该接收失败结果"
+    );
+    assert!(!app.add_server_open(), "迟到的失败不能把对话框重新打开");
+    assert_eq!(app.ui().get_add_server_error(), "", "错误区要保持空");
+    assert_eq!(
+        app.ui().get_add_server_error_detail(),
+        "",
+        "补充说明也要保持空"
+    );
+    assert_eq!(app.ui().get_add_server_state(), 0, "状态机留在空闲");
+
+    // 重新打开是一张干净的表单，不带上次的错误。
+    app.open_add_server("https://media.example.com", "me");
+    assert_eq!(app.ui().get_add_server_error(), "");
+    assert_eq!(app.ui().get_add_server_error_detail(), "");
+}
+
 #[test]
 fn error_lands_in_the_error_area() {
     let app = setup();

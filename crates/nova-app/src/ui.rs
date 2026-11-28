@@ -1213,7 +1213,10 @@ impl Shell {
     /// - 扫描前记下音量 / 静音（点 `player.volume` / `player.mute` 是真实副作用），
     ///   扫描后恢复（见 [`sweep_preserving_audio`]），否则体检一次就改了用户的偏好；
     /// - 扫描前没有播放器、扫描后有了（点到了 hero 的播放 / 详情页的播放），
-    ///   收掉 mpv 会话，避免后台继续解码。
+    ///   收掉 mpv 会话，避免后台继续解码。播放页**不会**走这条：`player.back` 在
+    ///   `SWEEP_NEVER_CLICK` 里跳过不点、恢复器也不重开会话（体检 R9-C9），所以
+    ///   播放页扫完仍是扫描前那一个会话，`had_player` 快照只用于收掉扫描期间
+    ///   从别处（hero / 详情页）新开的播放器。
     fn sweep(&self, dead_only: bool) -> serde_json::Value {
         let was_fullscreen = self.app.player_fullscreen();
         let had_player = self.player.borrow().is_some();
@@ -1253,7 +1256,10 @@ impl Shell {
         let shown: Vec<serde_json::Value> = report
             .entries
             .iter()
-            .filter(|entry| !dead_only || !entry.changed)
+            // `dead` 命令只返回真正的死目标：`skipped`（故意不点）与 `no_op`
+            // （预期内的空操作）与 `report.dead()` 同口径排除，否则
+            // `results` 里会冒出几条 `changed:false` 的好目标，看上去像 dead。
+            .filter(|entry| !dead_only || (!entry.changed && !entry.skipped && !entry.no_op))
             .map(|entry| {
                 serde_json::json!({
                     "id": entry.id,
@@ -1699,7 +1705,15 @@ impl Shell {
                 self.spawn_refresh(false);
             }
             Err(error) => {
-                self.app.set_add_server_error(error);
+                // 对话框还开着：错误写进错误区。关着（用户连接中途手动关框 / `sweep`
+                // 把对话框按扫描前对齐成关着）时 `set_add_server_error` 不写视图模型，
+                // 迟到的失败只留一条日志（体检 R9-C10）。
+                if !self.app.set_add_server_error(error.clone()) {
+                    tracing::warn!(
+                        message = error.message(),
+                        "对话框已关闭，丢弃迟到的连接失败结果"
+                    );
+                }
             }
         }
     }

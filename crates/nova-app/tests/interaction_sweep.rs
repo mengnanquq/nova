@@ -76,6 +76,8 @@ struct Scan {
     skipped: Vec<String>,
     /// 点完属于"预期内空操作"的目标（例如当前所在的库标签）。
     no_ops: Vec<String>,
+    /// 标了 `no_op` 但状态**确实变了**的目标（应为空：预期空操作只许标在没变化的目标上）。
+    no_ops_that_changed: Vec<String>,
 }
 
 fn server_info() -> ServerInfo {
@@ -322,6 +324,12 @@ fn scan(app: &Rc<App>) -> Scan {
             .entries
             .iter()
             .filter(|entry| entry.no_op)
+            .map(|entry| entry.id.clone())
+            .collect(),
+        no_ops_that_changed: report
+            .entries
+            .iter()
+            .filter(|entry| entry.no_op && entry.changed)
             .map(|entry| entry.id.clone())
             .collect(),
     }
@@ -649,18 +657,19 @@ fn sweep_restores_the_search_page_after_clearing_the_query() {
     assert_eq!(app.search_text(), "沙丘", "搜索框文字也要恢复");
 }
 
-/// 体检 R9-C2：播放页 sweep 点过 `player.back` 之后必须把**页面与路由**都放回
-/// 扫描前，而不是只把外壳切回播放页（真机上是 `page=3;route=Some(Home)`）。
+/// 体检 R9-C9：播放页 sweep **不点 `player.back`、也不重开会话**。
 ///
-/// 修复前 `restore_after_click` 对播放页只要求"外壳回到播放页"，路由留在下层；
-/// 后半目标在错位状态上按旧坐标点，点出 5 个假 dead，而报告里 `aborted=false`、
-/// `restored=false`=0，看起来一切正常。
+/// 修复前 `player.back` 会被点，点完离开会话，恢复器再 `play` 把路由压回去：
+/// 真机上就是替用户结束原会话（交 `Exit`、`session_seq+1`）、在 UI 线程上
+/// `block_on` 取直链、重开 mpv、从服务端续播点起播并上报 Started——体检把用户
+/// 的会话换掉了，还写进服务端记录（R9-C2 的“恢复”代价）。
 ///
-/// 这里**不断言 dead**：播放页有一批目标本来就改不了状态摘要（进度 / ±15s / 时间
-/// 显示 / 全屏改的是 `position` / `time_mode` / 窗口属性，摘要里都没有这几个字段），
-/// 它们是不是 dead 与本条回归无关；本条锁的是「页面 + 路由都回来」这个契约。
+/// 现在 `player.back` 在 `SWEEP_NEVER_CLICK` 里跳过（`skipped`），恢复器也没有
+/// `play` 重建路径，所以整轮扫描只会有扫描开始前那一次 `on_play`（会话代号不变），
+/// 页面与路由全程停在播放页。这里不断言 dead：播放页有一批目标本来就改不了
+/// 状态摘要，它们是不是 dead 与本条回归无关。
 #[test]
-fn player_sweep_restores_the_page_and_route_after_going_back() {
+fn player_sweep_never_reopens_the_playback_session() {
     let dir = tempfile::tempdir().expect("临时目录");
     let local = seeded_local(dir.path());
     let app = build_app(&local, Page::Detail, 0.88);
@@ -681,6 +690,7 @@ fn player_sweep_restores_the_page_and_route_after_going_back() {
         }),
         "前提：扫描前停在播放页"
     );
+    assert_eq!(plays.borrow().len(), 1, "前提：起播只触发过一次 on_play");
 
     let scan = scan(&app);
     assert_eq!(scan.page, "player");
@@ -689,7 +699,13 @@ fn player_sweep_restores_the_page_and_route_after_going_back() {
         "清单里应有 player.back：{:?}",
         scan.ids
     );
-    // back 在清单前部：点过它之后后面的控件仍要被扫到（恢复器不中断、坐标也不偏移）。
+    assert_eq!(
+        scan.skipped,
+        vec!["player.back".to_owned()],
+        "点 player.back 会结束会话，sweep 必须跳过不点：{:?}",
+        scan.ids
+    );
+    // back 在清单前部：跳过它之后后面的控件仍要被扫到（坐标不偏移）。
     for id in [
         "player.play-pause",
         "player.fullscreen",
@@ -713,20 +729,21 @@ fn player_sweep_restores_the_page_and_route_after_going_back() {
         "每一项都要能恢复：{:?}",
         scan.unrestored
     );
+    assert_eq!(
+        plays.borrow().as_slice(),
+        std::slice::from_ref(&item_id),
+        "sweep 不该重开播放会话（不点 player.back、恢复器也不 play）：{:?}",
+        plays.borrow()
+    );
     assert_eq!(app.page(), Page::Player, "扫描结束要回到播放页");
     assert_eq!(
         app.current_route(),
         route,
-        "路由也要回到播放页——只回外壳就是 R9-C2 的错位状态"
+        "路由全程停在播放页：重开播放就是换了会话"
     );
     assert!(
         app.target("player.back").is_some(),
         "扫描结束后播放页的控件仍应是可点目标"
-    );
-    assert!(
-        plays.borrow().len() >= 2,
-        "恢复播放页要重新起播（扫描开始时一次 + 点过 player.back 后一次）：{:?}",
-        plays.borrow()
     );
 }
 
@@ -759,6 +776,11 @@ fn library_sweep_marks_the_current_tab_as_an_expected_noop() {
         vec!["library.nav.tab.1".to_owned()],
         "只有当前所在库的标签是预期空操作（清单：{:?}）",
         scan.ids
+    );
+    assert!(
+        scan.no_ops_that_changed.is_empty(),
+        "`no_op` 只能标在状态确实没变的目标上：{:?}",
+        scan.no_ops_that_changed
     );
     assert!(
         !scan.dead.iter().any(|(_, id, _)| id == "library.nav.tab.1"),

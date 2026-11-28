@@ -401,7 +401,8 @@ impl From<Target> for TargetInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepEntry {
     /// 这次点击被**跳过**（见 [`SWEEP_NEVER_CLICK`]）：没有点、不判 dead，
-    /// 列在结果里是为了让体检看得见「清单里有它、但我们故意不碰」。
+    /// 列在结果里是为了让体检看得见「清单里有它、但我们故意不碰」——
+    /// 会联网登录（`dialog.connect`）与会结束播放会话（`player.back`）的目标。
     pub skipped: bool,
     /// 这次点击是**预期内的空操作**（点当前所在的库标签）：点了、状态没变，
     /// 但这是「已经选中」的语义，不判 dead（体检 R9-C6）。
@@ -467,24 +468,42 @@ fn restore_failure_reason(
     current_page: Page,
     current_route: &Option<Route>,
 ) -> String {
-    format!(
+    let reason = format!(
         "点 {target_id} 后没能恢复：扫描前 page={};route={:?}，现在 page={};route={:?}",
         target_prefix(page).trim_end_matches('.'),
         route,
         target_prefix(current_page).trim_end_matches('.'),
         current_route
-    )
+    );
+    if matches!(route, Some(Route::Player { .. })) {
+        // 播放页的恢复**不会重开会话**（体检 R9-C9）：`play` 会替用户结束旧会话、
+        // 重新取直链并上报 Started。把这一点写进原因，体检时不必怀疑“是不是恢复器
+        // 该重开而没重开”。
+        return format!(
+            "{reason}；播放页不会重开播放会话（`player.back` 会结束会话，sweep 不做有副作用的操作）"
+        );
+    }
+    reason
 }
 
 /// sweep **永不点击**的目标——与测试里的 `KNOWN_DEAD` 并行的第二份约定：
-/// 这里列的是「点击会发起**真实网络认证**」的目标，与死活无关（体检 R9-C8）。
+/// 这里列的是「点了会**结束 / 发起真实会话**」的目标，与死活无关
+/// （体检 R9-C8 / R9-C9）。
 ///
-/// `dialog.connect` 的提交回调在上层（`nova-app`）是真的去连 `address` 指向的
-/// 服务器：对话框用 Ctrl+N 打开时会预填最近服务器的地址 / 用户名，一次体检
-/// 就是一次真实登录尝试（连带的失败文案还会写回对话框，见 R9-C4 的触发链）。
-/// 扫描只该体检界面，不该替用户登录——这类目标**跳过不点**（`skipped:true`），
-/// 行为交给手动 `click` 路径与真实用户。
-const SWEEP_NEVER_CLICK: &[&str] = &["dialog.connect"];
+/// - `dialog.connect`：提交回调在上层（`nova-app`）是真的去连 `address` 指向的
+///   服务器。对话框用 Ctrl+N 打开时会预填最近服务器的地址 / 用户名，一次体检
+///   就是一次真实登录尝试（连带的失败文案还会写回对话框，见 R9-C4 的触发链）。
+///   扫描只该体检界面，不该替用户登录；
+/// - `player.back`：点下去必然离开播放会话（`player_exit` → 上层交 `Exit`）。
+///   sweep 不做有副作用的操作——恢复器不能凭空重建 mpv，唯一"恢复"播放页的办法
+///   是重新 `play`：那会替用户结束原会话（`session_seq+1`）、在 UI 线程上
+///   `block_on` 取直链、重开 mpv、按服务端续播点起播并上报 Started，等于把
+///   "体检"变成"换了个会话"写进服务端记录。不点就永远不需要恢复，也就不会重开。
+///
+/// 这类目标**跳过不点**（`skipped:true`），行为交给手动 `click` 路径与真实用户；
+/// 播放页路由的有效性由真机体检验证（`player.back` 的手动 `click` 见
+/// `docs/debugging.md` 的「不点击清单」）。
+const SWEEP_NEVER_CLICK: &[&str] = &["dialog.connect", "player.back"];
 
 /// 扫描开始时的对话框快照：`sweep` 每轮拿它把对话框恢复成同一个起点。
 struct DialogSnapshot {
@@ -835,9 +854,10 @@ impl App {
     /// 假的"没反应"。典型例子：点「取消」真的关掉了对话框，后面的
     /// `dialog.connect` / `dialog.user` 坐标就落到被遮罩的页面上，看上去全 dead。
     ///
-    /// - 会发起真实网络认证的目标（[`SWEEP_NEVER_CLICK`]）**跳过不点**，结果里标
-    ///   `skipped`（体检 R9-C8）；
+    /// - 点了会结束 / 发起真实会话的目标（[`SWEEP_NEVER_CLICK`]：联网登录、
+    ///   离开播放会话）**跳过不点**，结果里标 `skipped`（体检 R9-C8 / R9-C9）；
     /// - 点当前所在库的标签是预期内的空操作，标 `no_op`，不算 dead（体检 R9-C6）；
+    ///   只在状态确实没变时才标；
     /// - 真的恢复不了就提前收尾：`aborted:true` + `abort_reason`，不在错位状态上接着点
     ///   （体检 R9-C2）；
     /// - 无论中途发生什么，**扫描结束时对话框的开关状态与扫描前一致**（体检 R9-C4）。
@@ -892,7 +912,8 @@ impl App {
             }
             // 点当前所在库的标签只是重建同一份视图：预期内的空操作，不算 dead
             // （体检 R9-C6）。仍要点——点都不点就无法确认它真的只是空操作。
-            let no_op = self.is_current_library_tab(&target.id);
+            // `no_op` 要等点完、知道状态有没有变才能定（见下面的 `changed`）。
+            let current_tab = self.is_current_library_tab(target);
             let (x, y) = target.center();
             let outcome = self.hover_at(x, y).and_then(|()| self.click_at(x, y));
             if let Err(error) = outcome {
@@ -905,7 +926,8 @@ impl App {
                     kind: target.kind.clone(),
                     label: target.label.clone(),
                     skipped: false,
-                    no_op,
+                    // 点击失败什么都没观察到：既不判 dead，也不标预期空操作。
+                    no_op: false,
                     changed: false,
                     restored,
                     before,
@@ -944,7 +966,9 @@ impl App {
                 kind: target.kind.clone(),
                 label: target.label.clone(),
                 skipped: false,
-                no_op,
+                // 预期空操作只在**状态确实没变**时才标：真变了就是有行为，
+                // 哪怕它是当前所在库的标签（体检 R9-C10）。
+                no_op: current_tab && !changed,
                 changed,
                 restored,
                 before,
@@ -982,22 +1006,33 @@ impl App {
     ///
     /// 点它只是把同一份库视图重建一遍：路由、页面、焦点、数据都不变，摘要自然不变。
     /// 这不是死按钮，而是与 `KNOWN_DEAD` 里"已聚焦的输入框"同一性质的预期空操作；
-    /// 它的下标随库顺序变化，没法在测试清单里写死 id，所以由扫描器识别。
-    fn is_current_library_tab(&self, id: &str) -> bool {
-        let Some(index) = id
-            .strip_prefix("library.nav.tab.")
-            .and_then(|index| index.parse::<usize>().ok())
-        else {
+    /// 它在清单里的位置随库顺序变化，没法写死 id，所以由扫描器识别。
+    ///
+    /// 判据是**库 id**，不是 id 字符串里的下标（体检 R9-C10）：`N` 只表示这个标签
+    /// 在登记清单里的位置，标签顺序一变（后台刷新重建标签、换库后重排）同一个下标
+    /// 就指向别的库——按下标比会把"真的切库"误豁免成空操作，把真死按钮藏起来。
+    /// 库 id 取自 targets 的登记信息：`Target.label` 就是 `tab.title`，用它在当前
+    /// 标签表里反查唯一的库，再和路由里的库 id 比。重名（理论上不该有）时宁可不
+    /// 豁免——多报一条 dead 可以人工确认，误豁免会掩盖真死按钮。
+    fn is_current_library_tab(&self, target: &TargetInfo) -> bool {
+        if !target.id.starts_with("library.nav.tab.") {
             return false;
+        }
+        let route_id = {
+            let state = self.state.borrow();
+            match state.nav.current() {
+                Some(Route::Library { id, .. }) => id.clone(),
+                _ => return false,
+            }
         };
         let state = self.state.borrow();
-        let Some(tab) = nav_tabs(&state, Page::Library).get(index) else {
-            return false;
-        };
-        matches!(
-            state.nav.current(),
-            Some(Route::Library { id, .. }) if *id == tab.id
-        )
+        let mut candidates = nav_tabs(&state, Page::Library)
+            .iter()
+            .filter(|tab| tab.title == target.label);
+        match (candidates.next(), candidates.next()) {
+            (Some(tab), None) => tab.id == route_id,
+            _ => false,
+        }
     }
 
     /// 把应用恢复到扫描开始时的页面 / 路由 / 对话框状态；返回是否恢复成功。
@@ -1018,11 +1053,12 @@ impl App {
     ///    局部状态，点过 `*.right` / `*.left` 会把它滚走；滚不回去，同一轮里
     ///    后面按旧坐标点这一行的卡片就会点到别的卡）。
     ///
-    /// 播放页不再是例外（体检 R9-C2）：会话（mpv）不是视图模型能凭空重建的，
-    /// 但路由可以重新压入——点过 `player.back` 离开了播放会话就重新 `play`，
-    /// 上层回调会重开会话；最终**页面与路由都必须回到扫描前**，否则报恢复失败
-    /// （调用方提前收尾），绝不在错位状态上继续扫。扫描结束后误开的播放器由
-    /// 上层（`nova-app` 的 `sweep`）收掉。
+    /// 播放页不重建会话（体检 R9-C9）：`player.back` 在 [`SWEEP_NEVER_CLICK`] 里
+    /// 跳过不点——点它就必然离开会话，而唯一的“恢复”只能是重新 `play`（等于替
+    /// 用户结束旧会话再开新的）。因此播放页的恢复只要求页面与路由**本来就别动**；
+    /// 万一还是错位了，不重开播放，直接让判据失败（调用方收尾成 `aborted:true` +
+    /// `abort_reason`），不在错位状态上继续扫。扫描期间因点到别的播放入口（首页
+    /// hero / 详情页）而起的会话仍由上层（`nova-app` 的 `sweep`）收掉。
     fn restore_after_click(
         &self,
         page: Page,
@@ -1052,9 +1088,9 @@ impl App {
         if search_text_changed {
             self.set_search_text(&views.search_text);
         }
-        // 播放页不走这段：路由栈里播放页永远在顶，没有可弹的目标；点过
-        // `player.back` 后路由已经弹到下层，再 `go_back` 只会把底下的详情页
-        // 也弹掉。回到播放页靠下面的 `play` 重建（体检 R9-C2）。
+        // 播放页不走这段：路由栈里播放页永远在顶，没有可弹的目标；而 `player.back`
+        // 已经在 [`SWEEP_NEVER_CLICK`] 里跳过，路由本就不该被带走。哪怕真被带走了，
+        // `go_back` 也只会把底下的详情页再弹掉，越修越错（体检 R9-C9）。
         if !matches!(route, Some(Route::Player { .. })) {
             for _ in 0..4 {
                 if &self.current_route() == route {
@@ -1077,15 +1113,13 @@ impl App {
                     let _ = self.open_search(&views.search);
                 }
                 Some(Route::Home) => self.show_home(),
-                // 播放会话不是视图模型，但路由可以重来：`play` 会重新压入
-                // `Player{item_id}` 并把起播交给上层回调（真机上就是重开会话）。
-                // 点过 `player.back` 后就是靠这条回到播放页的；不重建的话下面
-                // 的 `show_page` 只能把外壳硬切回去，路由却留在下层——
-                // `page=Player;route=Home` 的错位状态，后续目标全在错误的
-                // 页面上点出假 dead（体检 R9-C2）。
-                Some(Route::Player { item_id }) => {
-                    let _ = self.play(item_id);
-                }
+                // 播放页没有重建路径（体检 R9-C9）：`player.back` 已经在
+                // [`SWEEP_NEVER_CLICK`] 里跳过不点，路由本该一直停在 `Player`。
+                // 走到这里说明某个目标把路由带走了，而“恢复”只能是重新 `play`：
+                // 那会重新取直链、开 mpv、按服务端续播点起播并上报 Started，等于
+                // 替用户结束旧会话再开一个新的、还写进服务端记录。所以这里**不重开
+                // 播放**，保持现状，让下面的判据把这次记成恢复失败（调用方提前收尾）。
+                Some(Route::Player { .. }) => {}
                 None => {}
             }
         }
@@ -1099,8 +1133,9 @@ impl App {
         }
         // 恢复成功的标准是**页面与路由都回到扫描前**（体检 R9-C2）：以前播放页
         // 只要外壳回到播放页就算成功，路由错位照样继续扫，后半清单全是假 dead。
-        // 现在播放页走 `play` 重建路由；确实回不去（返回 `false`）就交由调用方
-        // 提前收尾（`aborted:true` + `abort_reason`），不在错位状态上继续扫。
+        // 现在播放页靠“根本不点 `player.back`”保持原位，不重建会话（体检 R9-C9）；
+        // 确实回不去（返回 `false`）就交由调用方提前收尾（`aborted:true` +
+        // `abort_reason`），不在错位状态上继续扫。
         &self.current_route() == route
     }
 
@@ -1813,11 +1848,22 @@ impl App {
         self.state.borrow_mut().add_server = view;
     }
 
-    /// 连接失败：回到空闲并把错误展示在错误区。
-    pub fn set_add_server_error(&self, error: AddServerError) {
+    /// 连接失败：回到空闲并把错误展示在错误区；返回是否真的写进了视图模型。
+    ///
+    /// 对话框**关着**时不写（体检 R9-C10）：用户可能在连接中途手动关掉了对话框，
+    /// 结果在关框之后才落地。以前 `AddServerView::fail` 不看 `open`，于是错误被写进
+    /// 状态（以及 Slint 属性）——下一次打开对话框时残留的字段 / 状态看起来像是这次
+    /// 尝试的产物；`sweep` 收尾还会把对话框对齐成扫描前的开 / 关状态，迟到的失败就
+    /// 会点亮一个“没人打开却带着上次错误”的框。返回 `false` 让上层记一条 warn
+    /// （`nova-ui` 是纯界面层，没有日志依赖）。
+    pub fn set_add_server_error(&self, error: AddServerError) -> bool {
+        if !self.add_server_open() {
+            return false;
+        }
         let view = self.state.borrow().add_server.clone().fail(error);
         add_server::apply(&self.ui, &view);
         self.state.borrow_mut().add_server = view;
+        true
     }
 
     /// 当前输入的地址（测试与上层读取用）。
