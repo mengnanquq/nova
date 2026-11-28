@@ -19,6 +19,13 @@ Unix socket，**行分隔 JSON**，一问一答。用 `socat`/`nc -U` 每次连�
 printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 ```
 
+**流水线发送时要逐条读回应答**（体检 R9-A1）：服务端读一行 → 执行 → 回一行，再读下一行；
+回写失败（客户端已经把连接关了）就 `break`，**还没读到的后续命令一条都不会执行**。
+所以 `printf '{...}\n{...}\n' | socat ...` 只会在你读完回包的情况下才可靠：要么
+一条命令开一个连接（推荐），要么把多条粘在同一个连接里但务必把每行回包都读掉。
+提前关连接看到的“命令没生效”不是命令的 bug，是后面的命令根本没跑（实现见
+`crates/nova-app/src/debug.rs` 的 `handle`：写回失败即 `break`）。
+
 | 命令 | 作用 |
 |---|---|
 | `{"cmd":"view"}` | 当前路由、连接状态、首页/库/详情摘要（含标签列表与数量） |
@@ -39,8 +46,8 @@ printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/nova.sock
 | `{"cmd":"type","text":"沙丘"}` | 逐字符输入：每个字符作为按键事件直接送给**当前焦点**，不预点击（无输入目标的页面也不会落空） |
 | `{"cmd":"type","text":"沙丘","target":"search.input"}` | 同上，但先点一下 `target`（输入框不在当前焦点上时用；坐标按 `targets` 的最新登记） |
 | `{"cmd":"wait","ms":400}` | 在 UI 线程上**不阻塞**地等一段时间（动画 / 异步加载结算）|
-| `{"cmd":"sweep"}` | 对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化（行箭头另看点击计数，见下文） |
-| `{"cmd":"dead"}` | `sweep` 的过滤版：只返回"点击后状态没有任何变化"的目标（行箭头同上） |
+| `{"cmd":"sweep"}` | 对当前页每个目标"悬停 → 点击"，记录状态摘要是否变化（行箭头另看点击计数，不点击清单直接跳过，见下文） |
+| `{"cmd":"dead"}` | `sweep` 的过滤版：只返回"点击后状态没有任何变化"的目标（行箭头同上）；回包里带 `skipped` / `no_op` 标记的那几项**不算 dead** |
 | `{"cmd":"quit"}` | 退出 |
 
 ### 目标清单长什么样
@@ -258,16 +265,28 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 
    ```json
    {"ok":true,"page":"library","count":37,"changed":34,"aborted":false,
-    "dead":[{"id":"library.nav.tab.1","kind":"tab","label":"电影"}],
+    "abort_reason":null,
+    "dead":[],
     "audio_restored":true,
     "results":[{"id":"library.sort","kind":"button","label":"排序：最近添加  ▼",
-                "changed":true,"restored":true,"before":"…","after":"…"}]}
+                "changed":true,"restored":true,"skipped":false,"no_op":false,
+                "before":"…","after":"…"},
+               {"id":"library.nav.tab.1","kind":"tab","label":"电影",
+                "changed":false,"restored":true,"skipped":false,"no_op":true,
+                "before":"…","after":"…"}]}
    ```
 
    - `changed:false` **不是失败**：有的按钮只改局部状态（悬停态），有的是"点当前项"的空操作；
+     下面的 `skipped` / `no_op` 两条豁免说明了哪两种不算 dead；
    - 每条都带 `kind` / `label`，方便人工核对；
-   - `restored:false` 表示点击把应用带到了回不去的状态（例如播放会话，mpv 没法凭空
-     重建），扫描会提前收尾（`aborted:true`）——这时先手动 `route` 回原页再继续；
+   - `restored:false` 表示点击把应用带到了回不去的状态（页面或路由回不到扫描前），
+     扫描会提前收尾（`aborted:true`），并在 `abort_reason` 里写明**是在哪一项之后**、
+     扫描前是什么 `page`/`route`、现在错位成了什么（体检 R9-C2）——这时先对着
+     `abort_reason` 手动 `route` 回原页再继续；
+   - `skipped:true`：**故意不点**的目标，见下面「不点击清单」。它既不判 dead，也不代表
+     控件有行为；`changed` 恒为 `false`（因为根本没点）；
+   - `no_op:true`：点了、状态也没变，但是**预期内的空操作**（点当前所在的库标签，
+     体检 R9-C6）——重建的是同一份视图，不该记成 dead；
    - 恢复器除了路由 / 页面 / 对话框，还会把**视图模型**放回扫描前的那一份：点顶栏标签
      会换库（栈顶被替换）、点 `search.clear` 会清空查询词并回首页，这两类点击现在都能
      回到被扫描的页面（R8-C2；以前 `library.nav.tab.*` / `search.clear` 之后
@@ -293,8 +312,10 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
      也不当作交出了滚动请求。边界：箭头本身显示不显示已经由 `can-scroll`
      控制（`arrow-left-on` / `arrow-right-on`，不可滚动的箭头不登记进 `targets`），
      所以这一项只能识别出“回调断了”那种真死，看不到滚动方向 / 距离是否合理；
-   - `audio_restored`：sweep 会点到音量 / 静音，扫完会把音量与静音改回去；`true` = 已经
-     恢复成扫描前的值，`false` = 没恢复成功（真机上出现就是 bug，不能忽略）。
+   - `audio_restored`：**扫描结束时音量 / 静音与扫描前一致**（体检 R9-C3）。扫描会点到
+     音量 / 静音，扫完会把两者改回去；`true` = 一致（包括根本没改过、无需恢复的
+     库页 / 搜索页 / 详情页），`false` = 扫描结束后仍与扫描前不同（真机上出现就是 bug，
+     同时日志里会有一条 `交互扫描改了音量 / 静音，恢复后仍与扫描前不同` 的 warn）。
 
 **恢复器的边界**（知道这些才好判断 `sweep` 的结果）：
 
@@ -306,8 +327,14 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
   纵向滚动位置。`sweep` 自己不会动它们（不走滚轮、不按键、不拖拽），但**点击**会：
   点卡片会把键盘焦点挪过去，点箭头会改行内横向滚动（这一项已经恢复，见上）；
   点库标签会换库，`set_library` 会把媒体库网格的纵向滚动归零（换库本来就要回到顶部）。
-- 播放页只要求“回到播放页”：播放会话（mpv）不是视图模型能重建的，误开的播放器由
-  上层（`nova-app`）在扫描结束后收掉；音量 / 静音另由 `audio_restored` 报告。
+- 播放页**不再是例外**（体检 R9-C2）：恢复的判据统一是「页面**与路由**都回到扫描前」。
+  播放会话（mpv）不是视图模型能重建的，但路由可以重来：点过 `player.back` 离开了播放页，
+  恢复器会重新 `play` 把 `Player{item_id}` 压回去（真机上就是重开会话，代价是重新起播）。
+  以前播放页只要外壳回到播放页就算恢复，路由却留在下层（`page=3;route=Some(Home)`），
+  后半目标全在错位状态上点——扫出一堆假 dead（progress / seek-forward / subtitles / time /
+  fullscreen），而报告里 `aborted:false`、`restored:false` 一个也没有。现在回不去就
+  报 `aborted:true` + `abort_reason`，不继续扫。误开的播放器仍由上层（`nova-app`）在
+  扫描结束后收掉；音量 / 静音另由 `audio_restored` 报告。
 
 4. 只看"死按钮"，适合 CI / 人工核对：
 
@@ -322,15 +349,34 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
    printf '{"cmd":"view"}\n' | socat - UNIX-CONNECT:/tmp/t.sock   # library.sort 变了没有
    ```
 
-**空表单不会真的联网**：用户名为空时 `sweep` 点 `dialog.connect` 只会在错误区留下
+**空表单不会真的联网**：用户名为空时手动点 `dialog.connect` 只会在错误区留下
 「请填写用户名」（本地校验，R8-C4）；地址为空 / 不合规时按钮本身是禁用态、不在
 `targets` 里，也就不会被点到。这条提示会在**用户名改成有效值后立刻消失**（用户编辑回调清掉
 `MissingUser`），不用再点一次「连接」；把名字删空 / 只剩空格时提示会**留着**；密码留空是
 合法输入（Emby / Jellyfin 允许空密码账号）。
 
-**sweep 会真的点所有东西**，所以它也会点「播放」「全屏」「连接」这类有副作用的按钮：
-播放会被收掉、对话框会被关掉、全屏会被恢复，但**连接的服务器/写盘操作不会被撤销**。
-在真实服务器上跑之前先想清楚（或者只 `click` 具体目标）。
+**不点击清单**（`SWEEP_NEVER_CLICK`，体检 R9-C8）：`dialog.connect` 是**唯一**一个
+`sweep` 故意不点的目标。提交回调在上层（`nova-app` 的 `Shell::submit_add_server`）是
+真的去连 `address` 指向的服务器；对话框用 Ctrl+N 打开时会预填最近服务器的地址 /
+用户名（密码从不存，所以是空），于是体检一次就是一次**真实登录尝试**。结果里它照样
+出现，带 `skipped:true`、`changed:false`，不算 dead。要验证提交行为，请手动
+`click {"target":"dialog.connect"}`（或者直接用人点）。
+
+清单只有这一个目标是有原因的：其余“有副作用”的点击（播放 / 全屏 / 音量 / 静音 / 切库 /
+切排序）都能在扫描后恢复或不影响用户数据；登录会在服务端留下记录（还可能写库），只能
+由人决定。新增目标时如果它也不可撤销，就加进这份清单，并在文档里写明理由。
+
+**对话框的开关状态与扫描前一致**（体检 R9-C4）：扫描前开着就扫完还开着（每轮恢复都会
+按快照重开：字段 / 焦点 / 状态机复位），扫描前没开就扫完仍然关着——提前收尾 / 点击失败
+的路径跳过了某一轮恢复时，`sweep` 收尾会再对齐一次。以前 sweep 结束时会留下一个“没人
+打开却开着、带预填与上次错误文案”的对话框：它点了 `dialog.connect` 发起真实登录，失败
+结果在扫描**结束之后**落地，`set_add_server_error` 把错误写进恢复出来的那个开着的对话框
+（`AddServerView::fail` 不改 `open`）——于是下一次 `sweep` 扫到的全是 `dialog.*`，还会再点
+一次「连接」。现在这两条都断了：不点 connect（不产生登录）+ 收尾对齐开关状态。
+
+**`sweep` 还是会点「播放」「全屏」这类有副作用的按钮**：播放会被收掉、全屏会被恢复、
+对话框的开关按扫描前对齐，但**连接的服务器 / 写盘操作不会被撤销**（除了上面清单里的
+登录）。在真实服务器上跑之前先想清楚（或者只 `click` 具体目标）。
 
 ## 典型用法
 

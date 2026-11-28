@@ -68,8 +68,14 @@ struct Scan {
     dead: Vec<(String, String, String)>,
     /// 是否因为"页面回不去"提前收尾（恢复器失败）。
     aborted: bool,
+    /// 提前收尾的原因（`aborted` 为真时必为 `Some`）。
+    abort_reason: Option<String>,
     /// 点击后没能恢复原状的目标（空 = 每一项都恢复了）。
     unrestored: Vec<String>,
+    /// 因为会发起真实网络认证而被跳过不点的目标（`SWEEP_NEVER_CLICK`）。
+    skipped: Vec<String>,
+    /// 点完属于"预期内空操作"的目标（例如当前所在的库标签）。
+    no_ops: Vec<String>,
 }
 
 fn server_info() -> ServerInfo {
@@ -299,10 +305,23 @@ fn scan(app: &Rc<App>) -> Scan {
             .map(|entry| (report.page.clone(), entry.id.clone(), entry.label.clone()))
             .collect(),
         aborted: report.aborted,
+        abort_reason: report.abort_reason.clone(),
         unrestored: report
             .entries
             .iter()
             .filter(|entry| !entry.restored)
+            .map(|entry| entry.id.clone())
+            .collect(),
+        skipped: report
+            .entries
+            .iter()
+            .filter(|entry| entry.skipped)
+            .map(|entry| entry.id.clone())
+            .collect(),
+        no_ops: report
+            .entries
+            .iter()
+            .filter(|entry| entry.no_op)
             .map(|entry| entry.id.clone())
             .collect(),
     }
@@ -520,9 +539,12 @@ fn sweep_restores_the_player_volume_and_mute() {
         before,
         "扫描后音量与静音都要回到扫描前的值（顺序：先音量再静音）"
     );
+    // 体检 R9-C3：返回值是“**扫描结束时音频与扫描前一致**”，不是“恢复器动过界面
+    // 没有”。已经一致时也必须返回 true，否则没有音频改动的页面（库 / 搜索 / 详情）
+    // 永远报 `audio_restored=false`，看起来像恢复失败。
     assert!(
-        !restore_player_audio(&app, before),
-        "已经是快照值时不该再动界面"
+        restore_player_audio(&app, before),
+        "已经是快照值 = 一致，必须返回 true（R9-C3）"
     );
 }
 
@@ -625,4 +647,212 @@ fn sweep_restores_the_search_page_after_clearing_the_query() {
     assert_eq!(app.current_route(), route, "路由应回到原来的查询词");
     assert_eq!(app.search_view().term, "沙丘", "搜索视图也要恢复");
     assert_eq!(app.search_text(), "沙丘", "搜索框文字也要恢复");
+}
+
+/// 体检 R9-C2：播放页 sweep 点过 `player.back` 之后必须把**页面与路由**都放回
+/// 扫描前，而不是只把外壳切回播放页（真机上是 `page=3;route=Some(Home)`）。
+///
+/// 修复前 `restore_after_click` 对播放页只要求"外壳回到播放页"，路由留在下层；
+/// 后半目标在错位状态上按旧坐标点，点出 5 个假 dead，而报告里 `aborted=false`、
+/// `restored=false`=0，看起来一切正常。
+///
+/// 这里**不断言 dead**：播放页有一批目标本来就改不了状态摘要（进度 / ±15s / 时间
+/// 显示 / 全屏改的是 `position` / `time_mode` / 窗口属性，摘要里都没有这几个字段），
+/// 它们是不是 dead 与本条回归无关；本条锁的是「页面 + 路由都回来」这个契约。
+#[test]
+fn player_sweep_restores_the_page_and_route_after_going_back() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Detail, 0.88);
+    let plays = Rc::new(RefCell::new(Vec::new()));
+    {
+        let plays = Rc::clone(&plays);
+        app.on_play(move |id| plays.borrow_mut().push(id.to_owned()));
+    }
+    let Some(Route::Detail { item_id }) = app.current_route() else {
+        panic!("前提：扫描前停在详情页（{:?}）", app.current_route());
+    };
+    assert!(app.play(&item_id), "起播：压入 Player 路由");
+    let route = app.current_route();
+    assert_eq!(
+        route,
+        Some(Route::Player {
+            item_id: item_id.clone()
+        }),
+        "前提：扫描前停在播放页"
+    );
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "player");
+    assert!(
+        scan.ids.iter().any(|id| id == "player.back"),
+        "清单里应有 player.back：{:?}",
+        scan.ids
+    );
+    // back 在清单前部：点过它之后后面的控件仍要被扫到（恢复器不中断、坐标也不偏移）。
+    for id in [
+        "player.play-pause",
+        "player.fullscreen",
+        "player.progress",
+        "player.time",
+    ] {
+        assert!(
+            scan.ids.iter().any(|entry| entry == id),
+            "player.back 之后漏掉了 {id}（清单：{:?}）",
+            scan.ids
+        );
+    }
+    assert!(!scan.aborted, "不该提前收尾：{:?}", scan.abort_reason);
+    assert!(
+        scan.abort_reason.is_none(),
+        "没提前收尾就不该有原因：{:?}",
+        scan.abort_reason
+    );
+    assert!(
+        scan.unrestored.is_empty(),
+        "每一项都要能恢复：{:?}",
+        scan.unrestored
+    );
+    assert_eq!(app.page(), Page::Player, "扫描结束要回到播放页");
+    assert_eq!(
+        app.current_route(),
+        route,
+        "路由也要回到播放页——只回外壳就是 R9-C2 的错位状态"
+    );
+    assert!(
+        app.target("player.back").is_some(),
+        "扫描结束后播放页的控件仍应是可点目标"
+    );
+    assert!(
+        plays.borrow().len() >= 2,
+        "恢复播放页要重新起播（扫描开始时一次 + 点过 player.back 后一次）：{:?}",
+        plays.borrow()
+    );
+}
+
+/// 体检 R9-C6：点**当前所在库**的标签是预期内的空操作（重建同一份视图），不该记成
+/// dead；它的下标随库顺序变化，没法像 `KNOWN_DEAD` 那样写死 id，所以由扫描器识别。
+#[test]
+fn library_sweep_marks_the_current_tab_as_an_expected_noop() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Home, 0.2);
+    // 经真实导航入口进库页：路由栈顶才是 `Library{movies}`（`show_page` 只改外壳）。
+    let view = local
+        .library("movies", None, LibrarySort::default())
+        .expect("媒体库");
+    assert!(app.open_library(&view), "打开媒体库");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Library {
+            id: "movies".to_owned(),
+            title: "电影".to_owned(),
+        }),
+        "前提：当前库是「电影」，对应 library.nav.tab.1"
+    );
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    assert_eq!(
+        scan.no_ops,
+        vec!["library.nav.tab.1".to_owned()],
+        "只有当前所在库的标签是预期空操作（清单：{:?}）",
+        scan.ids
+    );
+    assert!(
+        !scan.dead.iter().any(|(_, id, _)| id == "library.nav.tab.1"),
+        "当前库标签不该再记成 dead：{:?}",
+        scan.dead
+    );
+    assert!(scan.dead.is_empty(), "库页不该有 dead：{:?}", scan.dead);
+    // 别的标签仍然要扫（切库会换视图），不能把整排标签都当成 no-op。
+    for id in ["library.nav.tab.0", "library.nav.tab.2"] {
+        assert!(scan.ids.iter().any(|entry| entry == id), "缺少标签 {id}");
+        assert!(
+            !scan.no_ops.iter().any(|entry| entry == id),
+            "{id} 不是当前库标签，不该被豁免成 no-op"
+        );
+    }
+}
+
+/// 体检 R9-C8 / R9-C4：`sweep` 不能点 `dialog.connect`——它在上层是真的联网登录。
+///
+/// 触发链（从代码推出，R9-C4）：对话框由 Ctrl+N 打开时 `Shell::open_add_server` 会
+/// 预填最近服务器的地址 / 用户名 → sweep 点 `dialog.connect` →
+/// `Shell::submit_add_server` → `connect(...)` 真的发请求；结果在 sweep 结束**之后**
+/// 才落地，`apply_add_server` → `set_add_server_error` 把「用户名或密码不对」写进
+/// sweep 恢复出来的那个**开着的**对话框（`AddServerView::fail` 不改 `open`）。
+/// 下一次体检看到的就是"没人打开却开着、带预填与上次错误"的对话框，并会再点一次
+/// `dialog.connect`。这里断言扫描一次都不触发提交回调，且对话框保持扫描前的状态。
+#[test]
+fn sweep_never_submits_the_add_server_form() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Library, 0.88);
+    let submits = Rc::new(RefCell::new(0usize));
+    {
+        let submits = Rc::clone(&submits);
+        let handler_app = Rc::clone(&app);
+        app.on_add_server_submit(move |_address, _user, _password| {
+            *submits.borrow_mut() += 1;
+            handler_app.begin_add_server_connecting();
+        });
+    }
+    // 上限：地址 / 用户名都有值（真实 Ctrl+N 的预填就是这种状态），密码为空。
+    app.open_add_server("http://127.0.0.1:8096", "nova");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(200));
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    assert!(
+        scan.ids.iter().any(|id| id == "dialog.connect"),
+        "连接按钮在清单里（可提交才登记）：{:?}",
+        scan.ids
+    );
+    assert_eq!(
+        *submits.borrow(),
+        0,
+        "sweep 替用户发了 {} 次真实登录（R9-C8：dialog.connect 必须跳过）",
+        submits.borrow()
+    );
+    assert_eq!(
+        scan.skipped,
+        vec!["dialog.connect".to_owned()],
+        "跳过不点的目标要留在结果里并标 skipped"
+    );
+    assert!(
+        !scan.dead.iter().any(|(_, id, _)| id == "dialog.connect"),
+        "跳过 ≠ dead：{:?}",
+        scan.dead
+    );
+    // R9-C4：扫描结束时对话框的开关 / 字段与扫描前一致。
+    assert!(app.add_server_open(), "对话框要保持扫描前的打开态");
+    assert_eq!(app.add_server_address(), "http://127.0.0.1:8096");
+    assert_eq!(app.add_server_user(), "nova");
+}
+
+/// 体检 R9-C4：扫描前没开对话框的页面，扫完也不能把对话框留在屏幕上。
+///
+/// 留着的后果是下一次 `sweep` 扫到的全是 `dialog.*`（浮层遮住整页），
+/// 而用户根本没有打开它。
+#[test]
+fn sweep_keeps_the_dialog_closed_when_it_started_closed() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Library, 0.88);
+    assert!(!app.add_server_open(), "前提：扫描前没有对话框");
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "library");
+    assert!(!scan.aborted, "不该提前收尾：{:?}", scan.abort_reason);
+    assert!(
+        !app.add_server_open(),
+        "sweep 不能凭空把「添加服务器」对话框留在屏幕上（R9-C4）"
+    );
+    assert!(
+        scan.ids.iter().all(|id| !id.starts_with("dialog.")),
+        "没有对话框时清单里不该出现 dialog.*：{:?}",
+        scan.ids
+    );
 }

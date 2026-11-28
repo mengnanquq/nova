@@ -400,6 +400,12 @@ impl From<Target> for TargetInfo {
 /// 一次交互扫描的单项结果。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepEntry {
+    /// 这次点击被**跳过**（见 [`SWEEP_NEVER_CLICK`]）：没有点、不判 dead，
+    /// 列在结果里是为了让体检看得见「清单里有它、但我们故意不碰」。
+    pub skipped: bool,
+    /// 这次点击是**预期内的空操作**（点当前所在的库标签）：点了、状态没变，
+    /// 但这是「已经选中」的语义，不判 dead（体检 R9-C6）。
+    pub no_op: bool,
     /// 目标 id。
     pub id: String,
     /// 控件类型。
@@ -432,14 +438,53 @@ pub struct SweepReport {
     pub entries: Vec<SweepEntry>,
     /// 是否因为"页面回不去"而提前收尾。
     pub aborted: bool,
+    /// 提前收尾的原因（`aborted == true` 时必为 `Some`）：哪一项之后、页面 / 路由
+    /// 错位成了什么。写在报告里，体检时不必反推（体检 R9-C2）。
+    pub abort_reason: Option<String>,
 }
 
 impl SweepReport {
-    /// 点完状态完全没变的目标（"死按钮"候选）。
+    /// 点完状态完全没变的目标（"死按钮"候选）。被跳过的目标（
+    /// [`SWEEP_NEVER_CLICK`]）没点过、点当前库标签的预期空操作
+    /// （[`SweepEntry::no_op`]）本来就不该有变化，两者都不算 dead。
     pub fn dead(&self) -> Vec<&SweepEntry> {
-        self.entries.iter().filter(|entry| !entry.changed).collect()
+        self.entries
+            .iter()
+            .filter(|entry| !entry.changed && !entry.skipped && !entry.no_op)
+            .collect()
     }
 }
+
+/// 恢复失败时的收尾说明（体检 R9-C2）。
+///
+/// 早期只报一个 `aborted:true`：看得出停了、看不出为什么停，也看不出是在哪一项之后
+/// 停的。这里把「哪一项 / 原本应该是什么页与路由 / 现在错位成什么」写成一句话，
+/// 体检时能直接对着它手动 `route` 回去。
+fn restore_failure_reason(
+    target_id: &str,
+    page: Page,
+    route: &Option<Route>,
+    current_page: Page,
+    current_route: &Option<Route>,
+) -> String {
+    format!(
+        "点 {target_id} 后没能恢复：扫描前 page={};route={:?}，现在 page={};route={:?}",
+        target_prefix(page).trim_end_matches('.'),
+        route,
+        target_prefix(current_page).trim_end_matches('.'),
+        current_route
+    )
+}
+
+/// sweep **永不点击**的目标——与测试里的 `KNOWN_DEAD` 并行的第二份约定：
+/// 这里列的是「点击会发起**真实网络认证**」的目标，与死活无关（体检 R9-C8）。
+///
+/// `dialog.connect` 的提交回调在上层（`nova-app`）是真的去连 `address` 指向的
+/// 服务器：对话框用 Ctrl+N 打开时会预填最近服务器的地址 / 用户名，一次体检
+/// 就是一次真实登录尝试（连带的失败文案还会写回对话框，见 R9-C4 的触发链）。
+/// 扫描只该体检界面，不该替用户登录——这类目标**跳过不点**（`skipped:true`），
+/// 行为交给手动 `click` 路径与真实用户。
+const SWEEP_NEVER_CLICK: &[&str] = &["dialog.connect"];
 
 /// 扫描开始时的对话框快照：`sweep` 每轮拿它把对话框恢复成同一个起点。
 struct DialogSnapshot {
@@ -789,6 +834,13 @@ impl App {
     /// 播放页退回原路由），否则后续目标的坐标会落在已经换掉的页面上，得到一堆
     /// 假的"没反应"。典型例子：点「取消」真的关掉了对话框，后面的
     /// `dialog.connect` / `dialog.user` 坐标就落到被遮罩的页面上，看上去全 dead。
+    ///
+    /// - 会发起真实网络认证的目标（[`SWEEP_NEVER_CLICK`]）**跳过不点**，结果里标
+    ///   `skipped`（体检 R9-C8）；
+    /// - 点当前所在库的标签是预期内的空操作，标 `no_op`，不算 dead（体检 R9-C6）；
+    /// - 真的恢复不了就提前收尾：`aborted:true` + `abort_reason`，不在错位状态上接着点
+    ///   （体检 R9-C2）；
+    /// - 无论中途发生什么，**扫描结束时对话框的开关状态与扫描前一致**（体检 R9-C4）。
     pub fn sweep(&self) -> SweepReport {
         let page = self.page();
         let route = self.current_route();
@@ -819,20 +871,57 @@ impl App {
         let targets = self.targets();
         let mut entries = Vec::new();
         let mut aborted = false;
+        let mut abort_reason = None;
         for target in &targets {
             let before = self.state_digest();
-            let (x, y) = target.center();
-            let outcome = self.hover_at(x, y).and_then(|()| self.click_at(x, y));
-            if let Err(error) = outcome {
+            // 「不点击清单」（R9-C8）：会发起真实网络认证的目标跳过不点，
+            // 但留在结果里并标记 `skipped`，让体检看得见为什么不扫它。
+            if SWEEP_NEVER_CLICK.contains(&target.id.as_str()) {
                 entries.push(SweepEntry {
                     id: target.id.clone(),
                     kind: target.kind.clone(),
                     label: target.label.clone(),
+                    skipped: true,
+                    no_op: false,
                     changed: false,
                     restored: true,
+                    after: before.clone(),
+                    before,
+                });
+                continue;
+            }
+            // 点当前所在库的标签只是重建同一份视图：预期内的空操作，不算 dead
+            // （体检 R9-C6）。仍要点——点都不点就无法确认它真的只是空操作。
+            let no_op = self.is_current_library_tab(&target.id);
+            let (x, y) = target.center();
+            let outcome = self.hover_at(x, y).and_then(|()| self.click_at(x, y));
+            if let Err(error) = outcome {
+                // 点击本身失败（目标被裁掉 / 已离屏）也要恢复：失败前可能已经悬停到了
+                // 别的卡上，而且对话框 / 页面不能留在半成品状态（体检 R9-C4）。
+                let restored =
+                    self.restore_after_click(page, &route, dialog.as_ref(), &views, &rows.offsets);
+                entries.push(SweepEntry {
+                    id: target.id.clone(),
+                    kind: target.kind.clone(),
+                    label: target.label.clone(),
+                    skipped: false,
+                    no_op,
+                    changed: false,
+                    restored,
                     before,
                     after: format!("error: {error}"),
                 });
+                if !restored {
+                    aborted = true;
+                    abort_reason = Some(restore_failure_reason(
+                        &target.id,
+                        page,
+                        &route,
+                        self.page(),
+                        &self.current_route(),
+                    ));
+                    break;
+                }
                 continue;
             }
             let after = self.state_digest();
@@ -854,6 +943,8 @@ impl App {
                 id: target.id.clone(),
                 kind: target.kind.clone(),
                 label: target.label.clone(),
+                skipped: false,
+                no_op,
                 changed,
                 restored,
                 before,
@@ -862,14 +953,51 @@ impl App {
             if !restored {
                 // 页面回不去，后面每个目标的坐标都不可信：提前收尾并说明原因。
                 aborted = true;
+                abort_reason = Some(restore_failure_reason(
+                    &target.id,
+                    page,
+                    &route,
+                    self.page(),
+                    &self.current_route(),
+                ));
                 break;
             }
+        }
+        // 对话框的开关状态必须与扫描前一致（体检 R9-C4）：中途提前收尾 / 点击失败的
+        // 路径可能跳过了某一轮的对话框恢复；扫描是体检工具，不能自己把浮层留在
+        // 屏幕上（否则下一次 `sweep` 扫到的就是一层没人打开的 `dialog.*`）。
+        let dialog_open = self.ui.get_add_server_open();
+        if dialog_open != dialog.is_some() {
+            self.restore_dialog(dialog.as_ref());
         }
         SweepReport {
             page: target_prefix(page).trim_end_matches('.').to_owned(),
             entries,
             aborted,
+            abort_reason,
         }
+    }
+
+    /// 顶栏标签 `library.nav.tab.N` 是不是**当前所在库**的标签（体检 R9-C6）。
+    ///
+    /// 点它只是把同一份库视图重建一遍：路由、页面、焦点、数据都不变，摘要自然不变。
+    /// 这不是死按钮，而是与 `KNOWN_DEAD` 里"已聚焦的输入框"同一性质的预期空操作；
+    /// 它的下标随库顺序变化，没法在测试清单里写死 id，所以由扫描器识别。
+    fn is_current_library_tab(&self, id: &str) -> bool {
+        let Some(index) = id
+            .strip_prefix("library.nav.tab.")
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            return false;
+        };
+        let state = self.state.borrow();
+        let Some(tab) = nav_tabs(&state, Page::Library).get(index) else {
+            return false;
+        };
+        matches!(
+            state.nav.current(),
+            Some(Route::Library { id, .. }) if *id == tab.id
+        )
     }
 
     /// 把应用恢复到扫描开始时的页面 / 路由 / 对话框状态；返回是否恢复成功。
@@ -890,9 +1018,11 @@ impl App {
     ///    局部状态，点过 `*.right` / `*.left` 会把它滚走；滚不回去，同一轮里
     ///    后面按旧坐标点这一行的卡片就会点到别的卡）。
     ///
-    /// 播放页是例外：播放会话（mpv）不是视图模型能凭空重建的，所以只要页面回到
-    /// 播放页就算恢复成功（路由可能已经变成上一条）；调用方（`nova-app` 的
-    /// `sweep`）会在扫描结束后收掉误开的播放器。
+    /// 播放页不再是例外（体检 R9-C2）：会话（mpv）不是视图模型能凭空重建的，
+    /// 但路由可以重新压入——点过 `player.back` 离开了播放会话就重新 `play`，
+    /// 上层回调会重开会话；最终**页面与路由都必须回到扫描前**，否则报恢复失败
+    /// （调用方提前收尾），绝不在错位状态上继续扫。扫描结束后误开的播放器由
+    /// 上层（`nova-app` 的 `sweep`）收掉。
     fn restore_after_click(
         &self,
         page: Page,
@@ -901,23 +1031,7 @@ impl App {
         views: &ViewSnapshot,
         row_scrolls: &[(i32, f32)],
     ) -> bool {
-        match dialog {
-            // 扫描前开着：先关（复位状态机 / 清密码）再按快照重开，保证每个目标
-            // 的起点完全一致（焦点 = 地址框、状态 = 空闲、字段不变）。
-            Some(snapshot) => {
-                self.close_add_server();
-                self.open_add_server(&snapshot.address, &snapshot.user);
-                if !snapshot.password.is_empty() {
-                    self.ui
-                        .set_add_server_password(snapshot.password.as_str().into());
-                }
-            }
-            None => {
-                if self.ui.get_add_server_open() {
-                    self.close_add_server();
-                }
-            }
-        }
+        self.restore_dialog(dialog);
         // 先放回扫描前的视图模型：点标签会换库、点「清除搜索」会清空查询词，
         // 这些点击改的是视图本身，只恢复路由会重建出点击后的页面（R8-C2）。
         // 值没变就不写：这些 setter 都会重建界面（图片窗口重建 / 换库时归零滚动）。
@@ -938,12 +1052,17 @@ impl App {
         if search_text_changed {
             self.set_search_text(&views.search_text);
         }
-        for _ in 0..4 {
-            if &self.current_route() == route {
-                break;
-            }
-            if !self.go_back() {
-                break;
+        // 播放页不走这段：路由栈里播放页永远在顶，没有可弹的目标；点过
+        // `player.back` 后路由已经弹到下层，再 `go_back` 只会把底下的详情页
+        // 也弹掉。回到播放页靠下面的 `play` 重建（体检 R9-C2）。
+        if !matches!(route, Some(Route::Player { .. })) {
+            for _ in 0..4 {
+                if &self.current_route() == route {
+                    break;
+                }
+                if !self.go_back() {
+                    break;
+                }
             }
         }
         if &self.current_route() != route {
@@ -958,8 +1077,16 @@ impl App {
                     let _ = self.open_search(&views.search);
                 }
                 Some(Route::Home) => self.show_home(),
-                // 播放会话无法重建，交给下面的页面检查。
-                Some(Route::Player { .. }) | None => {}
+                // 播放会话不是视图模型，但路由可以重来：`play` 会重新压入
+                // `Player{item_id}` 并把起播交给上层回调（真机上就是重开会话）。
+                // 点过 `player.back` 后就是靠这条回到播放页的；不重建的话下面
+                // 的 `show_page` 只能把外壳硬切回去，路由却留在下层——
+                // `page=Player;route=Home` 的错位状态，后续目标全在错误的
+                // 页面上点出假 dead（体检 R9-C2）。
+                Some(Route::Player { item_id }) => {
+                    let _ = self.play(item_id);
+                }
+                None => {}
             }
         }
         if self.page() != page {
@@ -970,7 +1097,35 @@ impl App {
         if self.page() != page {
             return false;
         }
-        &self.current_route() == route || page == Page::Player
+        // 恢复成功的标准是**页面与路由都回到扫描前**（体检 R9-C2）：以前播放页
+        // 只要外壳回到播放页就算成功，路由错位照样继续扫，后半清单全是假 dead。
+        // 现在播放页走 `play` 重建路由；确实回不去（返回 `false`）就交由调用方
+        // 提前收尾（`aborted:true` + `abort_reason`），不在错位状态上继续扫。
+        &self.current_route() == route
+    }
+
+    /// 把「添加服务器」对话框恢复成扫描开始时的开关状态与字段（体检 R9-C4）。
+    ///
+    /// 扫描前开着：先关（复位状态机 / 清密码）再按快照重开，保证每个目标的起点
+    /// 完全一致（焦点 = 地址框、状态 = 空闲、字段不变）；扫描前没开：关掉被点开的。
+    /// 除了 `restore_after_click` 每轮调一次，`sweep` 收尾还会再对齐一次——提前
+    /// 收尾 / 点击失败的路径可能跳过某一轮的恢复，而体检工具不能把浮层留在屏幕上。
+    fn restore_dialog(&self, dialog: Option<&DialogSnapshot>) {
+        match dialog {
+            Some(snapshot) => {
+                self.close_add_server();
+                self.open_add_server(&snapshot.address, &snapshot.user);
+                if !snapshot.password.is_empty() {
+                    self.ui
+                        .set_add_server_password(snapshot.password.as_str().into());
+                }
+            }
+            None => {
+                if self.ui.get_add_server_open() {
+                    self.close_add_server();
+                }
+            }
+        }
     }
 
     /// 读一次首页各行的行内横向状态（偏移 + 箭头点击计数）。
@@ -3631,8 +3786,34 @@ fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey)
 
 #[cfg(test)]
 mod tests {
-    use super::{arrow_row_key, arrow_scroll_clicked, is_row_scroll_target};
+    use super::{
+        arrow_row_key, arrow_scroll_clicked, is_row_scroll_target, restore_failure_reason,
+    };
+    use crate::Page;
+    use crate::viewmodel::Route;
     use std::collections::BTreeMap;
+
+    /// 体检 R9-C2：提前收尾必须写清“谁之后 / 原本是什么 / 现在错位成什么”，
+    /// 不能只给一个 `aborted:true` 让人反推。
+    #[test]
+    fn abort_reason_names_the_target_and_the_mismatch() {
+        let route = Some(Route::Player {
+            item_id: "6489".to_owned(),
+        });
+        let now = Some(Route::Home);
+        let reason =
+            restore_failure_reason("player.back", Page::Player, &route, Page::Player, &now);
+        assert!(reason.contains("player.back"), "要写明是哪一项：{reason}");
+        assert!(
+            reason.contains("Player { item_id: \"6489\" }"),
+            "要写明扫描前的路由：{reason}"
+        );
+        assert!(reason.contains("Some(Home)"), "要写明现在的路由：{reason}");
+        assert!(
+            reason.contains("page=player"),
+            "页面名用与 `sweep` 回包同一个口径：{reason}"
+        );
+    }
 
     #[test]
     fn row_arrow_ids_map_to_the_home_row_keys() {

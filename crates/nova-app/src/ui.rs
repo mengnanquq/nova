@@ -1218,9 +1218,10 @@ impl Shell {
         let was_fullscreen = self.app.player_fullscreen();
         let had_player = self.player.borrow().is_some();
         let (restored, report) = sweep_preserving_audio(&self.app, || self.app.sweep());
-        // 恢复结果不再丢掉：`restored == false` 时扫描没碰音量 / 静音（正常），
-        // 真正的恢复失败已经由 [`sweep_preserving_audio`] 打了 warn；这里把结果一并
-        // 带回给调试通道，体检时能看出音频到底被没被动过。
+        // `restored` = **扫描结束时音频与扫描前一致**（体检 R9-C3）：没被改动过、无需
+        // 恢复的页面也算 `true`。以前它是“恢复器有没有写过界面”，于是无音频的页面
+        // 永远报 `false`，被误读成恢复失败。真正的失败（扫完仍与扫描前不同）已由
+        // [`sweep_preserving_audio`] 打了 warn。
         if self.app.player_fullscreen() != was_fullscreen {
             self.app.ui().window().set_fullscreen(was_fullscreen);
         }
@@ -1260,6 +1261,8 @@ impl Shell {
                     "label": entry.label,
                     "changed": entry.changed,
                     "restored": entry.restored,
+                    "skipped": entry.skipped,
+                    "no_op": entry.no_op,
                     "before": entry.before,
                     "after": entry.after,
                 })
@@ -1272,6 +1275,7 @@ impl Shell {
             "changed": report.entries.iter().filter(|entry| entry.changed).count(),
             "dead": dead,
             "aborted": report.aborted,
+            "abort_reason": report.abort_reason,
             "audio_restored": restored,
             "results": shown,
         })
@@ -2667,22 +2671,24 @@ impl PlayerAudio {
     }
 }
 
-/// 把音量 / 静音恢复到快照；返回是否真的改过界面。
+/// 把音量 / 静音恢复到快照；返回**扫描结束时音频是否与扫描前一致**。
 ///
 /// 走界面的公开回调（与用户拖音量 / 点静音同一条路），引擎侧的音量也跟着回去。
 /// 顺序有讲究：设非零音量会自动取消静音（见 `player_volume_set`），
 /// 所以先恢复音量、再按需切回静音。
+///
+/// 返回值的语义是“**结果**”而不是“有没有动过”（体检 R9-C3）：什么都没变、无需恢复
+/// 时也返回 `true`（与扫描前一致）。以前它报“恢复器写过界面没有”，于是库里 / 搜索页 /
+/// 详情页这些根本没有音频改动的页面永远报 `audio_restored=false`，体检里看起来像
+/// 恢复失败。真实失败只有一个判据：扫完仍与快照不同。
 pub fn restore_player_audio(app: &App, snapshot: PlayerAudio) -> bool {
-    let mut restored = false;
     if (app.player_view().volume - snapshot.volume).abs() > f32::EPSILON {
         app.ui().invoke_player_volume_set(snapshot.volume);
-        restored = true;
     }
     if app.player_view().muted != snapshot.muted {
         app.ui().invoke_player_mute_toggle();
-        restored = true;
     }
-    restored
+    PlayerAudio::from_view(&app.player_view()) == snapshot
 }
 
 /// 扫描的保护包装：先给音量 / 静音拍快照，跑扫描，再把快照恢复回去。
@@ -2691,23 +2697,33 @@ pub fn restore_player_audio(app: &App, snapshot: PlayerAudio) -> bool {
 /// 只单独测 [`restore_player_audio`] 的话，把这里的恢复调用删掉测试照样过，
 /// 等于没有覆盖。
 pub(crate) fn sweep_preserving_audio<R>(app: &App, sweep: impl FnOnce() -> R) -> (bool, R) {
-    sweep_with_audio_guard(app, restore_player_audio, sweep)
+    // 恢复动作的返回值不用：判定统一在 [`sweep_with_audio_guard`] 里做（扫完的音频
+    // 与快照比），避免“恢复器动过界面没有”与“结果是否一致”两套口径并存。
+    sweep_with_audio_guard(
+        app,
+        |app, snapshot| {
+            restore_player_audio(app, snapshot);
+        },
+        sweep,
+    )
 }
 
 /// [`sweep_preserving_audio`] 的可测内核：`restore` 是恢复动作的接缝（真实路径是
 /// [`restore_player_audio`]）。
 ///
-/// 恢复之后音量 / 静音仍与快照不同就是**恢复失败**——以前 `Shell::sweep` 把
-/// `restored` 丢掉，用户偏好被一次体检改掉也不会留下任何日志。
+/// 返回的 `restored` = **扫描结束时音量 / 静音与扫描前一致**（体检 R9-C3），
+/// 而不是“恢复器动过界面没有”。恢复之后仍与快照不同就是**恢复失败**——以前
+/// `Shell::sweep` 把 `restored` 丢掉，用户偏好被一次体检改掉也不会留下任何日志。
 fn sweep_with_audio_guard<R>(
     app: &App,
-    restore: impl FnOnce(&App, PlayerAudio) -> bool,
+    restore: impl FnOnce(&App, PlayerAudio),
     sweep: impl FnOnce() -> R,
 ) -> (bool, R) {
     let snapshot = PlayerAudio::from_view(&app.player_view());
     let result = sweep();
-    let restored = restore(app, snapshot);
-    if PlayerAudio::from_view(&app.player_view()) != snapshot {
+    restore(app, snapshot);
+    let restored = PlayerAudio::from_view(&app.player_view()) == snapshot;
+    if !restored {
         tracing::warn!("交互扫描改了音量 / 静音，恢复后仍与扫描前不同：用户偏好可能已被改掉");
     }
     (restored, result)
@@ -3028,6 +3044,63 @@ mod tests {
         );
     }
 
+    /// 体检 R9-C3：`audio_restored` 的语义是“**扫描结束时音频与扫描前一致**”。
+    ///
+    /// 扫描根本没碰音量 / 静音（库页 / 搜索页 / 详情页没有播放器）时也必须报 `true`。
+    /// 以前它是“恢复器写过界面没有”，这些页面恒定报 `false`，体检里看起来像恢复失败。
+    #[test]
+    fn shell_sweep_reports_audio_consistent_when_nothing_touched_it() {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(crate::local::Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        app.ui()
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        app.show_page(Page::Library);
+        app.ui().show().expect("显示窗口");
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shell = super::Shell::for_test(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+        );
+        let before = PlayerAudio::from_view(&app.player_view());
+
+        let report = shell.sweep(false);
+
+        assert_eq!(report["ok"], serde_json::json!(true), "{report}");
+        assert_eq!(
+            report["audio_restored"],
+            serde_json::json!(true),
+            "扫描没动过音量 / 静音时音频与扫描前一致，必须报 true（R9-C3）：{report}"
+        );
+        assert_eq!(
+            PlayerAudio::from_view(&app.player_view()),
+            before,
+            "库页扫描不该改音量 / 静音"
+        );
+        assert_eq!(
+            report["aborted"],
+            serde_json::json!(false),
+            "库页扫描不该提前收尾：{report}"
+        );
+        assert_eq!(
+            report["abort_reason"],
+            serde_json::Value::Null,
+            "没提前收尾时没有原因：{report}"
+        );
+    }
+
     /// `sweep` 恢复搜索视图后，调试通道的 `view.search` 摘要也要跟着回填。
     ///
     /// `view.search` 读的是 `nova-app` 本层的 `UiState.search` 镜像；恢复器写的是
@@ -3258,10 +3331,10 @@ mod tests {
         let logs = capture_logs(|| {
             let (restored, _) = sweep_with_audio_guard(
                 &app,
-                |_app, _snapshot| false,
+                |_app, _snapshot| {},
                 || app.ui().invoke_player_volume_set(0.93),
             );
-            assert!(!restored, "恢复没生效时不能返回 true");
+            assert!(!restored, "扫完仍与扫描前不同时不能返回 true");
         });
         assert!(
             logs.contains("恢复后仍与扫描前不同"),
