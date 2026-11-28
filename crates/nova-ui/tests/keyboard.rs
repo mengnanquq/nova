@@ -11,6 +11,8 @@ use common::{
 use nova_ui::{App, AppWindow, KeyCommand, Page, Route};
 use slint::ComponentHandle;
 use slint::platform::{Key, WindowEvent};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 fn press(app: &App, key: Key) {
@@ -196,4 +198,78 @@ fn series_detail_focus_starts_on_my_list_and_enter_does_not_play() {
         }),
         "Enter 不该压入播放路由"
     );
+}
+
+/// R9-D1（真机 2/2 复现）：剧集详情按 `Enter` 切「我的列表」时，handler 会**同步**
+/// 回到 `nova-app`（`Shell::toggle_detail_mylist` → 写本地库 → `App::set_detail`），
+/// 那里要 `state.borrow_mut()`。修复前 `play_current` 把 `state.borrow()` 写在
+/// if-let 的 scrutinee 里（`if let Some(Route::Detail { .. }) = state.borrow()...`），
+/// 临时 `Ref` 活到整块结束，块内回调再 `borrow_mut()` 就是
+/// `RefCell already borrowed`（整个进程退出）。
+///
+/// 这里让 handler **真的**调 `set_detail`：上一条用例的 handler 只置一个标志，
+/// 盖不到这条路径。
+#[test]
+fn series_detail_enter_my_list_handler_reentering_state_does_not_panic() {
+    init_backend();
+    let app = Rc::new(App::new_with(AppWindow::new().unwrap()));
+    app.ui()
+        .window()
+        .set_size(slint::LogicalSize::new(1280.0, 800.0));
+
+    let library = library_view();
+    app.set_library(&library);
+    app.open_library(&library);
+    let mut detail = detail_view();
+    detail.playable = false;
+    detail.sources.clear();
+    app.set_detail(&detail);
+    app.open_detail("dune");
+    assert_eq!(app.page(), Page::Detail);
+    app.ui().show().expect("显示窗口");
+    assert!(
+        !app.ui().get_detail_in_my_list(),
+        "起始不该在「我的列表」里"
+    );
+
+    let calls = Rc::new(Cell::new(0));
+    let current = Rc::new(RefCell::new(detail.clone()));
+    {
+        let weak = Rc::downgrade(&app);
+        let calls = Rc::clone(&calls);
+        let current = Rc::clone(&current);
+        app.on_detail_my_list_toggle(move || {
+            calls.set(calls.get() + 1);
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            // 与 `Shell::toggle_detail_mylist` 同构：改视图模型，再重贴详情。
+            // 重贴这一步在修复前正好撞上 if-let scrutinee 还活着的临时 `Ref`。
+            let mut view = current.borrow().clone();
+            view.in_my_list = !view.in_my_list;
+            *current.borrow_mut() = view.clone();
+            app.set_detail(&view);
+        });
+    }
+
+    // 第一下：切进「我的列表」，不崩、不走播放页。
+    press(&app, Key::Return);
+    assert_eq!(calls.get(), 1, "Enter 应激活「我的列表」一次");
+    assert!(
+        app.ui().get_detail_in_my_list(),
+        "handler 里的 set_detail 应当落地"
+    );
+    assert_eq!(app.page(), Page::Detail, "Enter 不该离开详情页");
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Detail {
+            item_id: "dune".to_string()
+        }),
+        "Enter 不该压入播放路由"
+    );
+
+    // 第二下：切回原状（真机验收要求的两下）。
+    press(&app, Key::Return);
+    assert_eq!(calls.get(), 2, "再按一次应再激活一次");
+    assert!(!app.ui().get_detail_in_my_list(), "再按一次应恢复原状");
 }

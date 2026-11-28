@@ -19,6 +19,32 @@ nova-ui（Slint 标记 + 纯 Rust 视图模型）
 **为什么这样切**：视图模型是纯数据，能用普通单测覆盖分组/排序/格式化（这是界面最容易错的地方）；
 Slint 标记只负责摆放和动画。这样界面测试不需要网络和数据库，也不需要显示服务器。
 
+### `State` 借用约定（`Rc<RefCell<State>>`）
+
+回调（`Callbacks` 里的 `*_handler`）会**同步**回到 `nova-app`，而上层拿到回调几乎必然
+`App::set_detail` / `set_library` / `set_page` 再 `borrow_mut()` 同一个 `State`。所以：
+
+1. **`if let` / `match` / `while let` 的 scrutinee（被匹配表达式）里不准出现 `borrow()`**：
+   那里产生的临时 `Ref` 活到整个块结束，肉眼看不见。R9-D1 的崩溃就是这样来的——
+   `play_current` 写了 `if let Some(Route::Detail { .. }) = state.borrow().nav.current()`，
+   块内的「我的列表」回调走到 `Shell::toggle_detail_mylist` → `App::set_detail` →
+   `borrow_mut()`，剧集详情按 `Enter` 整个进程退出（`RefCell already borrowed`，真机 2/2 复现）。
+   要用的值先在独立作用域里拷出来（`let (..) = { let s = state.borrow(); .. };`），再调回调。
+2. **取 handler 一律先克隆再调**：`let handler = { let s = state.borrow(); s.callbacks.x.clone() };`
+   然后 `if let Some(handler) = handler { handler(..) }`。不要在匹配表达式里顺手写 `borrow()`。
+3. **同一块里既持有借用又要写 `.slint` 属性 / 调 `ui.invoke_*`**：先 `drop` 借用再写。
+   `ui.invoke_*` 会同步跑已注册的处理器，`.slint` 的 `changed` 处理器（如 `home.slint` 的
+   `changed image-gen => report-images`）同样会同步回到 Rust。找 handler 时用「先取后放」的
+   作用域块，别指望临时值在语句末就消失。
+4. **借用期间不调 `App::set_*` / `Shell` 的方法**：`nova-app` 只对 `self.player` 有
+   「借用冲突就排队延后」的兜底（见「控制层」的 `run_player_action`），`nova-ui` 的
+   `State` 没有这层保护，只能靠顺序。
+
+没有现成的 clippy lint 能拦住这一类（`clippy::await_holding_refcell_ref` 只管 async，
+这里的回调是同步的），所以靠约定 + 回归测试：`nova-ui/tests/keyboard.rs` 的
+`series_detail_enter_my_list_handler_reentering_state_does_not_panic`（handler 真的调
+`set_detail`，修复前必炸）。改 `nova-ui` 的回调路径时照着这四条过一遍。
+
 ## 核心类型（`nova-ui`，全部纯 Rust）
 
 ```rust

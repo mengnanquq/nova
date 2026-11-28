@@ -3239,14 +3239,27 @@ fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     // 剧集详情没有播放按钮（`DetailView.playable` = false，R9-A2）：键盘 Enter
     // 不能复活一个界面上不存在的按钮，落到焦点所在的「我的列表」上（与
     // `focus_rows` 的单行模型一致）。
-    if let Some(Route::Detail { .. }) = state.borrow().nav.current() {
-        if !state.borrow().detail.playable {
-            let handler = state.borrow().callbacks.detail_my_list_toggle.clone();
-            if let Some(handler) = handler {
-                handler();
-            }
-            return true;
+    //
+    // **借用必须先放掉**（R9-D1）：handler 会同步回到 `nova-app`
+    // （`Shell::toggle_detail_mylist` → 写本地库 → `App::set_detail`），那里要
+    // `state.borrow_mut()`。以前这里写成
+    // `if let Some(Route::Detail { .. }) = state.borrow().nav.current()`：if-let
+    // 的 scrutinee 临时 `Ref` 活到**整块结束**，块内回调必炸
+    // `RefCell already borrowed`（真机 2/2 复现，剧集详情按 Enter 整个进程退出）。
+    // 所以先在独立作用域里把要用的三个值取出来，再在借用外调 handler。
+    let (on_detail, playable, handler) = {
+        let state = state.borrow();
+        (
+            matches!(state.nav.current(), Some(Route::Detail { .. })),
+            state.detail.playable,
+            state.callbacks.detail_my_list_toggle.clone(),
+        )
+    };
+    if on_detail && !playable {
+        if let Some(handler) = handler {
+            handler();
         }
+        return true;
     }
     match item_id {
         Some(item_id) => play(ui, state, &item_id),
