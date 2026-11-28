@@ -384,6 +384,15 @@ impl MpvEngine {
         self.lock_shared().eof
     }
 
+    /// 引擎记下的“到达片尾时的位置”（`eof-reached` 翻成 `true` 那一刻的 `time-pos`）。
+    ///
+    /// 宿主用它过滤**陈旧**的 EOF：用户把进度拖回中段后，mpv 的 `eof-reached=false`
+    /// 可能要好几秒才到（网络流），这期间只看 `eof-reached` 会误判成“停在片尾”。
+    /// `None` = 没到过片尾 / 已经离开片尾 / 当时读不到 `time-pos`。
+    pub fn eof_position(&self) -> Option<Duration> {
+        self.lock_shared().eof_position
+    }
+
     /// 首帧耗时（从 `open` 被接受，到第一帧真的渲染进纹理）。
     pub fn first_frame_latency(&self) -> Option<Duration> {
         let shared = self.lock_shared();

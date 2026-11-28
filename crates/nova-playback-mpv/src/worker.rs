@@ -91,6 +91,12 @@ pub(crate) struct SharedState {
     pub core_idle: bool,
     pub cache_percent: Option<f64>,
     pub eof: bool,
+    /// `eof-reached` 翻成 `true` 那一刻的 `time-pos`。
+    ///
+    /// 界面（`Player::engine_at_eof`）用它过滤**陈旧**的 EOF：用户把进度拖回中段后，
+    /// mpv 的 `eof-reached=false` 可能要好几秒才到（网络流），这期间只看 `eof-reached`
+    /// 会把“已经拖走”误判成“停在片尾”。
+    pub eof_position: Option<Duration>,
     pub has_video: bool,
     pub video_size: Option<(u32, u32)>,
     pub dropped_frames: u64,
@@ -122,6 +128,7 @@ impl SharedState {
             core_idle: true,
             cache_percent: None,
             eof: false,
+            eof_position: None,
             has_video: false,
             video_size: None,
             dropped_frames: 0,
@@ -133,6 +140,58 @@ impl SharedState {
             hwdec_warned: false,
             renderer: String::new(),
         }
+    }
+
+    /// 把一条属性观察落进共享状态（缓冲判定与 watchdog 都读它）。
+    ///
+    /// 返回 `false` = 这条观察被丢弃：`file-loaded` 之前收到的 `eof-reached` 属于
+    /// **上一部**片子（`loadfile replace` 之后旧文件的 `eof-reached=true` 可能才被处理
+    /// 到，见 [`SharedState::observe_eof`]）。
+    pub(crate) fn apply_observed(
+        &mut self,
+        observed: &ObservedProperty,
+        loaded: bool,
+        time_pos: Option<f64>,
+    ) -> bool {
+        match observed {
+            ObservedProperty::Pause(paused) => self.paused = *paused,
+            ObservedProperty::CoreIdle(idle) => self.core_idle = *idle,
+            ObservedProperty::Cache(percent) => self.cache_percent = *percent,
+            ObservedProperty::Eof(reached) => return self.observe_eof(loaded, *reached, time_pos),
+            _ => {}
+        }
+        true
+    }
+
+    /// `eof-reached` 观察：翻成 `true` 时记下当时的 `time-pos` 作为 [`Self::eof_position`]。
+    ///
+    /// `loaded = false`（本次文件还没 `file-loaded`）时一律丢弃：换片时旧文件迟到的
+    /// `eof-reached=true` 观察会把 `eof` 写回 `true`，新会话刚起播就被判成片尾。
+    pub(crate) fn observe_eof(
+        &mut self,
+        loaded: bool,
+        reached: bool,
+        time_pos: Option<f64>,
+    ) -> bool {
+        if !loaded {
+            return false;
+        }
+        self.eof = reached;
+        self.eof_position = if reached {
+            time_pos.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        } else {
+            None
+        };
+        true
+    }
+
+    /// UI 自己要求离开片尾（拖动 / 跳转）：`eof` **立即**失效。
+    ///
+    /// 不能等 mpv 送 `eof-reached=false`（网络流上实测能晚好几秒）：那段窗口里
+    /// 播放器会把“拖回中段后的暂停”当成停在片尾，按播放就从 0 重播、吞掉刚才的 seek。
+    pub(crate) fn leave_eof(&mut self) {
+        self.eof = false;
+        self.eof_position = None;
     }
 
     /// 记一笔起播阶段的时序（相对于本次打开）。
@@ -147,6 +206,7 @@ impl SharedState {
         self.core_idle = true;
         self.cache_percent = None;
         self.eof = false;
+        self.eof_position = None;
         self.has_video = false;
         self.video_size = None;
         self.dropped_frames = 0;
@@ -210,6 +270,8 @@ pub(crate) struct Worker {
     last_reported_dropped: u64,
     last_poll: Instant,
     loaded: bool,
+    /// 最近一次观察到的 `time-pos`（秒）：`eof-reached=true` 时用它记下片尾位置。
+    last_time_pos: Option<f64>,
     ended: EndedGuard,
     volume: f32,
     muted: bool,
@@ -336,6 +398,7 @@ impl Worker {
             last_reported_dropped: 0,
             last_poll: Instant::now(),
             loaded: false,
+            last_time_pos: None,
             ended: EndedGuard::default(),
             volume,
             muted: false,
@@ -385,6 +448,9 @@ impl Worker {
                 // 同时把 seek 之前产生、还没处理到的 `eof-reached=true` 标成旧观察
                 // （主循环先处理命令再处理事件，见 [`EndedGuard`]）。
                 self.ended.after_seek();
+                // UI 自己要求离开片尾：共享的 `eof` 立即清零，不等 mpv 送
+                // `eof-reached=false`——那之前按播放会被判成“停在片尾”从 0 重播。
+                self.lock_shared().leave_eof();
                 let seconds = position.as_secs_f64();
                 self.command(&["seek", &format!("{seconds:.3}"), "absolute"]);
             }
@@ -430,6 +496,7 @@ impl Worker {
         self.is_network_url = url.starts_with("http://") || url.starts_with("https://");
         self.log_tail.clear();
         self.loaded = false;
+        self.last_time_pos = None;
         self.ended = EndedGuard::default();
         self.last_tracks = None;
         self.last_dropped = 0;
@@ -556,15 +623,17 @@ impl Worker {
             _ => return,
         };
         // 观察到的属性先落到共享状态（缓冲判定与 watchdog 都读它）。
+        //
+        // `file-loaded` 之前收到的 `eof-reached` 属于**上一部**片子，一律丢弃。
+        if !self
+            .lock_shared()
+            .apply_observed(&observed, self.loaded, self.last_time_pos)
         {
-            let mut shared = self.lock_shared();
-            match &observed {
-                ObservedProperty::Pause(paused) => shared.paused = *paused,
-                ObservedProperty::CoreIdle(idle) => shared.core_idle = *idle,
-                ObservedProperty::Cache(percent) => shared.cache_percent = *percent,
-                ObservedProperty::Eof(reached) => shared.eof = *reached,
-                _ => {}
-            }
+            debug!(
+                target: "nova_playback_mpv",
+                "丢弃 file-loaded 之前的 eof-reached 观察：上一部片子的残留"
+            );
+            return;
         }
         if matches!(
             observed,
@@ -595,8 +664,12 @@ impl Worker {
         // 实测（mpv 0.42，IPC 观察同一组属性）：`loadfile replace` 之后依次是
         // `end-file` → `time-pos=None` → `start-file` → `file-loaded` → `time-pos=<新起点>`；
         // 也就是说 `file-loaded` 之前还会有一拍旧文件的读数，滤掉它才是"本次打开的事件"。
-        if matches!(observed, ObservedProperty::TimePos(_)) && !self.loaded {
-            return;
+        if let ObservedProperty::TimePos(seconds) = &observed {
+            if !self.loaded {
+                return;
+            }
+            // 最新位置：`eof-reached` 翻成 `true` 时要用它记下片尾位置。
+            self.last_time_pos = Some(*seconds);
         }
         if let Some(event) = event_for(observed) {
             self.events.emit(event);
@@ -1079,6 +1152,49 @@ mod tests {
             ended.on_eof_observed(true),
             "restart 时 eof-reached 已是 false：下一次片尾要报"
         );
+    }
+
+    /// 复审 🟡1：UI 自己要求离开片尾（`Command::Seek` 分支调 `leave_eof`）后，
+    /// 共享的 `eof` 必须**立即**为 `false`——不能等 mpv 送 `eof-reached=false`（网络流
+    /// 上可能晚好几秒，那段窗口里按播放会从 0 重播、吞掉刚做的 seek）。
+    #[test]
+    fn seek_clears_the_shared_eof_immediately() {
+        let mut shared = SharedState::new("auto".to_string());
+        assert!(
+            shared.apply_observed(&ObservedProperty::Eof(true), true, Some(120.0)),
+            "file-loaded 之后的 eof 观察要落地"
+        );
+        assert!(shared.eof);
+        assert_eq!(shared.eof_position, Some(Duration::from_secs(120)));
+
+        // `Command::Seek` 分支做的同一件事。
+        shared.leave_eof();
+
+        assert!(!shared.eof, "seek 之后 eof 立即为 false");
+        assert_eq!(shared.eof_position, None, "片尾位置也一并失效");
+    }
+
+    /// 复审 🟡3：换片时旧文件迟到的 `eof-reached=true` 观察（新文件还没 `file-loaded`）
+    /// 不能把新会话的共享状态写成“已到片尾”。
+    #[test]
+    fn late_eof_observation_from_the_previous_file_does_not_mark_the_new_one() {
+        let mut shared = SharedState::new("auto".to_string());
+        assert!(shared.apply_observed(&ObservedProperty::Eof(true), true, Some(120.0)));
+
+        // 换片：`open` 清掉旧状态，`file-loaded` 还没到。
+        shared.begin_open();
+        assert!(!shared.eof);
+        assert!(
+            !shared.apply_observed(&ObservedProperty::Eof(true), false, Some(120.0)),
+            "file-loaded 之前的 eof 观察属于上一部片子，要丢弃"
+        );
+        assert!(!shared.eof, "新会话不能被旧文件的 eof 观察判成片尾");
+        assert_eq!(shared.eof_position, None);
+
+        // 新文件自己播到片尾：照常认，并记下它自己的片尾位置。
+        assert!(shared.apply_observed(&ObservedProperty::Eof(true), true, Some(60.0)));
+        assert!(shared.eof);
+        assert_eq!(shared.eof_position, Some(Duration::from_secs(60)));
     }
 
     #[test]

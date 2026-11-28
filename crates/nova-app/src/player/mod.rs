@@ -170,6 +170,9 @@ pub(crate) struct Host {
     /// 测试：模拟引擎报告的 `eof-reached`（测试装配里没有 mpv）。
     #[cfg(test)]
     engine_eof: Option<bool>,
+    /// 测试：模拟引擎记下的片尾位置（`MpvEngine::eof_position`）。
+    #[cfg(test)]
+    engine_eof_position: Option<Duration>,
     /// 测试：与引擎 / 上报打交道的动作序列（`"pause"` / `"open:<url>"`）。
     ///
     /// 换片必须**先**停旧引擎、**再**上报进度：顺序错了用户就会听到两路声音，
@@ -204,6 +207,8 @@ impl Host {
             subtitle_margins: Vec::new(),
             #[cfg(test)]
             engine_eof: None,
+            #[cfg(test)]
+            engine_eof_position: None,
             #[cfg(test)]
             trace: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -393,10 +398,23 @@ impl Host {
         self.engine.as_ref().map(MpvEngine::eof_reached)
     }
 
-    /// 测试：假装引擎已经（或没有）报到片尾。
+    /// 引擎记下的片尾位置（`eof-reached` 翻成 `true` 那一刻的 `time-pos`）。
+    ///
+    /// `None` = 没到过片尾 / 已经离开片尾。界面拿它确认“引擎报的 EOF 是不是已经
+    /// 被用户拖走了”（`eof-reached=false` 可能要好几秒才到，网络流上尤其明显）。
+    fn eof_position(&self) -> Option<Duration> {
+        #[cfg(test)]
+        if self.engine_eof_position.is_some() {
+            return self.engine_eof_position;
+        }
+        self.engine.as_ref().and_then(MpvEngine::eof_position)
+    }
+
+    /// 测试：假装引擎已经（或没有）报到片尾，`position` 是它记下的片尾位置。
     #[cfg(test)]
-    fn set_engine_eof_for_test(&mut self, reached: bool) {
+    fn set_engine_eof_for_test(&mut self, reached: bool, position: Option<Duration>) {
         self.engine_eof = Some(reached);
+        self.engine_eof_position = if reached { position } else { None };
     }
 
     fn diagnostics(&self) -> Option<EngineDiagnostics> {
@@ -1397,6 +1415,9 @@ impl Player {
     /// （差几十毫秒到几秒都可能），位置永远贴不到 `duration`，而 mpv 又不会再补发
     /// `Ended`——只靠容差就会把“播放停在真实 EOF 的暂停态”当成“没播完”，按播放
     /// 什么都不发生（复审 🟡2 的“按了没反应”）。
+    ///
+    /// 兜底要求引擎报 EOF **且**位置还在那个片尾附近（[`Player::engine_at_eof`]）：
+    /// `eof-reached` 是引擎的实时状态，但用户拖走后它可能晚好几秒才翻成 `false`。
     fn at_end_of_media(&self) -> bool {
         match self.session.state() {
             SessionState::Ended => true,
@@ -1411,14 +1432,28 @@ impl Player {
         }
     }
 
-    /// 引擎是否报告已经到片尾（`eof-reached`）。
+    /// 引擎是否报告已经到片尾（`eof-reached`），**并且**当前位置还在那个片尾附近。
+    ///
+    /// 只看 `eof-reached` 不够（复审 🟡）：用户从片尾拖回中段后，mpv 的
+    /// `eof-reached=false` 可能要好几秒才到（网络流），这期间按播放会被判成“停在片尾”
+    /// 从 0 重播、吞掉刚做的 seek。引擎在 `eof-reached` 翻成 `true` 时记下了当时的
+    /// `time-pos`（[`MpvEngine::eof_position`]），位置明显往回退了就不再算片尾。
+    ///
+    /// 引擎没记下片尾位置（`None`）时退回只看 `eof-reached`：宁可多认一次片尾。
     ///
     /// 借用中（同一拍里重入）读不到就当作“不知道”：宁可少判一次“播完”，
     /// 也不能凭陈旧读数把“片尾前暂停”重播成从 0 开始。
     fn engine_at_eof(&self) -> bool {
-        self.host
-            .try_borrow()
-            .is_ok_and(|host| host.eof_reached() == Some(true))
+        let Ok(host) = self.host.try_borrow() else {
+            return false;
+        };
+        if host.eof_reached() != Some(true) {
+            return false;
+        }
+        match host.eof_position() {
+            Some(at) => self.session.position() + END_OF_MEDIA_TOLERANCE >= at,
+            None => true,
+        }
     }
 
     /// seek（只有进度条松手才会到这里）。
@@ -3704,8 +3739,11 @@ mod tests {
             !player.at_end_of_media(),
             "用例前提：只按元数据时长看还差 2s，容差命中不了"
         );
-        // 引擎已经到 EOF（mpv 的 `eof-reached=true`）。
-        player.host.borrow_mut().set_engine_eof_for_test(true);
+        // 引擎已经到 EOF（mpv 的 `eof-reached=true`），记下的片尾位置就是当前位置。
+        player
+            .host
+            .borrow_mut()
+            .set_engine_eof_for_test(true, Some(real_end));
 
         player.set_playing(true);
 
@@ -3716,6 +3754,59 @@ mod tests {
             player.session_seq > first_seq,
             "重播是新会话（代号递增，{} 应大于 {first_seq}）",
             player.session_seq
+        );
+    }
+
+    /// 复审 🟡：片尾 → 拖回中段，`eof-reached=false` 还没到时按播放，必须从中段继续。
+    ///
+    /// 修复前引擎兜底只看 `eof-reached`（`shared.eof` 只在观察到属性变化时才更新），
+    /// 于是“刚拖回中段”被当成“停在片尾”，按播放从 0 重播、吞掉刚做的 seek。
+    #[test]
+    fn pressing_play_after_seeking_out_of_the_end_continues_from_the_seek() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        wait_for_open(&posted).expect("首次起播请求");
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        let duration = player.session.duration().expect("用例前提：时长已知");
+        // 播到真实 EOF（元数据说还差 1 秒）并暂停：引擎报 EOF，记下片尾位置。
+        let real_end = duration - Duration::from_secs(1);
+        assert!(player.session.seek(real_end));
+        assert!(player.session.pause());
+        player
+            .host
+            .borrow_mut()
+            .set_engine_eof_for_test(true, Some(real_end));
+
+        // 用户拖回中段：mpv 还没送 `eof-reached=false`，引擎侧仍报 EOF。
+        let middle = duration / 2;
+        let seq = player.session_seq;
+        player.seek(middle);
+        assert_eq!(player.session.position(), middle);
+        assert_eq!(player.session.state(), SessionState::Paused);
+
+        player.set_playing(true);
+
+        assert_eq!(
+            player.session.state(),
+            SessionState::Playing,
+            "拖回中段后按播放必须继续播，不能从头重播"
+        );
+        assert_eq!(player.session.position(), middle, "继续播不能重置位置");
+        assert_eq!(player.session_seq, seq, "继续播不是新会话");
+        let trace = Arc::clone(&player.host.borrow().trace);
+        let trace = trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            !trace.iter().any(|entry| entry.starts_with("open:")),
+            "不能重新起播：{trace:?}"
+        );
+        assert!(
+            trace.iter().any(|entry| entry == "play"),
+            "应当给引擎发 play：{trace:?}"
         );
     }
 

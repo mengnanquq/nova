@@ -484,7 +484,7 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
   只把位置 clamp 到时长，状态可能停在 `Paused`（mpv 的 `eof-reached` 本来就是 `true`，不再
   产生第二次 `Ended`）。这类“钉在时长上的暂停”按播完处理（`Player::at_end_of_media`），
   按播放 / `Enter` 仍是**从头重播**——否则只是“从片尾恢复”，一秒后又结束（用户看到的是
-  “按了没从头播”）。判定有两条，任一条成立就算播完：
+  “按了没从头播”）。判定有三条，任一条成立就算播完：
   1. 会话是 `Ended`；
   2. 会话是 `Paused` 且**位置距 `duration` 不超过一帧（40ms）**。容差只留一帧：放宽到
      几百毫秒会把“片尾前 200ms 暂停”误判成播完（按播放会从头重播），短素材在开头
@@ -495,8 +495,15 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
      元数据时长**的兜底：服务端给的 `runtime` 可能比真实文件长（差几十毫秒到几秒），
      这时位置永远贴不到 `duration`，mpv 又不会再补发 `Ended`——只靠容差就会把“停在
      真实 EOF 的暂停态”当成没播完，按播放什么都不发生（复审 🟡2 的“按了没反应”）。
-     宿主借用中（同一拍里重入）读不到引擎状态就当作“不知道”，宁可少判一次播完，
-     也不能把“片尾前暂停”重播成从 0 开始。
+     这条还要求**位置仍在片尾附近**：引擎在 `eof-reached` 翻成 `true` 时记下当时的
+     `time-pos`（`MpvEngine::eof_position`），`position + 40ms >= eof_position` 才算
+     片尾。用户从片尾拖回中段后，mpv 的 `eof-reached=false` 可能晚好几秒才到（网络流
+     尤甚），只看 `eof-reached` 会把这时的暂停当“播完”，按播放从 0 重播、吞掉刚做的
+     seek（复审 🟡）。宿主借用中（同一拍里重入）读不到引擎状态就当作“不知道”，宁可
+     少判一次播完，也不能把“片尾前暂停”重播成从 0 开始。
+     拖动 / 跳转（`Command::Seek`）时 worker 自己把共享的 `eof` 立即清零，不等 mpv
+     送 `eof-reached=false`；换片时 `file-loaded` 之前收到的 `eof-reached` 观察属于
+     上一部片子，一律丢弃。
   这一条在宿主侧判断，**不依赖界面视图**：`view.player` 是节流推送的，控制层隐藏 /
   那一拍刚好没推时，靠界面的 `player_finished` 判断会漏掉。
 - 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
@@ -534,6 +541,11 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    不依赖 mpv 的具体时序（实测 mpv 0.42 + `keep-open=yes`：片尾**只有** `eof-reached=true`
    属性、没有 `end-file` 事件；seek 之后才送 `eof-reached=false` + `playback-restart`）。
    旧实现只靠 `eof-reached` 回到 `false` 来清，第二次播完就可能不再产生 `Ended`。
+   同一个 `Command::Seek` 还要把共享的 `eof` **立即**清零（`SharedState::leave_eof`）：
+   网络流上 mpv 的 `eof-reached=false` 可能晚好几秒，那段窗口里宿主会把“拖回中段后的
+   暂停”当成停在片尾，按播放从 0 重播、吞掉刚做的 seek。换片时新文件 `file-loaded`
+   之前收到的 `eof-reached` 观察一律丢弃（`SharedState::observe_eof`）：否则旧文件迟到的
+   `eof-reached=true` 会把新会话写回“已到片尾”。
    同时 seek 还要把“seek 之前产生、seek 之后才被处理到”的 `eof-reached=true` 标成旧观察
    （`EndedGuard::stale_eof`）：主循环**先处理命令再处理事件**，不吞掉它就会在清标记之后
    立刻误报第二次 `Ended`——界面把状态钉成 `Ended`、位置钉到时长（显示「已看完」），
@@ -549,20 +561,26 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    已经停在 `Ended` 时重复收到的 `Ended` 也不再补报一条 `Pause` 进度（`Player::pump_events`）。
    这几条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
    `two_seeks_after_end_*` / `restart_while_eof_is_still_reached_*` /
-   `restart_after_eof_is_cleared_*` / `player::tests::duplicate_ended_does_not_report_again`）。
+   `restart_after_eof_is_cleared_*` / `seek_clears_the_shared_eof_immediately` /
+   `late_eof_observation_from_the_previous_file_does_not_mark_the_new_one` /
+   `player::tests::duplicate_ended_does_not_report_again` /
+   `player::tests::pressing_play_after_seeking_out_of_the_end_continues_from_the_seek`）。
 
 **已知限制（推测，未验证）**：播完后**直接拖到 100%（`duration`）** 时，`Session::seek`
 把位置 clamp 到时长、状态转回 `Playing`，界面靠引擎再报一次 `Ended` 才会回到「已看完」。
 但 mpv 这时可能只送 `playback-restart`，`eof-reached` 本来就是 `true`、seek 到时长也不会
 变成 `false`，于是没有新的 `eof-reached` 变化，也就没有第二次 `Ended`——`ended` 停在 `false`，
 位置钉在片尾。界面**不会**因此误判成“还在播”：进度条位置的“播完”由宿主按
-`Player::at_end_of_media` 兜底（位置贴到时长、或引擎已经到 EOF 就算播完，播完按钮语义不变），但
+`Player::at_end_of_media` 兜底（位置贴到时长、或引擎已经到 EOF 且位置仍在那个片尾附近就算播完，
+播完按钮语义不变），但
 `view.player.ended` 仍是引擎口径的 `false`，体检时不要拿它当“没播完”的证据。
 （未验证的是 mpv 的 `eof-reached` 属性日志，不是界面行为。）
 
 **时长精度**（已处理，复审 🟡2）：`Session.duration` 只在起播时由元数据（`source.runtime` /
 `item.runtime`）定一次，起播后不再由引擎更新，而 mpv 的真实时长与元数据可能相差几十毫秒到
-几秒。所以“停在片尾”的判定不能只靠 40ms 容差，必须叠加引擎自己的 `eof-reached`（见上）。
+几秒。所以“停在片尾”的判定不能只靠 40ms 容差，必须叠加引擎自己的 `eof-reached`（见上）；
+而 `eof-reached` 只在“位置还贴着片尾”时才算数（引擎记下的 `eof_position`），否则用户拖回中段后、
+`eof-reached=false` 还没到的这段时间会被误判成播完。
 
 ## 控制层
 
