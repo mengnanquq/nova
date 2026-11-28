@@ -675,6 +675,7 @@ export component HomePage inherits Rectangle {
 
     // ---- 键盘焦点层（体检 R2-2b）----
     // `hero-focus` 是 hero 按钮行的焦点（0 = 播放、1 = 更多信息，-1 = 不在 hero 层）；
+    // 主推条目不能播时播放按钮不实例化，只剩「更多信息」，此时 0 就是它。
     // `nav-focus` 是顶栏的焦点下标（-1 = 不在顶栏）。两者都由 `AppWindow` 按当前
     // 焦点层门控后传进来，鼠标操作不会进入这两层。
     in property <int> hero-focus: -1;
@@ -1087,20 +1088,12 @@ export component HomePage inherits Rectangle {
                             HorizontalLayout {
                                 spacing: Theme.space-3;
 
-                            // 调试通道：hero 的两个按钮在条件子树里（只有有简介时才实例化），
-                            // 只能由这块自己登记（id 固定 `home.hero.*`）。
+                            // 调试通道：hero 的按钮行在条件子树里（只有有简介时才实例化），
+                            // 只能由这块自己登记（id 固定 `home.hero.*`）。「▶ 播放」还多一道
+                            // `hero-playable`，它的登记只能写在那个条件子树里。
                             property <int> target-gen: TargetBus.gen;
                             changed target-gen => {
                                 if (root.visible) {
-                                    TargetBus.register({
-                                        id: "home.hero.play",
-                                        kind: "button",
-                                        label: "▶  播放",
-                                        x: hero-play-area.absolute-position.x,
-                                        y: hero-play-area.absolute-position.y,
-                                        width: hero-play-area.width,
-                                        height: hero-play-area.height,
-                                    });
                                     TargetBus.register({
                                         id: "home.hero.info",
                                         kind: "button",
@@ -1113,13 +1106,29 @@ export component HomePage inherits Rectangle {
                                 }
                             }
 
-                            // ▶ 播放：白底黑字。
-                            Rectangle {
+                            // ▶ 播放：白底黑字。主推是剧集（本体没有可播版本）时整个不实例化。
+                            if (root.data.hero-playable) : Rectangle {
                                 width: Theme.play-button-width;
                                 height: Theme.button-primary-height;
                                 // 官方 Hawkins `Button-BorderRadius: 0.25rem` = 4px。
                                 border-radius: Theme.radius-button;
                                 background: Theme.btn-primary-bg;
+
+                                // 条件子树里的登记：不实例化的按钮连目标也不登记。
+                                property <int> target-gen: TargetBus.gen;
+                                changed target-gen => {
+                                    if (root.visible) {
+                                        TargetBus.register({
+                                            id: "home.hero.play",
+                                            kind: "button",
+                                            label: "▶  播放",
+                                            x: hero-play-area.absolute-position.x,
+                                            y: hero-play-area.absolute-position.y,
+                                            width: hero-play-area.width,
+                                            height: hero-play-area.height,
+                                        });
+                                    }
+                                }
 
                                 // 悬停洗色：opacity 过渡而不是 visible 硬切。
                                 Rectangle {
@@ -1256,14 +1265,15 @@ export component HomePage inherits Rectangle {
                                     }
                                 }
 
-                                // 同上：`hero-focus == 1` = 键盘焦点在「更多信息」上。
+                                // 同上：`hero-focus == 1` = 键盘焦点在「更多信息」上；没有播放
+                                // 按钮时「更多信息」是唯一槽位（`hero-focus == 0`）。
                                 FocusRing {
                                     x: -Theme.focus-offset;
                                     y: -Theme.focus-offset;
                                     width: parent.width + Theme.focus-offset * 2;
                                     height: parent.height + Theme.focus-offset * 2;
                                     ring-radius: Theme.radius-button + Theme.focus-offset;
-                                    active: root.nav-active && root.hero-focus == 1;
+                                    active: root.nav-active && root.hero-focus == (root.data.hero-playable ? 1 : 0);
                                 }
                             }
                             }

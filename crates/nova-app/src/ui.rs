@@ -1923,7 +1923,7 @@ impl Shell {
                 self.request_images(ImageScope::Detail, keys);
             }
             Ok(None) => {
-                let placeholder = DetailView::new(item_id, "正在加载…");
+                let placeholder = detail_placeholder(item_id);
                 self.app.set_detail(&placeholder);
                 self.state.borrow_mut().detail = Some(placeholder);
             }
@@ -2129,6 +2129,17 @@ impl Shell {
         self.app.set_detail(&detail);
         self.state.borrow_mut().detail = Some(detail);
     }
+}
+
+/// 详情页还没来得及读缓存时先贴的占位（标题「正在加载…」）。
+///
+/// **必须不可播放**：占位不知道条目类型，`DetailView::default()` 的 `playable` 是
+/// `true`，直接拿它会先闪一下能点的「播放」（剧集第一次打开时尤其明显）。真实详情
+/// 一到就整页替换。
+fn detail_placeholder(item_id: &str) -> DetailView {
+    let mut placeholder = DetailView::new(item_id, "正在加载…");
+    placeholder.playable = false;
+    placeholder
 }
 
 fn install_callbacks(shell: &Rc<Shell>) {
@@ -2840,6 +2851,16 @@ mod tests {
     #[test]
     fn stale_generation_is_rejected() {
         assert!(!accept_search_result(2, 1, true, "沙丘", "沙丘"));
+    }
+
+    /// 加载占位不能自己带一个「播放」按钮：`DetailView::default()` 默认能播，
+    /// 剧集第一次打开时会先闪一下可点的播放（R9-A2 复查）。
+    #[test]
+    fn the_detail_loading_placeholder_is_not_playable() {
+        let placeholder = super::detail_placeholder("s");
+        assert_eq!(placeholder.item_id, "s");
+        assert_eq!(placeholder.title, "正在加载…");
+        assert!(!placeholder.playable, "加载占位不该有播放入口");
     }
 
     #[test]

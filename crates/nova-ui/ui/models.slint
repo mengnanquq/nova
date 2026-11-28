@@ -58,6 +58,9 @@ export struct SourceData {
 export struct HomeData {
     hero: CardData,
     has-hero: bool,
+    // hero 本身能否直接播放（电影 / 单集）。false 时「▶ 播放」整个不实例化，
+    // hero 按钮行只剩「更多信息」（主推是剧集时就是这种情况）。
+    hero-playable: bool,
     continue-watching: [CardData],
     recently-added: [CardData],
     // 各媒体库前 20 条的行（16:9，标题 = 库名）。

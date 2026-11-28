@@ -246,7 +246,8 @@ pub fn tabs() -> Vec<LibraryTab> {
 pub fn home_filled() -> HomeView {
     let hero = CardView::new("dune", "沙丘：第二部")
         .with_subtitle("2024 · 科幻 / 冒险 · 2 小时 46 分")
-        .with_badge("4K");
+        .with_badge("4K")
+        .with_playable(true);
     let continue_watching = vec![
         CardView::new("c1", "最后生还者")
             .with_subtitle("第 2 季 · 第 5 集")

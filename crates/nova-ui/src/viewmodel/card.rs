@@ -21,6 +21,9 @@ pub struct CardView {
     pub badge: Option<String>,
     /// 简介：只有首页 billboard 用到（最多 3 行）。
     pub overview: Option<String>,
+    /// 条目自身能否直接播放（电影 / 单集）。首页 hero 据此决定要不要给「▶ 播放」：
+    /// hero 取的是「继续观看 / 最近添加」的第一条，可能是剧集（片源挂在单集上）。
+    pub playable: bool,
 }
 
 impl CardView {
@@ -54,6 +57,12 @@ impl CardView {
     /// 设置简介（billboard 用）。
     pub fn with_overview(mut self, overview: impl Into<String>) -> Self {
         self.overview = Some(overview.into());
+        self
+    }
+
+    /// 设置条目能否直接播放（首页 hero 的播放入口用）。
+    pub fn with_playable(mut self, playable: bool) -> Self {
+        self.playable = playable;
         self
     }
 

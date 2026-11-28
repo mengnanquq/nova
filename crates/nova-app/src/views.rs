@@ -391,6 +391,8 @@ pub fn card_view(item: &MediaItem) -> CardView {
         item.progress_fraction().filter(|fraction| *fraction > 0.0)
     };
     let mut card = CardView::new(item.id.as_str(), item.title.clone());
+    // 首页 hero 取的是第一条卡：主推可能是剧集，播放按钮要按条目类型下架。
+    card.playable = item.kind.is_playable();
     if let Some(subtitle) = subtitle_for(item) {
         card = card.with_subtitle(subtitle);
     }
@@ -411,10 +413,10 @@ pub fn detail_from_item(
     prefs: &UserPreferences,
 ) -> DetailView {
     let mut view = DetailView::new(item.id.as_str(), item.title.clone());
-    // 播放入口按条目类型下架，与「片源是否为空」无关：剧集一律没有片源（挂在
-    // 单集上），选集尚未实现，点「播放」只会落到错误卡（真机 R9-A2 实测）；电影
-    // 离线时片源也可能为空，但联网后能播，不能一并下架（R9-A2）。
-    view.playable = !matches!(item.kind, MediaKind::Series);
+    // 播放入口按条目类型下架，与「片源是否为空」无关：剧集 / 季一律没有片源（挂在
+    // 单集上），选集尚未实现，点「播放」只会落到错误卡（真机 R9-A2 实测）；单集与
+    // 电影可以直接播。电影离线时片源也可能为空，但联网后能播，不能按片源判断。
+    view.playable = item.kind.is_playable();
     view.original_title = item.original_title.clone();
     view.meta_line = detail_meta_line(item.year, item.runtime, &item.genres);
     view.overview = item.overview.clone();
@@ -992,8 +994,8 @@ mod tests {
         assert_eq!(player.duration, Some(Duration::from_secs(8280)));
     }
 
-    /// R9-A2：播放入口只按条目类型判断，不看片源——剧集（片源挂在单集上、选集未做）
-    /// 没有播放入口；电影离线时片源可能为空，但联网后能播，播放按钮照常保留。
+    /// R9-A2：播放入口只按条目类型判断，不看片源——剧集 / 季（片源挂在单集上、选集未做）
+    /// 没有播放入口；电影与单集可以直接播（电影离线时片源可能为空，但联网后能播）。
     #[test]
     fn detail_playable_follows_item_kind_not_source_count() {
         let db = Database::open_in_memory().expect("内存库");
@@ -1001,7 +1003,21 @@ mod tests {
         db.upsert_server(&server.info, 1).expect("写服务器");
         let movie = item("m", "沙丘", MediaKind::Movie, Duration::ZERO, Some(8280));
         let series = item("s", "X局密档", MediaKind::Series, Duration::ZERO, None);
-        db.upsert_items(&server.info.id, &[movie, series], 1)
+        let season = item(
+            "s1",
+            "X局密档 第一季",
+            MediaKind::Season,
+            Duration::ZERO,
+            None,
+        );
+        let episode = item(
+            "e1",
+            "X局密档 S01E01",
+            MediaKind::Episode,
+            Duration::ZERO,
+            None,
+        );
+        db.upsert_items(&server.info.id, &[movie, series, season, episode], 1)
             .expect("写条目");
 
         let movie_detail = detail_view(&db, &server.info.id, "m")
@@ -1017,6 +1033,66 @@ mod tests {
             .expect("读详情")
             .expect("条目存在");
         assert!(!series_detail.playable, "剧集详情不该有播放入口");
+
+        let season_detail = detail_view(&db, &server.info.id, "s1")
+            .expect("读详情")
+            .expect("条目存在");
+        assert!(
+            !season_detail.playable,
+            "季也是容器（片源挂在单集上），不该有播放入口"
+        );
+
+        let episode_detail = detail_view(&db, &server.info.id, "e1")
+            .expect("读详情")
+            .expect("条目存在");
+        assert!(episode_detail.playable, "单集可以直接播");
+    }
+
+    /// 卡片的 `playable` 跟着条目类型走（首页 hero 靠它决定要不要给播放入口）。
+    #[test]
+    fn card_playable_follows_item_kind() {
+        for (kind, playable) in [
+            (MediaKind::Movie, true),
+            (MediaKind::Episode, true),
+            (MediaKind::Series, false),
+            (MediaKind::Season, false),
+        ] {
+            let card = card_view(&item("i", "条目", kind, Duration::ZERO, Some(6000)));
+            assert_eq!(card.playable, playable, "kind = {kind:?}");
+        }
+    }
+
+    /// 首页 hero 取「继续观看 / 最近添加」的第一条：主推是剧集时 `hero_playable()`
+    /// 必须是 false（界面上没有「▶ 播放」），电影仍是 true。
+    #[test]
+    fn home_hero_playable_follows_the_hero_item_kind() {
+        for (kind, playable) in [(MediaKind::Movie, true), (MediaKind::Series, false)] {
+            let db = Database::open_in_memory().expect("内存库");
+            let server = server("srv-hero");
+            db.upsert_server(&server.info, 1).expect("写服务器");
+            db.upsert_items(
+                &server.info.id,
+                &[item("h", "主推条目", kind, Duration::ZERO, Some(6000))],
+                1,
+            )
+            .expect("写条目");
+
+            let home = home_view(
+                &db,
+                &server.info.id,
+                &UserPreferences::default(),
+                &Status::NoServer,
+                Vec::new(),
+                None,
+            )
+            .expect("构建首页");
+            assert_eq!(
+                home.hero.as_ref().map(|hero| hero.item_id.as_str()),
+                Some("h"),
+                "hero 应取到唯一一条内容"
+            );
+            assert_eq!(home.hero_playable(), playable, "hero kind = {kind:?}");
+        }
     }
 
     /// 播放页初始位置与详情页文案必须读同一份偏好（都是 `db.preferences()`）：

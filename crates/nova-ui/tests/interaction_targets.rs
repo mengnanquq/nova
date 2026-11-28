@@ -30,7 +30,7 @@ use common::{
     player_view, search_empty, search_view,
 };
 use nova_ui::{
-    App, AppWindow, BannerData, BannerLevel, CardView, HomeView, LibraryRowView, Page,
+    App, AppWindow, BannerData, BannerLevel, CardView, HomeView, LibraryRowView, Page, Route,
     TARGET_KINDS, TargetInfo,
 };
 use slint::ComponentHandle;
@@ -591,6 +591,44 @@ fn touch_areas_are_classified() {
         stale.is_empty(),
         "登记表里有已经不存在的 TouchArea（改名/删除后要同步登记表）：{stale:?}"
     );
+}
+
+/// 首页 hero 主推是剧集时没有「▶ 播放」（与详情页同一判据：`MediaKind::is_playable`）：
+/// 按钮不实例化、不登记 `home.hero.play`，只剩「更多信息」；即使调试通道直接派发
+/// `hero-play` 也不能凭空压入播放路由。
+#[test]
+fn series_hero_has_no_play_target_but_keeps_more_info() {
+    let app = window_sized(WINDOW_W, 1600.0);
+    let mut home = home_filled();
+    // hero 按钮行只在有简介时实例化（与 `home_targets_cover_hero_rows_and_navbar` 同）。
+    home.hero = home.hero.clone().map(|hero| {
+        hero.with_overview("保罗·厄崔迪走上复仇之路。")
+            .with_playable(false)
+    });
+    install_posters(&app, &home_image_ids(&home));
+    app.set_home(&home);
+    app.show_home();
+    app.ui().set_billboard_ratio(0.2);
+    app.ui().show().expect("显示窗口");
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1200));
+
+    let targets = settle(&app, 80);
+    assert_invariants_in("home-series-hero", &targets, WINDOW_W, 1600.0);
+    assert!(
+        app.target("home.hero.play").is_none(),
+        "主推是剧集时不该有「▶ 播放」（清单：{:?}）",
+        targets.iter().map(|target| &target.id).collect::<Vec<_>>()
+    );
+    assert!(
+        app.target("home.hero.info").is_some(),
+        "「更多信息」必须保留"
+    );
+
+    // 调试通道（`click` / 直接派发）绕过了 TouchArea，Rust 侧还要再门控一次。
+    app.ui().invoke_hero_play();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(40));
+    assert_eq!(app.page(), Page::Home, "不能起播：hero 是剧集");
+    assert_eq!(app.current_route(), Some(Route::Home));
 }
 
 #[test]
@@ -1323,7 +1361,7 @@ fn aggregate_rows_have_no_more_target() {
     // 同一做法（真实窗口靠滚动，滚动后的坐标由 `interaction_sweep` 与真机验证覆盖）。
     let app = window_sized(WINDOW_W, 1600.0);
     let mut home = HomeView {
-        hero: Some(CardView::new("h1", "沙丘：第二部")),
+        hero: Some(CardView::new("h1", "沙丘：第二部").with_playable(true)),
         continue_watching: vec![CardView::new("c1", "最后生还者")],
         library_rows: vec![LibraryRowView {
             library_id: "lib-1".to_string(),

@@ -76,7 +76,7 @@ pub enum FocusLayer {
     /// 内容层（卡片 / 网格）。
     #[default]
     Content = 0,
-    /// 首页 hero 的按钮行（播放 / 更多信息）。
+    /// 首页 hero 的按钮行（播放 / 更多信息；主推条目不能播时只剩更多信息）。
     Hero = 1,
     /// 顶栏（库标签 + 搜索按钮）。
     Navbar = 2,
@@ -1153,6 +1153,12 @@ impl App {
         };
         state.home = view.clone();
         state.focus.home = focus;
+        // hero 的槽位随主推条目类型缩：不能播时只有「更多信息」（槽位 0）。停在旧的
+        // 「播放」槽位上会让焦点环无处可画，下一次按键才“自愈”。
+        if !view.hero_playable() && state.hero_focus != 0 {
+            state.hero_focus = 0;
+            self.ui.set_hero_focus(0);
+        }
         drop(state);
         if self.ui.get_home_focus() != focus as i32 {
             self.ui.set_home_focus(focus as i32);
@@ -1791,12 +1797,16 @@ fn wire(ui: &AppWindow, state: &Rc<RefCell<State>>) {
         let state = state.clone();
         ui.on_hero_play(move || {
             if let Some(ui) = weak.upgrade() {
-                let item_id = state
-                    .borrow()
-                    .home
-                    .hero
-                    .as_ref()
-                    .map(|hero| hero.item_id.clone());
+                let item_id = {
+                    let state = state.borrow();
+                    // 鼠标/键盘都走这条回调，调试通道的 `click` 也能直接触发：
+                    // 「播放」按钮条件实例化还不够，这里也要门控（主推是剧集时
+                    // 不能凭空压入一个只会显示错误卡的播放路由）。
+                    if !hero_playable(&state) {
+                        return;
+                    }
+                    state.home.hero.as_ref().map(|hero| hero.item_id.clone())
+                };
                 if let Some(item_id) = item_id {
                     play(&ui, &state, &item_id);
                 }
@@ -2546,6 +2556,19 @@ fn hero_available(state: &State) -> bool {
     })
 }
 
+/// 首页 hero 的主推条目能不能直接播（电影 / 单集）。
+///
+/// hero 取的是「继续观看 / 最近添加」的第一条，可能是剧集：剧集本体没有可播版本
+/// （片源挂在单集上），`home.slint` 不实例化「▶ 播放」。
+fn hero_playable(state: &State) -> bool {
+    state.home.hero_playable()
+}
+
+/// hero 按钮行真实存在的槽位数：能播时是「▶ 播放」+「更多信息」，不能播时只有后者。
+fn hero_slots(state: &State) -> usize {
+    if hero_playable(state) { 2 } else { 1 }
+}
+
 fn set_focus_layer(ui: &AppWindow, state: &Rc<RefCell<State>>, layer: FocusLayer) {
     state.borrow_mut().layer = layer;
     ui.set_focus_layer(layer.index());
@@ -2710,10 +2733,11 @@ fn move_chrome_focus(
 ) -> bool {
     match layer {
         FocusLayer::Hero => {
-            // hero 只有两个按钮（播放 / 更多信息）：在一端夹住。
-            let current = state.borrow().hero_focus.min(1);
+            // 槽位数随主推条目类型变：不能播时只剩「更多信息」（下标 0）。
+            let slots = hero_slots(&state.borrow());
+            let current = state.borrow().hero_focus.min(slots - 1);
             let next = if dx > 0 {
-                (current + 1).min(1)
+                (current + 1).min(slots - 1)
             } else {
                 current.saturating_sub(1)
             };
@@ -2742,9 +2766,13 @@ fn move_chrome_focus(
     }
 }
 
-/// hero 层 Enter：0 = 播放（与点击「▶ 播放」同一条回调链），1 = 打开详情。
+/// hero 层 Enter：能播时 0 = 播放（与点击「▶ 播放」同一条回调链），其余打开详情。
 fn activate_hero(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
-    if state.borrow().hero_focus == 0 {
+    let (focus, playable) = {
+        let state = state.borrow();
+        (state.hero_focus, hero_playable(&state))
+    };
+    if playable && focus == 0 {
         // `.slint` 里点「▶ 播放」走的就是这个回调（`wire` 接的是 `play`）。
         ui.invoke_hero_play();
         return true;

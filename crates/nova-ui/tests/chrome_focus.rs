@@ -245,6 +245,61 @@ fn hero_buttons_are_keyboard_reachable() {
     );
 }
 
+/// 主推是剧集（不能直接播）时 hero 只剩「更多信息」：进 hero 焦点就落在它上面，
+/// `←` / `→` 不会移到不存在的播放按钮，`Enter` 打开详情（不压播放路由）。
+#[test]
+fn series_hero_has_only_more_info_and_enter_opens_detail() {
+    let app = setup(1280.0, 800.0);
+    let mut home = home_with_hero_overview();
+    home.hero = home.hero.map(|hero| hero.with_playable(false));
+    app.set_home(&home);
+    app.show_home();
+
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Hero);
+    assert_eq!(app.ui().get_hero_focus(), 0, "唯一槽位是「更多信息」");
+    press(&app, Key::RightArrow);
+    press(&app, Key::LeftArrow);
+    assert_eq!(
+        app.ui().get_hero_focus(),
+        0,
+        "方向键不该移到不存在的「▶ 播放」"
+    );
+
+    press(&app, Key::Return);
+    assert_eq!(app.page(), Page::Detail, "Enter = 「更多信息」");
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Detail {
+            item_id: "dune".to_string()
+        }),
+        "Enter 不该压入播放路由"
+    );
+}
+
+/// hero 从可播变成不能播（数据刷新）时，停在「播放」槽位上的焦点要退回 0，
+/// 不能留下一个看不见焦点环、`←` / `→` 也救不回来的悬空下标。
+#[test]
+fn hero_focus_falls_back_to_more_info_when_the_hero_stops_being_playable() {
+    let app = setup_home();
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Hero);
+    press(&app, Key::RightArrow);
+    assert_eq!(app.ui().get_hero_focus(), 1, "先停在「更多信息」上");
+
+    let mut home = home_with_hero_overview();
+    home.hero = home.hero.map(|hero| hero.with_playable(false));
+    app.set_home(&home);
+    assert_eq!(
+        app.ui().get_hero_focus(),
+        0,
+        "不能播了，「更多信息」就是槽位 0"
+    );
+
+    press(&app, Key::Return);
+    assert_eq!(app.page(), Page::Detail, "Enter 仍然是打开详情");
+}
+
 /// 顶栏层 `Esc` 只回内容层，**不**返回上一页；再按一次才返回。
 #[test]
 fn escape_in_the_navbar_returns_to_content_without_going_back() {

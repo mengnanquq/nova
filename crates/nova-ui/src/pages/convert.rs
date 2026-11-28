@@ -157,6 +157,7 @@ pub fn home_data(view: &HomeView, images: &ImageStore, previous: Option<&HomeDat
     HomeData {
         hero: hero.unwrap_or_default(),
         has_hero,
+        hero_playable: view.hero_playable(),
         continue_watching: reuse_model(
             previous.map(|previous| &previous.continue_watching),
             view.continue_watching

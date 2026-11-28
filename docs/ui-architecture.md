@@ -28,6 +28,7 @@ pub struct CardView {
     pub subtitle: Option<String>,   // "第 2 季 · 第 5 集" / "2021 · 动作"
     pub progress: Option<f32>,      // 0.0..=1.0，仅"继续观看"
     pub badge: Option<String>,      // "4K" / "HDR" / "S01E05"
+    pub playable: bool,             // 条目自身能否直接播（首页 hero 用）
 }
 
 pub struct HomeView {
@@ -202,7 +203,8 @@ export struct Target {
   横幅动作 / 对话框 / 菜单）没法写进父组件的数组（Slint 1.19 的数组属性没有推导、没有拼接），
   它们在 `TargetBus.gen` 变化时调用 `TargetBus.register(...)` 自报坐标。详情页的「播放」
   按钮与「播放版本」入口也都是条件子树（按条目类型 / 片源有无实例化），同样走
-  `TargetBus.register`；
+  `TargetBus.register`；首页 hero 的「▶ 播放」同理（主推是剧集时整个不实例化、不登记），
+  它的登记只能写在那个条件子树里（父作用域看不到未实例化的元素名）；
 - 这两路在 `nova-ui` 的 `App::targets()` 里合并、按当前页命名空间过滤、去掉被窗口裁掉的项。
 
 **登记依赖实例化**：Slint 1.19 的 `for` 项是**惰性创建**的——只有 item tree 被遍历
@@ -255,16 +257,17 @@ export struct Target {
   顶栏（navbar）   ← / → 在「标签 0..N-1 → 搜索按钮」之间移动，Enter 激活，↓ 回下一层
       ↑↓
   hero（hero）     首页 billboard 的「▶ 播放」/「更多信息」，← / → 切换，Enter 激活
+                  （主推是剧集时没有播放入口，只剩「更多信息」）
       ↑↓
   内容（content）  卡片 / 网格（原来的扁平焦点）
 ```
 
 | 键 | 行为 |
 |---|---|
-| `←` `→` | 行内移动焦点（首页是横向行，媒体库是网格）；在 hero 层是播放 / 更多信息；在顶栏是标签 ↔ 搜索按钮 |
+| `←` `→` | 行内移动焦点（首页是横向行，媒体库是网格）；在 hero 层是播放 / 更多信息（不能播时只有更多信息，键无效）；在顶栏是标签 ↔ 搜索按钮 |
 | `↑` | 行/网格之间上移；**内容第一行**再往上：首页先进 hero 按钮行（hero 有简介时），再进顶栏；媒体库首行直接进顶栏；搜索页的结果网格**首行**先进页内搜索框，输入框里再按一次才进顶栏 |
 | `↓` | 行/网格之间下移；顶栏 → 首页先回 hero、其余页回内容层；hero → 内容层 |
-| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情；播放页上是播放 / 暂停，**播完后是从头重播**、**错误卡上是「重试」**（见「起播与页面导航」） |
+| `Enter` / `Space` | 打开详情 / 开始播放；顶栏上激活焦点标签（切库）或展开搜索框并聚焦输入框；hero 上播放 / 打开详情（主推不能播时永远是打开详情）；播放页上是播放 / 暂停，**播完后是从头重播**、**错误卡上是「重试」**（见「起播与页面导航」） |
 | `Esc` / `Backspace` | 在 chrome 层（顶栏 / hero）**只回内容层**，不返回上一页；在内容层返回上一级（栈空时无动作） |
 | `Ctrl+F` | 聚焦搜索框（首页/媒体库是顶栏胶囊，搜索页是页内大搜索框） |
 | 搜索页 `Enter` | 提交并把焦点还给全局键盘（方向键在结果网格里移动） |
@@ -276,7 +279,9 @@ export struct Target {
 详情页没有顶栏（页内就是 hero + 按钮行），它的按钮与版本行本来就在内容层的扁平焦点
 里，`↑` 仍是行间上移。**剧集详情没有播放按钮**（见「详情页」一节）：`focus_rows` 只剩
 「我的列表」一行，焦点 `0` 就是它，`←` / `→` / `↑` / `↓` 不动焦点，`Enter` 激活
-「我的列表」。播放页有自己的快捷键表，见 `docs/debugging.md`。
+「我的列表」。首页 hero 的槽位数同样按条目类型缩：主推是剧集时没有「▶ 播放」，
+`hero_slots` 返回 `1`，「更多信息」就是槽位 `0`（`←` / `→` 不动，`Enter` 打开详情，
+调试通道直接派发 `hero-play` 也会被 Rust 侧门控掉）。播放页有自己的快捷键表，见 `docs/debugging.md`。
 
 `Tab` **不参与**页面导航：那是 Slint 内建的表单遍历，会和输入框 / 顶栏搜索框抢焦点。
 
@@ -353,15 +358,26 @@ model，库行按 `library_id` 匹配，所以行内 `PosterCard` 实例不会�
 「这个条目没有可播放的版本：确认服务端上文件还在」。所以：
 
 - `DetailView.playable` 由生产方（`nova-app` 的 `detail_from_item`）按
-  **条目类型**填写：只有 `MediaKind::Series` 是 `false`。**不能按「片源为空」判断**：
+  **条目类型**（`MediaKind::is_playable()`）填写：只有电影与单集是 `true`，剧集和
+  季都是 `false`。**不能按「片源为空」判断**：
   电影离线时 `sources` 也可能为空，联网后能播，播放按钮要保留。
+- 详情页的**加载占位**（`detail_placeholder`，“正在加载…”）显式 `playable = false`：
+  占位不知道条目类型，用 `DetailView::default()` 的默认值会先闪一下可点的「播放」。
 - `playable = false` 时 `ui/detail.slint` 里播放按钮**整个不实例化**（`if (root.data.playable)`），
   也不登记 `detail.play`。只写 `visible: false` 不够：不可见的 Slint 元素仍有宽高，仍会被
   命中测试判为可点，清单里也照样留着它。
 - 焦点模型跟着缩成一行：`pages::detail::focus_rows` 返回 `vec![1]`（焦点 `0` = 「我的
   列表」，只有能播时才是 `1 + sources.len()`，`0` = 播放）。键盘 `Enter` 由
   `play_current` 门控到「我的列表」，不会复活一个界面上不存在的按钮。
-- 电影（`MediaKind::Movie`）不受影响：`sources` 为空时播放按钮照常在。
+- 电影与单集（`MediaKind::Movie` / `MediaKind::Episode`）不受影响：`sources` 为空时
+  播放按钮照常在。
+
+**首页 hero 的播放入口用同一个判据。** hero 取的是「继续观看 / 最近添加」的第一条，
+可能是剧集：`CardView.playable` 由 `card_view` 按 `item.kind.is_playable()` 填写，
+`HomeView::hero_playable()` 汇总给 `HomeData.hero-playable`。false 时 `home.slint` 里
+「▶ 播放」整个不实例化、不登记 `home.hero.play`，hero 按钮行只剩「更多信息」；
+`pages::app` 的 `hero_slots` 随之变成 `1`，焦点只落在「更多信息」上，`on_hero_play`
+也做门控（调试通道的 `click` 绕不过去）。
 
 **版本区只在有片源时显示。** 整段版本入口（`NETFLIX` 风格的下拉 + 展开面板）包在
 `if (root.data.sources.length > 0)` 里：片源为空时既没有版本行，也没有那个只剩

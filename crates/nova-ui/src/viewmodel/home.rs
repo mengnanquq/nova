@@ -67,6 +67,12 @@ impl HomeView {
         keys
     }
 
+    /// hero 是否可以直接播放：hero 取的是「继续观看 / 最近添加」的第一条，可能是
+    /// 剧集（本体没有可播版本），此时首页不该给「▶ 播放」。
+    pub fn hero_playable(&self) -> bool {
+        self.hero.as_ref().is_some_and(|hero| hero.playable)
+    }
+
     /// hero 需要的图（背景图 + 海报兜底）；没有 hero 时为空。
     pub fn hero_image_keys(&self) -> Vec<ImageKey> {
         match &self.hero {
