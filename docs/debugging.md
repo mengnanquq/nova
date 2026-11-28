@@ -366,7 +366,8 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 合法输入（Emby / Jellyfin 允许空密码账号）。
 
 **不点击清单**（`SWEEP_NEVER_CLICK`，体检 R9-C8 / R9-C9）：里面列的目标 `sweep` 一律
-**跳过不点**。目前有四类，理由不同：
+**跳过不点**。目前有四类静态条目（另有一条**按状态**判断的规则，见下面的「错误卡
+状态」），理由不同：
 
 - `dialog.connect`：提交回调在上层（`nova-app` 的 `Shell::submit_add_server`）是真的去连
   `address` 指向的服务器；对话框用 Ctrl+N 打开时会预填最近服务器的地址 / 用户名（密码
@@ -388,6 +389,17 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 结果里它们照样出现，带 `skipped:true`、`changed:false`，不算 dead、也不进 `dead` 命令的
 `results`。要验证行为，请手动 `click {"target":"..."}`（或者直接用人点）。
 
+**错误卡状态下，会触发重试的目标一律跳过**（`SWEEP_SKIP_ON_PLAYER_ERROR`，体检
+R9-C11）。播放页处于错误卡（`player.error` 非空）时，`player.play-pause` 与
+`player.center-play` 都走 `player_play_pause`，而它在错误态下**直接转
+`player_retry`**：`Player::retry` 在 `request == None` 时先 `end_session(Switch)`、
+`session_seq+1`，再重新上报 Started——点一下「播放」就是「结束会话 + 重开会话」，
+与清单里的 `player.retry` 等价。这两个键**不能写进静态清单**：非错误态下它们只是
+播放 / 暂停，必须照常扫；所以判据是**扫描当时的状态**，每轮现读。同理，键盘上的
+播放 / 暂停键（错误卡上 = 「重试」，见 `ui-architecture.md` 的键位表）也不该按，
+但键盘不是扫描目标（`sweep` 只用坐标点击）。加新目标时两层判据都要想：不可撤销的
+写进清单，只在特定状态下会落到重试的写成状态规则。
+
 清单这么短是有原因的：其余“有副作用”的点击（播放 / 全屏 / 音量 / 静音 / 切库 / 切排序）
 都能在扫描后恢复或不影响用户数据（播放 / 暂停状态、seek 后的位置、倍速不会被恢复，见
 上面的「不恢复」列表）；登录会在服务端留下记录（还可能写库）、离开播放页会结束用户
@@ -406,7 +418,8 @@ NOVA_LOG=warn,nova_playback_mpv=debug nova-desktop
 不会点亮一个没人打开的框，也不会把错误留给下一次扫描。
 
 **`sweep` 还是会点「播放」「全屏」这类有副作用的按钮**（播放页的 `player.back` /
-`player.retry` / 菜单行除外，它们在不点击清单里）：全屏会被恢复、对话框开关按扫描前
+`player.retry` / 菜单行，以及错误卡状态下的 `player.play-pause` / `player.center-play`
+除外，它们在不点击清单或状态规则里）：全屏会被恢复、对话框开关按扫描前
 对齐，但播放 / 暂停状态、seek 后的位置、倍速会停在点击后的值，**连接的服务器 / 写盘
 操作也不会被撤销**（除了上面清单里的登录、会话结束 / 重开与轨道偏好）。在真实服务器上
 跑之前先想清楚（或者只 `click` 具体目标）。

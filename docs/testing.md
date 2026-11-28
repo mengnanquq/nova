@@ -80,12 +80,15 @@ const KNOWN_DEAD: &[(&str, &str, &str)] = &[
 - 但测试会双向核对：**出现新的 dead → 红灯**（多半是新按钮忘了接行为），
   **清单里的项又活了 → 也红灯**（清单过时，删掉它）。
 - 两类目标**不进**这份清单（扫描结果里直接带了标记，`dead()` 会跳过它们）：
-  - `skipped`：`SWEEP_NEVER_CLICK` 里"故意不点"的目标（精确 id + 前缀两段，判据是
-    [`nova_ui::SweepEntry::is_dead`]）——`dialog.connect`（点了会真的发起登录）、
+  - `skipped`：`SWEEP_NEVER_CLICK` 里"故意不点"的目标（精确 id + 前缀两段）与
+    `SWEEP_SKIP_ON_PLAYER_ERROR` 里"错误卡状态下不点"的目标，判据是
+    [`nova_ui::SweepEntry::is_dead`]——`dialog.connect`（点了会真的发起登录）、
     `player.back`（点了会结束播放会话）、`player.retry`（错误卡上的重试会
     `end_session` + 重开会话）、`player.menu.audio.*` / `player.menu.subtitle.*`
     （会关菜单、写轨道偏好并上报 `TrackChange`，而且菜单一关后面菜单行的坐标就
-    落到画面上）。见 `docs/debugging.md` 的「不点击清单」；
+    落到画面上）；错误卡状态下还要加 `player.play-pause` / `player.center-play`
+    （错误态下它们就是重试；非错误态只是播放 / 暂停，所以只能按状态判，见
+    `docs/debugging.md` 的「不点击清单」）；
   - `no_op`：点了、状态也没变，但是设计如此的**预期空操作**——当前所在的库标签
     （`library.nav.tab.N`）就是这种：写死 id 的 `KNOWN_DEAD` 装不下它，改由
     `App::sweep` 识别：**按库 id**（不是 id 里的下标，标签顺序一变下标就指到别的库；

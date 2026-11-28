@@ -782,6 +782,130 @@ fn player_sweep_skips_retry_on_the_error_card() {
     );
 }
 
+/// 体检 R9-C11：错误卡状态下 sweep 也不点「播放」键——它在错误态下就是「重试」。
+///
+/// `player.play-pause`（与 `player.center-play`）走 `player_play_pause`，而
+/// `player.error` 非空时这个函数**直接转 `player_retry`**：`Player::retry` 在
+/// `request == None` 时先 `end_session(Switch)`、`session_seq+1`，再重新上报
+/// Started——点一下就是「结束会话 + 重开会话」，与 `player.retry` / `player.back`
+/// 同一类副作用。修复前它只受静态清单管（非错误态必须照常点，所以进不了清单），
+/// 错误卡状态下被真的点了：`on_player_retry` 被触发，真实实现里还会重开一次会话。
+///
+/// 非错误态下同一个键只是播放 / 暂停，必须照常点——这条按状态跳过不能扩大到整个
+/// 播放页。
+#[test]
+fn player_sweep_skips_play_pause_on_the_error_card() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+
+    // ---- 错误卡状态：播放键 = 重试，一律不点 ----
+    let app = build_app(&local, Page::Player, 0.88);
+    let retries = Rc::new(RefCell::new(0usize));
+    let toggles = Rc::new(RefCell::new(0usize));
+    let plays = Rc::new(RefCell::new(0usize));
+    {
+        let retries = Rc::clone(&retries);
+        app.on_player_retry(move || *retries.borrow_mut() += 1);
+    }
+    {
+        let toggles = Rc::clone(&toggles);
+        app.on_player_play_pause(move |_| *toggles.borrow_mut() += 1);
+    }
+    {
+        let plays = Rc::clone(&plays);
+        app.on_play(move |id| {
+            let _ = id;
+            *plays.borrow_mut() += 1;
+        });
+    }
+    let mut view = app.player_view();
+    view.playing = true;
+    view.error = Some("服务器不可达，检查网络或服务器状态。".to_owned());
+    view.error_action = Some("重试".to_owned());
+    app.set_player(&view);
+
+    let error_scan = scan(&app);
+    assert_eq!(error_scan.page, "player");
+    assert!(
+        error_scan.ids.iter().any(|id| id == "player.play-pause"),
+        "错误卡状态下播放键仍应登记在清单里：{:?}",
+        error_scan.ids
+    );
+    assert!(
+        error_scan
+            .skipped
+            .iter()
+            .any(|id| id == "player.play-pause"),
+        "错误卡状态下播放键 = 重试，sweep 必须跳过不点：{:?}",
+        error_scan.skipped
+    );
+    assert!(
+        error_scan.skipped.iter().any(|id| id == "player.retry"),
+        "错误卡上的「重试」本来就该跳过：{:?}",
+        error_scan.skipped
+    );
+    assert!(
+        !error_scan
+            .dead
+            .iter()
+            .any(|(_, id, _)| id == "player.play-pause"),
+        "跳过 ≠ dead：{:?}",
+        error_scan.dead
+    );
+    assert_eq!(*retries.borrow(), 0, "sweep 不该触发任何一次重试");
+    assert_eq!(
+        *toggles.borrow(),
+        0,
+        "错误卡状态下播放键不切播放状态（它走的是重试）"
+    );
+    assert_eq!(*plays.borrow(), 0, "扫完播放页也不该重开会话（on_play）");
+    assert!(
+        !error_scan.aborted,
+        "不该提前收尾：{:?}",
+        error_scan.abort_reason
+    );
+    assert!(
+        error_scan.unrestored.is_empty(),
+        "每一项都要能恢复：{:?}",
+        error_scan.unrestored
+    );
+    assert_eq!(app.page(), Page::Player, "扫描结束要回到播放页");
+
+    // ---- 非错误态：同一个键只是播放 / 暂停，照常点 ----
+    let app = build_app(&local, Page::Player, 0.88);
+    let retries = Rc::new(RefCell::new(0usize));
+    let toggles = Rc::new(RefCell::new(0usize));
+    {
+        let retries = Rc::clone(&retries);
+        app.on_player_retry(move || *retries.borrow_mut() += 1);
+    }
+    {
+        let toggles = Rc::clone(&toggles);
+        app.on_player_play_pause(move |_| *toggles.borrow_mut() += 1);
+    }
+    // `playing = true`：中央大播放图标（暂停时才出现）不在清单里，只数播放键。
+    let mut view = app.player_view();
+    view.playing = true;
+    app.set_player(&view);
+
+    let plain = scan(&app);
+    assert!(
+        !plain
+            .skipped
+            .iter()
+            .any(|id| id == "player.play-pause" || id == "player.center-play"),
+        "非错误态播放键照常点，不该跳过：{:?}",
+        plain.skipped
+    );
+    assert_eq!(
+        *toggles.borrow(),
+        1,
+        "非错误态点一次播放键应切一次播放状态：{:?}",
+        plain.ids
+    );
+    assert_eq!(*retries.borrow(), 0, "非错误态不该走重试");
+}
+
 /// 体检 R9-C8：播放页的菜单行（`player.menu.audio.*` / `player.menu.subtitle.*`）
 /// 一律按前缀跳过。
 ///

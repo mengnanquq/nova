@@ -400,10 +400,11 @@ impl From<Target> for TargetInfo {
 /// 一次交互扫描的单项结果。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepEntry {
-    /// 这次点击被**跳过**（见 [`SWEEP_NEVER_CLICK`]）：没有点、不判 dead，
-    /// 列在结果里是为了让体检看得见「清单里有它、但我们故意不碰」——
-    /// 会联网登录（`dialog.connect`）、会结束 / 重开播放会话（`player.back` /
-    /// `player.retry`）、会写偏好与改轨道（`player.menu.*`）的目标。
+    /// 这次点击被**跳过**（见 [`SWEEP_NEVER_CLICK`] 与 [`sweep_skip_for_state`]）：
+    /// 没有点、不判 dead，列在结果里是为了让体检看得见「清单 / 状态规则里有它、
+    /// 但我们故意不碰」——会联网登录（`dialog.connect`）、会结束 / 重开播放会话
+    /// （`player.back` / `player.retry`，以及**错误卡状态下**的 `player.play-pause` /
+    /// `player.center-play`）、会写偏好与改轨道（`player.menu.*`）的目标。
     pub skipped: bool,
     /// 这次点击是**预期内的空操作**（点当前所在的库标签）：点了、状态没变，
     /// 但这是「已经选中」的语义，不判 dead（体检 R9-C6）。
@@ -458,8 +459,8 @@ pub struct SweepReport {
 
 impl SweepReport {
     /// 点完状态完全没变的目标（"死按钮"候选）。被跳过的目标（
-    /// [`SWEEP_NEVER_CLICK`]）没点过、点当前库标签的预期空操作
-    /// （[`SweepEntry::no_op`]）本来就不该有变化，两者都不算 dead。
+    /// [`SWEEP_NEVER_CLICK`] 与 [`sweep_skip_for_state`]）没点过、点当前库标签的
+    /// 预期空操作（[`SweepEntry::no_op`]）本来就不该有变化，两者都不算 dead。
     pub fn dead(&self) -> Vec<&SweepEntry> {
         self.entries
             .iter()
@@ -536,6 +537,29 @@ fn sweep_never_click(id: &str) -> bool {
         || SWEEP_NEVER_CLICK_PREFIXES
             .iter()
             .any(|prefix| id.starts_with(prefix))
+}
+
+/// **错误卡状态**下会落到 `player_retry` 的目标（体检 R9-C11）。
+///
+/// `player.play-pause` 与 `player.center-play` 都走 `player_play_pause`：无错误时
+/// 它们只切播放 / 暂停（必须照常扫），但错误卡状态下这个函数**先转
+/// `player_retry`**——`Player::retry` 在 `request == None` 时先
+/// `end_session(Switch)`、`session_seq+1`，再重新上报 Started，与
+/// [`SWEEP_NEVER_CLICK`] 里的 `player.retry` 完全同一类会话级副作用（结束会话 +
+/// 重开会话）。所以它们不能进静态清单（非错误态点了没事），只能按**状态**跳过，
+/// 见 [`sweep_skip_for_state`]。
+const SWEEP_SKIP_ON_PLAYER_ERROR: &[&str] = &["player.play-pause", "player.center-play"];
+
+/// 按**当前状态**判断这次要不要跳过——与 [`sweep_never_click`]（静态清单）并列的第二层。
+///
+/// 目前只有一条规则：播放页处于错误卡状态（`PlayerView::error` 非空）时，凡是会落到
+/// `player_retry` 的目标（[`SWEEP_SKIP_ON_PLAYER_ERROR`]）一律跳过。整仓 `player_retry`
+/// 的调用点只有三处：错误卡上的 `player.retry` 按钮（`on_player_retry` 回调）、
+/// `player.play-pause` 与 `player.center-play` 共用的 `player_play_pause`；前者的按钮
+/// 在静态清单里，后两者由这条状态规则覆盖。键盘（错误卡上的播放 / 暂停键 = 重试）不是
+/// 扫描目标——`sweep` 只用坐标点击。
+fn sweep_skip_for_state(id: &str, state: &State) -> bool {
+    state.player.error.is_some() && SWEEP_SKIP_ON_PLAYER_ERROR.contains(&id)
 }
 
 /// 扫描开始时的对话框快照：`sweep` 每轮拿它把对话框恢复成同一个起点。
@@ -890,6 +914,9 @@ impl App {
     /// - 点了会结束 / 发起真实会话、改轨道或偏好的目标（[`SWEEP_NEVER_CLICK`]：
     ///   联网登录、离开播放会话、错误卡重试、播放页菜单行）**跳过不点**，
     ///   结果里标 `skipped`（体检 R9-C8 / R9-C9）；
+    /// - **错误卡状态下**凡是会落到 `player_retry` 的目标也跳过（[`sweep_skip_for_state`]：
+    ///   `player.play-pause` / `player.center-play`）：它们的点击等价于卡上的「重试」
+    ///   （体检 R9-C11）；
     /// - 点当前所在库的标签是预期内的空操作，标 `no_op`，不算 dead（体检 R9-C6）；
     ///   只在状态确实没变时才标；
     /// - 真的恢复不了就提前收尾：`aborted:true` + `abort_reason`，不在错位状态上接着点
@@ -931,7 +958,14 @@ impl App {
             // 「不点击清单」（R9-C8）：会发起真实网络认证 / 换掉播放会话 /
             // 改轨道与偏好的目标跳过不点，
             // 但留在结果里并标记 `skipped`，让体检看得见为什么不扫它。
-            if sweep_never_click(&target.id) {
+            //
+            // 错误卡状态要**每轮现读**：页面上可能刚落地一条引擎错误，
+            // 之后的 `player.play-pause` 就变成「重试」了（R9-C11）。
+            let skip = {
+                let state = self.state.borrow();
+                sweep_never_click(&target.id) || sweep_skip_for_state(&target.id, &state)
+            };
+            if skip {
                 entries.push(SweepEntry {
                     id: target.id.clone(),
                     kind: target.kind.clone(),
@@ -3904,6 +3938,47 @@ mod tests {
             "player.nav.back",
             "dialog.cancel",
         ] {
+            assert!(!sweep_never_click(id), "{id} 不在不点击清单里");
+        }
+    }
+
+    /// 错误卡状态下的按状态跳过（体检 R9-C11）：凡是会落到 `player_retry` 的目标都
+    /// 跳过，非错误态则照常扫。
+    #[test]
+    fn error_card_skips_targets_that_fall_into_retry() {
+        use super::{State, sweep_skip_for_state};
+
+        let mut state = State::default();
+        state.player.error = Some("服务器不可达，检查网络或服务器状态。".to_owned());
+        for id in ["player.play-pause", "player.center-play"] {
+            assert!(
+                sweep_skip_for_state(id, &state),
+                "错误卡状态下 {id} 会落到 player_retry，必须跳过"
+            );
+        }
+        // 错误卡上的「重试」按钮本身仍在静态清单里（两层判据互不代替）。
+        assert!(sweep_never_click("player.retry"));
+        // 错误态下不落到 retry 的控件照旧要扫。
+        for id in [
+            "player.fullscreen",
+            "player.seek-back",
+            "player.seek-forward",
+            "player.progress",
+            "player.mute",
+            "player.menu.subtitle.off",
+        ] {
+            assert!(
+                !sweep_skip_for_state(id, &state),
+                "{id} 在错误卡上不会落到 retry，照旧要扫"
+            );
+        }
+        // 非错误态：播放键只是播放 / 暂停，必须照常点。
+        state.player.error = None;
+        for id in ["player.play-pause", "player.center-play"] {
+            assert!(
+                !sweep_skip_for_state(id, &state),
+                "没有错误时 {id} 只是播放 / 暂停，必须照常扫"
+            );
             assert!(!sweep_never_click(id), "{id} 不在不点击清单里");
         }
     }
