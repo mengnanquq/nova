@@ -233,18 +233,16 @@ fn apply_eof_observation(
 
 /// `Command::Seek` 的记账（可单测）：清「已报过片尾」并吞掉队列里的旧观察。
 ///
-/// **不碰** `eof` / `eof_position`（复审 🟡1）。曾经在这里 `leave_eof()` 把两者一起
-/// 清掉，于是“拖到 100%”彻底失效：mpv 在片尾之后 `eof-reached` 一直是 `true`，seek 到
+/// **不碰** `eof` / `eof_position`：若在这里把两者一起
+/// 清掉，“拖到 100%”就会彻底失效：mpv 在片尾之后 `eof-reached` 一直是 `true`，seek 到
 /// 时长不改变它、也就不会再发属性通知；元数据时长偏长时 `time-pos` 又会回到**真实**
 /// 片尾（小于时长），两条基于 `duration` 的判据就都不成立，按播放没有任何反应。
 /// 留着上一拍记下的 `eof_position`，位置守卫才分得清两种拖动：
 ///
 /// - 拖回中段：`position + 40ms >= eof_position` 不成立 → 不算片尾 → 继续播；
 /// - 拖到 100%：`position` 约等于 `eof_position` → 算片尾 → 按播放从 0 重播。
-fn begin_seek(shared: &Mutex<SharedState>, ended: &mut EndedGuard) {
-    // 这里**不**清共享的 `eof` / `eof_position`（理由见上）。`shared` 留在签名里，
-    // 让“这条路径属于共享状态”可见，也让单测能钉住这个契约。
-    let _ = shared;
+fn begin_seek(ended: &mut EndedGuard) {
+    // 这里**不**清共享的 `eof` / `eof_position`（理由见上）。
     ended.after_seek();
 }
 
@@ -477,7 +475,7 @@ impl Worker {
                 // 同时把 seek 之前产生、还没处理到的 `eof-reached=true` 标成旧观察
                 // （主循环先处理命令再处理事件，见 [`EndedGuard`]）。
                 // 共享的 `eof` / `eof_position` **不清**（复审 🟡1，见 [`begin_seek`]）。
-                begin_seek(&self.shared, &mut self.ended);
+                begin_seek(&mut self.ended);
                 let seconds = position.as_secs_f64();
                 self.command(&["seek", &format!("{seconds:.3}"), "absolute"]);
             }
@@ -573,6 +571,17 @@ impl Worker {
                 // 极短文件的事件顺序可能颠倒：`eof-reached=true` 排在本事件之前被
                 // `loaded` 过滤当成上一部片子的残留丢掉，mpv 之后不会再补发。
                 // 实时读一次作为初值，做法同 [`MpvEvent::PlaybackRestart`]。
+                // 同时补一次 `time-pos` 作为片尾位置的初值：此刻 `last_time_pos`
+                // 刚在 `open` 里清空，不补的话 `eof_position` 会是 `None`，
+                // `engine_at_eof` 就退化成只看 `eof-reached`。
+                if let Some(seconds) = self
+                    .handle
+                    .get_string("time-pos")
+                    .and_then(|text| text.parse::<f64>().ok())
+                    .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                {
+                    self.last_time_pos = Some(seconds);
+                }
                 if let Some(reached) = self.read_eof() {
                     if self.handle_eof(reached) {
                         self.events.emit(EngineEvent::Ended);
@@ -1224,7 +1233,7 @@ mod tests {
         );
 
         // `Command::Seek` 分支做的同一件事。
-        begin_seek(&shared, &mut ended);
+        begin_seek(&mut ended);
 
         let shared = lock_shared_state(&shared);
         assert!(
@@ -1256,7 +1265,7 @@ mod tests {
         assert_eq!(lock_shared_state(&shared).eof_position, None);
 
         // 用户拖回中段：旧观察标记设上，`eof-reached=false` 还没到。
-        begin_seek(&shared, &mut ended);
+        begin_seek(&mut ended);
 
         // 队列里排着的旧 `eof-reached=true`：既不再报 `Ended`，也不写共享状态。
         assert!(

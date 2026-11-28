@@ -574,10 +574,13 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    已经停在 `Ended` 时重复收到的 `Ended` 也不再补报一条 `Pause` 进度（`Player::pump_events`）。
    这几条路径都有单测（`worker::tests::seek_after_end_*` / `stale_eof_*` /
    `two_seeks_after_end_*` / `restart_while_eof_is_still_reached_*` /
-   `restart_after_eof_is_cleared_*` / `seek_clears_the_shared_eof_immediately` /
+   `restart_after_eof_is_cleared_*` /
+   `seek_keeps_the_shared_eof_so_the_position_guard_still_works` /
+   `stale_eof_observation_does_not_rewrite_the_shared_state` /
    `late_eof_observation_from_the_previous_file_does_not_mark_the_new_one` /
    `player::tests::duplicate_ended_does_not_report_again` /
-   `player::tests::pressing_play_after_seeking_out_of_the_end_continues_from_the_seek`）。
+   `player::tests::pressing_play_after_seeking_out_of_the_end_continues_from_the_seek` /
+   `player::tests::seeking_to_the_metadata_duration_after_the_real_end_replays_from_the_start`）。
 
 **已知限制（推测，未验证）**：播完后**直接拖到 100%（`duration`）** 时，`Session::seek`
 把位置 clamp 到时长、状态转回 `Playing`，界面靠引擎再报一次 `Ended` 才会回到「已看完」。
