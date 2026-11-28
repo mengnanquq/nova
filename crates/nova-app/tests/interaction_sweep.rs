@@ -33,7 +33,7 @@ use nova_core::{
 };
 use nova_provider::Library;
 use nova_storage::Database;
-use nova_ui::{App, AppWindow, Page, Route, SweepReport};
+use nova_ui::{App, AppWindow, Page, Route, SweepReport, TrackItem};
 use slint::ComponentHandle;
 
 /// 一个页面在**本测试环境**里已知"点击后没有任何可观测变化"的目标。
@@ -744,6 +744,124 @@ fn player_sweep_never_reopens_the_playback_session() {
     assert!(
         app.target("player.back").is_some(),
         "扫描结束后播放页的控件仍应是可点目标"
+    );
+}
+
+/// 体检 R9-C9：错误卡上的「重试」`sweep` 也不能点。
+///
+/// `Player::retry` 在没有 `request` 时走 `begin()`：先 `end_session(Switch)`、
+/// `session_seq+1`，再重新上报 Started—一点一下就是“把旧会话换成新的”，
+/// 与 `player.back` 同一类会话级副作用。修复前它在清单里会被真的点，
+/// 结果里既不是 `skipped`（漏了清单）也不是有行为（测试里只能看到无变化）。
+#[test]
+fn player_sweep_skips_retry_on_the_error_card() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Player, 0.88);
+    let mut view = app.player_view();
+    view.error = Some("服务器不可达，检查网络或服务器状态。".to_owned());
+    view.error_action = Some("重试".to_owned());
+    app.set_player(&view);
+
+    let scan = scan(&app);
+    assert_eq!(scan.page, "player");
+    assert!(
+        scan.ids.iter().any(|id| id == "player.retry"),
+        "错误卡应在清单里登记「重试」：{:?}",
+        scan.ids
+    );
+    assert!(
+        scan.skipped.iter().any(|id| id == "player.retry"),
+        "点 retry 会 end_session + 重开会话，sweep 必须跳过不点：{:?}",
+        scan.skipped
+    );
+    assert!(
+        !scan.dead.iter().any(|(_, id, _)| id == "player.retry"),
+        "跳过 ≠ dead：{:?}",
+        scan.dead
+    );
+}
+
+/// 体检 R9-C8：播放页的菜单行（`player.menu.audio.*` / `player.menu.subtitle.*`）
+/// 一律按前缀跳过。
+///
+/// 点一行会 `close_menus()`，选中某条轨道还会写偏好（`remember_language` /
+/// `remember_subtitle_off`）并上报 `TrackChange`——三件都撤不回来；更直接的后果是
+/// 菜单一关，清单里后面那些菜单行的坐标就落到画面上，扫出一堆假 dead。
+#[test]
+fn player_sweep_skips_the_track_menu_rows() {
+    let dir = tempfile::tempdir().expect("临时目录");
+    let local = seeded_local(dir.path());
+    let app = build_app(&local, Page::Player, 0.88);
+    let mut view = app.player_view();
+    view.audio_tracks = vec![
+        TrackItem::new(0, "国语 · AC3 5.1"),
+        TrackItem::new(1, "英语 · AAC 2.0"),
+    ];
+    view.subtitle_tracks = vec![TrackItem::new(0, "简体中文 (SRT)")];
+    view.open_audio_menu();
+    app.set_player(&view);
+
+    let audio_scan = scan(&app);
+    assert_eq!(audio_scan.page, "player");
+    let rows: Vec<&String> = audio_scan
+        .ids
+        .iter()
+        .filter(|id| id.starts_with("player.menu.audio."))
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|id| id.as_str() == "player.menu.audio.row.0"),
+        "音轨菜单展开时应有菜单行：{:?}",
+        audio_scan.ids
+    );
+    for id in &rows {
+        assert!(
+            audio_scan.skipped.iter().any(|skipped| skipped == *id),
+            "菜单行 {id} 不能被点（关菜单 / 写偏好 / 上报 TrackChange）：{:?}",
+            audio_scan.skipped
+        );
+    }
+    // 菜单行没被点，就不该有菜单行被记成 dead（点进度条 / seek 也会收菜单，
+    // 但那是正常的播放操作；菜单行本身一律跳过）。
+    assert!(
+        !audio_scan
+            .dead
+            .iter()
+            .any(|(_, id, _)| id.starts_with("player.menu.audio.")),
+        "菜单行不该被记成 dead：{:?}",
+        audio_scan.dead
+    );
+
+    // 字幕菜单同样按前缀跳过（含「关闭」与两行延迟）。
+    let mut view = app.player_view();
+    view.open_subtitle_menu();
+    app.set_player(&view);
+    let subtitle_scan = scan(&app);
+    for id in [
+        "player.menu.subtitle.off",
+        "player.menu.subtitle.row.0",
+        "player.menu.subtitle.delay-up",
+        "player.menu.subtitle.delay-down",
+    ] {
+        assert!(
+            subtitle_scan.ids.iter().any(|entry| entry == id),
+            "字幕菜单展开时应登记 {id}（清单：{:?}）",
+            subtitle_scan.ids
+        );
+        assert!(
+            subtitle_scan.skipped.iter().any(|entry| entry == id),
+            "{id} 必须跳过不点：{:?}",
+            subtitle_scan.skipped
+        );
+    }
+    assert!(
+        !subtitle_scan
+            .dead
+            .iter()
+            .any(|(_, id, _)| id.starts_with("player.menu.subtitle.")),
+        "字幕菜单行不该被记成 dead：{:?}",
+        subtitle_scan.dead
     );
 }
 

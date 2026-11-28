@@ -1257,9 +1257,9 @@ impl Shell {
             .entries
             .iter()
             // `dead` 命令只返回真正的死目标：`skipped`（故意不点）与 `no_op`
-            // （预期内的空操作）与 `report.dead()` 同口径排除，否则
-            // `results` 里会冒出几条 `changed:false` 的好目标，看上去像 dead。
-            .filter(|entry| !dead_only || (!entry.changed && !entry.skipped && !entry.no_op))
+            // （预期内的空操作）与 `report.dead()` 同口径排除（[`SweepEntry::is_dead`]），
+            // 否则 `results` 里会冒出几条 `changed:false` 的好目标，看上去像 dead。
+            .filter(|entry| !dead_only || entry.is_dead())
             .map(|entry| {
                 serde_json::json!({
                     "id": entry.id,

@@ -402,7 +402,8 @@ impl From<Target> for TargetInfo {
 pub struct SweepEntry {
     /// 这次点击被**跳过**（见 [`SWEEP_NEVER_CLICK`]）：没有点、不判 dead，
     /// 列在结果里是为了让体检看得见「清单里有它、但我们故意不碰」——
-    /// 会联网登录（`dialog.connect`）与会结束播放会话（`player.back`）的目标。
+    /// 会联网登录（`dialog.connect`）、会结束 / 重开播放会话（`player.back` /
+    /// `player.retry`）、会写偏好与改轨道（`player.menu.*`）的目标。
     pub skipped: bool,
     /// 这次点击是**预期内的空操作**（点当前所在的库标签）：点了、状态没变，
     /// 但这是「已经选中」的语义，不判 dead（体检 R9-C6）。
@@ -430,6 +431,17 @@ pub struct SweepEntry {
     pub after: String,
 }
 
+impl SweepEntry {
+    /// 真正的死目标：点了、状态一点没变，而且既不是**故意不点**
+    /// （[`SweepEntry::skipped`]），也不是**预期空操作**（[`SweepEntry::no_op`]）。
+    ///
+    /// 扫描结果（[`SweepReport::dead`]）与 `--debug-socket` 的 `dead` 命令共用这一条
+    /// 判据，免得两边的过滤条件各写一份、迟早对不上。
+    pub fn is_dead(&self) -> bool {
+        !self.changed && !self.skipped && !self.no_op
+    }
+}
+
 /// 一次交互扫描的结果。
 #[derive(Clone, Debug, PartialEq)]
 pub struct SweepReport {
@@ -451,7 +463,7 @@ impl SweepReport {
     pub fn dead(&self) -> Vec<&SweepEntry> {
         self.entries
             .iter()
-            .filter(|entry| !entry.changed && !entry.skipped && !entry.no_op)
+            .filter(|entry| entry.is_dead())
             .collect()
     }
 }
@@ -480,14 +492,14 @@ fn restore_failure_reason(
         // 重新取直链并上报 Started。把这一点写进原因，体检时不必怀疑“是不是恢复器
         // 该重开而没重开”。
         return format!(
-            "{reason}；播放页不会重开播放会话（`player.back` 会结束会话，sweep 不做有副作用的操作）"
+            "{reason}；播放页不会重开播放会话（`player.back` 会结束会话，sweep 不发起会话级副作用）"
         );
     }
     reason
 }
 
 /// sweep **永不点击**的目标——与测试里的 `KNOWN_DEAD` 并行的第二份约定：
-/// 这里列的是「点了会**结束 / 发起真实会话**」的目标，与死活无关
+/// 这里列的是「点了会**结束 / 重开真实会话、改轨道或偏好**」的目标，与死活无关
 /// （体检 R9-C8 / R9-C9）。
 ///
 /// - `dialog.connect`：提交回调在上层（`nova-app`）是真的去连 `address` 指向的
@@ -495,15 +507,36 @@ fn restore_failure_reason(
 ///   就是一次真实登录尝试（连带的失败文案还会写回对话框，见 R9-C4 的触发链）。
 ///   扫描只该体检界面，不该替用户登录；
 /// - `player.back`：点下去必然离开播放会话（`player_exit` → 上层交 `Exit`）。
-///   sweep 不做有副作用的操作——恢复器不能凭空重建 mpv，唯一"恢复"播放页的办法
+///   sweep 不发起会话级副作用——恢复器不能凭空重建 mpv，唯一"恢复"播放页的办法
 ///   是重新 `play`：那会替用户结束原会话（`session_seq+1`）、在 UI 线程上
 ///   `block_on` 取直链、重开 mpv、按服务端续播点起播并上报 Started，等于把
-///   "体检"变成"换了个会话"写进服务端记录。不点就永远不需要恢复，也就不会重开。
+///   "体检"变成"换了个会话"写进服务端记录。不点就永远不需要恢复，也就不会重开；
+/// - `player.retry`（错误卡上的「重试」）：`Player::retry` 在 `request == None` 时
+///   走 `begin()`：先 `end_session(Switch)`、`session_seq+1`，再重新上报 Started。
+///   也就是说恢复器不在场时它就已经把旧会话换成新的了，sweep 不能点；
+/// - `player.menu.audio.*` / `player.menu.subtitle.*`（按前缀，见
+///   [`SWEEP_NEVER_CLICK_PREFIXES`]）：选了轨道会 `close_menus()`，还会写偏好
+///   （`remember_language` / `remember_subtitle_off`）并上报一次 `TrackChange`——
+///   三件都撤不回来；更麻烦的是菜单一关，清单里后面那些菜单行的坐标就落到
+///   画面上，扫出一堆假 dead。
 ///
 /// 这类目标**跳过不点**（`skipped:true`），行为交给手动 `click` 路径与真实用户；
 /// 播放页路由的有效性由真机体检验证（`player.back` 的手动 `click` 见
 /// `docs/debugging.md` 的「不点击清单」）。
-const SWEEP_NEVER_CLICK: &[&str] = &["dialog.connect", "player.back"];
+const SWEEP_NEVER_CLICK: &[&str] = &["dialog.connect", "player.back", "player.retry"];
+
+/// [`SWEEP_NEVER_CLICK`] 里按**前缀**匹配的部分：播放页菜单行带轨道下标
+/// （`player.menu.audio.row.N`）或固定后缀（`*.off` / `*.delay-up` / `*.delay-down`），
+/// 写死 id 会漏掉随轨道变化的行，所以整类都跳过（理由见上面的条列）。
+const SWEEP_NEVER_CLICK_PREFIXES: &[&str] = &["player.menu.audio.", "player.menu.subtitle."];
+
+/// 这个目标是否在「不点击清单」里（精确 id + 前缀两段）。
+fn sweep_never_click(id: &str) -> bool {
+    SWEEP_NEVER_CLICK.contains(&id)
+        || SWEEP_NEVER_CLICK_PREFIXES
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+}
 
 /// 扫描开始时的对话框快照：`sweep` 每轮拿它把对话框恢复成同一个起点。
 struct DialogSnapshot {
@@ -854,8 +887,9 @@ impl App {
     /// 假的"没反应"。典型例子：点「取消」真的关掉了对话框，后面的
     /// `dialog.connect` / `dialog.user` 坐标就落到被遮罩的页面上，看上去全 dead。
     ///
-    /// - 点了会结束 / 发起真实会话的目标（[`SWEEP_NEVER_CLICK`]：联网登录、
-    ///   离开播放会话）**跳过不点**，结果里标 `skipped`（体检 R9-C8 / R9-C9）；
+    /// - 点了会结束 / 发起真实会话、改轨道或偏好的目标（[`SWEEP_NEVER_CLICK`]：
+    ///   联网登录、离开播放会话、错误卡重试、播放页菜单行）**跳过不点**，
+    ///   结果里标 `skipped`（体检 R9-C8 / R9-C9）；
     /// - 点当前所在库的标签是预期内的空操作，标 `no_op`，不算 dead（体检 R9-C6）；
     ///   只在状态确实没变时才标；
     /// - 真的恢复不了就提前收尾：`aborted:true` + `abort_reason`，不在错位状态上接着点
@@ -894,9 +928,10 @@ impl App {
         let mut abort_reason = None;
         for target in &targets {
             let before = self.state_digest();
-            // 「不点击清单」（R9-C8）：会发起真实网络认证的目标跳过不点，
+            // 「不点击清单」（R9-C8）：会发起真实网络认证 / 换掉播放会话 /
+            // 改轨道与偏好的目标跳过不点，
             // 但留在结果里并标记 `skipped`，让体检看得见为什么不扫它。
-            if SWEEP_NEVER_CLICK.contains(&target.id.as_str()) {
+            if sweep_never_click(&target.id) {
                 entries.push(SweepEntry {
                     id: target.id.clone(),
                     kind: target.kind.clone(),
@@ -3833,11 +3868,66 @@ fn handle_player_key(ui: &AppWindow, state: &Rc<RefCell<State>>, key: PlayerKey)
 #[cfg(test)]
 mod tests {
     use super::{
-        arrow_row_key, arrow_scroll_clicked, is_row_scroll_target, restore_failure_reason,
+        SweepEntry, arrow_row_key, arrow_scroll_clicked, is_row_scroll_target,
+        restore_failure_reason, sweep_never_click,
     };
     use crate::Page;
     use crate::viewmodel::Route;
     use std::collections::BTreeMap;
+
+    /// 「不点击清单」：精确 id 与播放页菜单行的前缀两段都认。
+    #[test]
+    fn never_click_covers_sessions_and_track_menus() {
+        for id in ["dialog.connect", "player.back", "player.retry"] {
+            assert!(
+                sweep_never_click(id),
+                "{id} 会发起真实登录 / 结束会话 / 重开会话，必须跳过"
+            );
+        }
+        for id in [
+            "player.menu.audio.row.0",
+            "player.menu.audio.row.12",
+            "player.menu.subtitle.off",
+            "player.menu.subtitle.row.0",
+            "player.menu.subtitle.delay-up",
+            "player.menu.subtitle.delay-down",
+        ] {
+            assert!(
+                sweep_never_click(id),
+                "{id} 会关菜单 / 写轨道偏好 / 上报 TrackChange，必须跳过"
+            );
+        }
+        // 别把整个播放页都当跳过的：控制键照旧要扫。
+        for id in [
+            "player.play-pause",
+            "player.fullscreen",
+            "player.nav.back",
+            "dialog.cancel",
+        ] {
+            assert!(!sweep_never_click(id), "{id} 不在不点击清单里");
+        }
+    }
+
+    /// `SweepEntry::is_dead` 与 `SweepReport::dead` / `dead` 命令同口径：
+    /// `skipped`（故意不点）与 `no_op`（预期空操作）都不算 dead。
+    #[test]
+    fn is_dead_excludes_skipped_and_no_op_targets() {
+        let entry = |changed, skipped, no_op| SweepEntry {
+            id: "x".to_owned(),
+            kind: "button".to_owned(),
+            label: "x".to_owned(),
+            skipped,
+            no_op,
+            changed,
+            restored: true,
+            before: String::new(),
+            after: String::new(),
+        };
+        assert!(entry(false, false, false).is_dead());
+        assert!(!entry(true, false, false).is_dead());
+        assert!(!entry(false, true, false).is_dead());
+        assert!(!entry(false, false, true).is_dead());
+    }
 
     /// 体检 R9-C2：提前收尾必须写清“谁之后 / 原本是什么 / 现在错位成什么”，
     /// 不能只给一个 `aborted:true` 让人反推。
