@@ -300,6 +300,109 @@ fn hero_focus_falls_back_to_more_info_when_the_hero_stops_being_playable() {
     assert_eq!(app.page(), Page::Detail, "Enter 仍然是打开详情");
 }
 
+/// 反过来：剧集 hero（「更多信息」= 槽位 0）刷新成电影 hero 后，槽位 0 变成
+/// 「▶ 播放」。焦点若还留在 0，环会一声不响地从「更多信息」跳到「▶ 播放」上，
+/// 这时按 `Enter` 就意外起播了。焦点要跟到「更多信息」的新槽位 1。
+#[test]
+fn hero_focus_follows_more_info_when_the_hero_becomes_playable() {
+    let app = setup(1280.0, 800.0);
+    let mut home = home_with_hero_overview();
+    home.hero = home.hero.map(|hero| hero.with_playable(false));
+    app.set_home(&home);
+    app.show_home();
+
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Hero);
+    assert_eq!(
+        app.ui().get_hero_focus(),
+        0,
+        "剧集 hero：唯一槽位是「更多信息」"
+    );
+
+    app.set_home(&home_with_hero_overview());
+    assert_eq!(
+        app.ui().get_hero_focus(),
+        1,
+        "可播了，「更多信息」挪到槽位 1，焦点要跟过去"
+    );
+
+    press(&app, Key::Return);
+    assert_eq!(
+        app.current_route(),
+        Some(Route::Detail {
+            item_id: "dune".to_string()
+        }),
+        "Enter 仍然是「更多信息」，不该起播"
+    );
+}
+
+/// 可播 hero 上停在「更多信息」时，同一份视图重贴（每批海报到达时
+/// `nova-app` 的 `apply_images` 就走这条路）不能把 `hero_focus` 弹回 0：那会把
+/// 焦点环从「更多信息」挪到「▶ 播放」上。
+#[test]
+fn repasting_the_same_home_view_keeps_hero_focus_on_more_info() {
+    let app = setup_home();
+    press(&app, Key::UpArrow);
+    press(&app, Key::RightArrow);
+    assert_eq!(app.ui().get_hero_focus(), 1, "前提：停在「更多信息」上");
+
+    app.set_home(&home_with_hero_overview());
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Hero,
+        "同一份视图重贴不清焦点层"
+    );
+    assert_eq!(
+        app.ui().get_hero_focus(),
+        1,
+        "同一份视图重贴，焦点不该回到「▶ 播放」"
+    );
+}
+
+/// hero 消失（刷新后没有 hero，或简介为空）时按钮行整个不实例化：已经停在
+/// hero 层的焦点要退回内容层，否则焦点环落在没有控件的槽位上，`Enter` 也没有
+/// 任何反馈（`↑` / 顶栏 `↓` 只挡住“进入”Hero 层，救不了已经在里面的）。
+#[test]
+fn hero_layer_falls_back_to_content_when_the_hero_disappears() {
+    let app = setup_home();
+    press(&app, Key::UpArrow);
+    assert_eq!(app.focus_layer(), FocusLayer::Hero, "前提：停在 hero 层");
+
+    // 简介变成空串（`home.slint` 的条件子树跟着消失）。
+    let mut home = home_with_hero_overview();
+    home.hero = home.hero.map(|hero| hero.with_overview(String::new()));
+    app.set_home(&home);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Content,
+        "简介为空：焦点退回内容层"
+    );
+
+    // 再进一次 hero，然后整条 hero 消失。
+    app.set_home(&home_with_hero_overview());
+    press(&app, Key::UpArrow);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Hero,
+        "前提：重新停在 hero 层"
+    );
+    let mut home = home_filled();
+    home.hero = None;
+    app.set_home(&home);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Content,
+        "hero 整个没了：焦点退回内容层"
+    );
+    // 退回内容层后，`↑` 按“hero 不可用”的口径直接去顶栏，不会再进死层。
+    press(&app, Key::UpArrow);
+    assert_eq!(
+        app.focus_layer(),
+        FocusLayer::Navbar,
+        "没有 hero 就不进 hero 层"
+    );
+}
+
 /// 顶栏层 `Esc` 只回内容层，**不**返回上一页；再按一次才返回。
 #[test]
 fn escape_in_the_navbar_returns_to_content_without_going_back() {

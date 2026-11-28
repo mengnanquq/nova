@@ -148,7 +148,7 @@ UI 属性）；`view.focus` 是 Rust 侧镜像，只在键盘移动 / 确认时�
 | `search_focused` | 顶栏搜索框是否真的持有焦点（Ctrl+F / 点击搜索后的交接态） |
 | `focus_layer` | 键盘焦点层：`content` / `hero` / `navbar`（体检 R2-2b）。纯键盘 / 遥控器能不能到顶栏与 hero 按钮看它 |
 | `nav_focus` | 顶栏焦点下标：`0..nav_tabs-1` = 库标签，`nav_tabs` = 搜索按钮，`-1` = 不在顶栏 |
-| `hero_focus` | hero 按钮行的焦点：`0` = 「▶ 播放」，`1` = 「更多信息」（只在 `focus_layer == "hero"` 时有意义）；主推是剧集时没有播放入口，只剩「更多信息」，它占 `0` |
+| `hero_focus` | hero 按钮行的焦点：`0` = 「▶ 播放」，`1` = 「更多信息」（只在 `focus_layer == "hero"` 时有意义）；主推是剧集时没有播放入口，只剩「更多信息」，它占 `0`。数据刷新后槽位会跟着走：可播 → 不可播时退回 `0`，不可播 → 可播时「更多信息」从 `0` 挪到 `1`、焦点也跟到 `1`（同一份视图重贴不动它） |
 | `nav_tabs` / `home.hero_item` / `home.hero_overview_len` | 顶栏标签个数；hero 的条目 id 与简介字符数（简介为 0 时 hero 没有按钮行，`↑` 会跳过 hero 层直接去顶栏——不是 bug） |
 | `nav_geometry.focus_tab_left` / `focus_tab_right` / `tabs_viewport_w` / `tabs_scroll_x` | 焦点标签（本体）在标签区视口里的左右沿与标签区滚动量。窄窗口下“焦点标签完整可见”要连焦点环一起算：`left - focus-offset ≥ 0 && right + focus-offset ≤ viewport_w`，`focus-offset` / `focus-width` 从 `Theme` 取（当前 4px / 2px），**不在探针里重复上报**。左右沿是**即时**值（内容坐标 + 当前 `content-x`），不受“按下方向键那一刻已经滚到哪儿”影响；标签行左右各留 `Theme.focus-offset` 内边距并算进 `content-width`，所以 800px 下滚到底时 `focus_tab_right == tabs_viewport_w - focus-offset`（环外沿贴住视口右沿） |
 | `detail.in_my_list` | 详情页是否已在「我的列表」（读即时 UI 属性，切换后立刻可见） |

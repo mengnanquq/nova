@@ -1107,6 +1107,11 @@ export component HomePage inherits Rectangle {
                             }
 
                             // ▶ 播放：白底黑字。主推是剧集（本体没有可播版本）时整个不实例化。
+                            //
+                            // 条件子树里的目标不会“本来就登记着”：只有 `TargetBus.gen` 推进
+                            // 才重跑上面的 `changed`。所以刚变出来的按钮要等
+                            // `App::refresh_targets` 推进一代（它当场跑完全部登记回调）才能
+                            // 补上登记，不推进 gen 就永远登记不上。
                             if (root.data.hero-playable) : Rectangle {
                                 width: Theme.play-button-width;
                                 height: Theme.button-primary-height;

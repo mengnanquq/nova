@@ -1151,15 +1151,32 @@ impl App {
         } else {
             rebase_home_focus(&state.home, current, view)
         };
+        let was_playable = state.home.hero_playable();
         state.home = view.clone();
         state.focus.home = focus;
         // hero 的槽位随主推条目类型缩：不能播时只有「更多信息」（槽位 0）。停在旧的
         // 「播放」槽位上会让焦点环无处可画，下一次按键才“自愈”。
-        if !view.hero_playable() && state.hero_focus != 0 {
+        //
+        // 反过来也要跟：剧集 hero（「更多信息」= 0）刷新成电影 hero 后槽位 0 变成
+        //「▶ 播放」，焦点留在 0 会让环一声不响地从「更多信息」跳到「▶ 播放」上，
+        // 这时按 Enter 就意外起播了。焦点原本在「更多信息」上时跟到它的新槽位 1。
+        let playable = view.hero_playable();
+        if !playable && state.hero_focus != 0 {
             state.hero_focus = 0;
             self.ui.set_hero_focus(0);
+        } else if playable && !was_playable && state.hero_focus == 0 {
+            state.hero_focus = 1;
+            self.ui.set_hero_focus(1);
         }
+        // hero 消失（没有 hero 或简介为空）：按钮行整个不实例化。焦点层若还停在
+        // `Hero`，`move_up` / 顶栏 `↓` 里的 `hero_available` 只挡住“进入”，救不了
+        // 已经在里面的——焦点会落在一个画不出焦点环、Enter 也没有反馈的槽位上，
+        // 这里把焦点退回内容层。
+        let hero_gone = state.layer == FocusLayer::Hero && !hero_available(&state);
         drop(state);
+        if hero_gone {
+            leave_chrome_layer(&self.ui, &self.state);
+        }
         if self.ui.get_home_focus() != focus as i32 {
             self.ui.set_home_focus(focus as i32);
         }
