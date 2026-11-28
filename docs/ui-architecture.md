@@ -480,6 +480,13 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
   **出错（`Failed`）时 `Enter` = 重试**（重跑一遍起播，不强制把位置重置成 0）。`ended` 由
   `SessionState::Ended` 直传，不靠「位置 ≥ 时长」猜：时长未知时位置永远推不到头，续播点
   贴片尾时位置又会一开始就 ≥ 时长。
+- **“停在片尾”也算播完**（体检 R9-C5）：拖 / 跳到 100%、或 `→` 连按到片尾时，`Session::seek`
+  只把位置 clamp 到时长，状态可能停在 `Paused`（mpv 的 `eof-reached` 本来就是 `true`，不再
+  产生第二次 `Ended`）。这类“钉在时长上的暂停”按播完处理（`Player::at_end_of_media`：
+  `Ended`，或 `Paused` 且位置在时长 250ms 内），按播放 / `Enter` 仍是**从头重播**——否则
+  只是“从片尾恢复”，一秒后又结束（用户看到的是“按了没从头播”）。这一条在宿主侧判断，
+  **不依赖界面视图**：`view.player` 是节流推送的，控制层隐藏 / 那一拍刚好没推时，靠界面
+  的 `player_finished` 判断会漏掉。
 - 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
   与点击按钮同一条路径（`player_retry` → `Player::retry`）。起播（含取直链）失败时
   `request` / `pending` / `target` 已被清空，`retry` 靠最后一次起播目标的快照
@@ -535,14 +542,28 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 **已知限制（推测，未验证）**：播完后**直接拖到 100%（`duration`）** 时，`Session::seek`
 把位置 clamp 到时长、状态转回 `Playing`，界面靠引擎再报一次 `Ended` 才会回到「已看完」。
 但 mpv 这时可能只送 `playback-restart`，`eof-reached` 本来就是 `true`、seek 到时长也不会
-变成 `false`，于是没有新的 `eof-reached` 变化，也就没有第二次 `Ended`——界面停在
-「播放中」，位置在片尾。按上面的状态机推演是这个结果，但**没有证据**：没取过真机上
-mpv 的 `eof-reached` 属性日志，也没在真机复现过。要确认（或否证）需要一份
-`NOVA_MPV_LOG`/属性观察日志。
+变成 `false`，于是没有新的 `eof-reached` 变化，也就没有第二次 `Ended`——`ended` 停在 `false`，
+位置钉在片尾。界面**不会**因此误判成“还在播”：进度条位置的“播完”由宿主按
+`Player::at_end_of_media` 兜底（位置贴到时长就算播完，播完按钮语义不变），但
+`view.player.ended` 仍是引擎口径的 `false`，体检时不要拿它当“没播完”的证据。
+（未验证的是 mpv 的 `eof-reached` 属性日志，不是界面行为。）
 
 ## 控制层
 
 自动隐藏：3 秒无输入隐藏（鼠标不动也算），任何键/移动立即显示。隐藏时只留光标隐藏，画面不动。
+
+**隐藏时调试目标会消失**：控制块隐藏后不再参与布局，`targets` 里绝大多数 `player.*`
+（含 `player.fullscreen`）都不在清单里，只有登记总线留下的快照（如 `player.mute`）还在。
+这不是“按钮没了”：先发一次唤醒（任意键 / `hover` / `click`）再点；`↑` / `↓` 在控制层
+隐藏时**只唤醒**、不改音量。`view.player.controls_visible` 能看到当前是哪一态。
+
+**全屏切换 = 一次窗口 resize**：布局高度变了，字幕安全区要重算（`player-shell.slint` 的
+`changed height` / `changed subtitle-safe-inset` → `player-subtitle-reflow`）。这条回调会
+**同步**回到 `nova-app` 的 `Shell::with_player`，而它在心跳（`tick_playback` → `Player::tick`）
+里可能正被 `take_snapshot()` 驱动的布局求值触发——`self.player` 还在借用中。所以
+`Shell` 里所有播放器动作都走 `run_player_action`：借用冲突时**排队延后**，借用放掉后
+（`after_player_borrow`）按顺序补跑，动作不会丢，也不允许退回 `borrow_mut()` 硬来
+（体检 R9-C1：全屏后 1–2 秒内必炸 `RefCell already borrowed`）。
 
 布局（自下而上）：
 

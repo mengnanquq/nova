@@ -143,6 +143,10 @@ struct UiState {
     search: Option<SearchView>,
 }
 
+/// 一个播放器动作：拿到**整个槽**（可能还没有播放器，起播要建），
+/// 这样「重入被挡下」时连建播放器 + 起播也能一起延后。
+type PlayerAction = Box<dyn FnOnce(&mut Option<Player>)>;
+
 /// 主线程上的装配体。
 pub(crate) struct Shell {
     app: Rc<App>,
@@ -156,7 +160,12 @@ pub(crate) struct Shell {
     /// 挂起的一次自截（`--screenshot` 与调试通道共用）：拿到帧就写到这个路径。
     pending_shot: RefCell<Option<PendingShot>>,
     /// 播放页控制器；只在播放页打开时存在。
+    ///
+    /// 只能通过 [`Shell::run_player_action`] / [`Shell::after_player_borrow`] 碰：
+    /// 借用与 Slint 布局求值会重入（体检 R9-C1 的 `RefCell already borrowed`）。
     player: RefCell<Option<Player>>,
+    /// 重入挡下的播放器动作（顺序补跑，见 [`Shell::run_player_action`]）。
+    pending_player_actions: RefCell<VecDeque<PlayerAction>>,
     /// 播放心跳（8ms）：事件泵、会话 tick、帧 watchdog。
     timer: slint::Timer,
     /// `--play` 指定的捕获参数（等 `App::play` 回调到 [`Shell::play`] 时消费）。
@@ -299,6 +308,7 @@ pub fn run_window(
         host,
         pending_shot: RefCell::new(None),
         player: RefCell::new(None),
+        pending_player_actions: RefCell::new(VecDeque::new()),
         timer: slint::Timer::default(),
         pending_capture: RefCell::new(None),
         pending_source: RefCell::new(None),
@@ -572,24 +582,32 @@ impl Shell {
         prefs: UserPreferences,
         post: &Post,
     ) {
-        let mut slot = self.player.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(Player::new(
-                Rc::clone(&self.app),
-                Arc::clone(&self.local),
-                self.runtime.clone(),
-                Rc::clone(&self.host),
-                capture,
-                Rc::clone(&self.capture_out),
-            ));
-        }
-        if let Some(player) = slot.as_mut() {
-            player.begin(item_id, source_id, Some(prefs), post);
-        }
-        drop(slot);
+        // 起播也要走重入安全的入口：`Player::new` / `begin` 会读本地库、起 tokio 任务，
+        // 重入时（见 [`Shell::with_player`] 的注释）不能把动作丢掉，只能延后。
+        let weak = Rc::downgrade(self);
+        let post = Arc::clone(post);
+        let item_id = item_id.to_owned();
+        self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
+            let Some(shell) = weak.upgrade() else {
+                return;
+            };
+            if slot.is_none() {
+                *slot = Some(Player::new(
+                    Rc::clone(&shell.app),
+                    Arc::clone(&shell.local),
+                    shell.runtime.clone(),
+                    Rc::clone(&shell.host),
+                    capture,
+                    Rc::clone(&shell.capture_out),
+                ));
+            }
+            if let Some(player) = slot.as_mut() {
+                player.begin(&item_id, source_id, Some(prefs), &post);
+            }
+        }));
         // 播放页进场：之后 mpv 才允许往窗口 back buffer 上画。
         self.host.borrow_mut().set_player_active(true);
-        self.apply_pending_view();
+        self.after_player_borrow();
         self.start_timer();
     }
 
@@ -612,40 +630,101 @@ impl Shell {
 
     /// 心跳：泵事件、推进会话、按需重绘。
     fn tick_playback(&self) {
-        {
-            let mut slot = self.player.borrow_mut();
+        if let Ok(mut slot) = self.player.try_borrow_mut() {
             if let Some(player) = slot.as_mut() {
                 player.tick();
             }
         }
-        self.apply_pending_view();
+        self.after_player_borrow();
     }
 
     /// 在播放器上执行一个界面动作（播放器不存在时忽略）。
-    fn with_player(&self, action: impl FnOnce(&mut Player)) {
-        {
-            let mut slot = self.player.borrow_mut();
+    ///
+    /// 重入安全：动作执行期间 `self.player` 被借用，如果这个调用栈里又回到这里
+    /// （见 [`Shell::run_player_action`]），动作会排队而不是二次借用。
+    fn with_player(&self, action: impl FnOnce(&mut Player) + 'static) {
+        self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
             if let Some(player) = slot.as_mut() {
                 action(player);
             }
-        }
+        }));
+        self.after_player_borrow();
+    }
+
+    /// 跑一个播放器动作；`self.player` 正被**同一个线程**的调用栈借用时排队延后。
+    ///
+    /// 为什么必须这样：`Player::tick` 里的 `take_snapshot()` 会在**同一个调用栈**上
+    /// 同步跑完一整轮 Slint 布局求值。布局一变（全屏切换 / 窗口 resize 后控制块
+    /// 贴底位置变了），`player_shell.slint` 的 `changed height` / `changed
+    /// subtitle-safe-inset` 就同步回调 `player-subtitle-reflow` → `nova-ui` 的
+    /// `player_push_subtitle_margin` → 本层的字幕安全区回调 → `with_player`。
+    /// 而这一拍的 `tick_playback` 正持着 `self.player` 的可变借用——直接
+    /// `borrow_mut()` 就是 `RefCell already borrowed` 崩溃（体检 R9-C1：全屏切换后
+    /// 窗口尺寸变化 + 合成器停帧，每拍都 `take_snapshot`，1–2 秒内必炸）。
+    ///
+    /// 动作**不能丢**（丢了就是「按了没反应」），所以排进队列，借用放掉后按顺序补跑。
+    /// 返回 `true` 表示当场执行了。
+    fn run_player_action(&self, action: PlayerAction) -> bool {
+        let Ok(mut slot) = self.player.try_borrow_mut() else {
+            tracing::debug!("播放器正被同一拍借用（重入），界面动作延后执行");
+            self.pending_player_actions.borrow_mut().push_back(action);
+            return false;
+        };
+        action(&mut slot);
+        true
+    }
+
+    /// 提交排队的视图，再补跑被重入挡下的动作。
+    ///
+    /// 每个「放下 `self.player` 借用」的地方都要调一次：视图提交（`App::set_player`）
+    /// 与补跑的动作都可能再触发 nova-ui 的播放页回调，所以顺序是
+    /// 先提交视图、再补动作、每跑完一个再来一轮。
+    fn after_player_borrow(&self) {
         self.apply_pending_view();
+        loop {
+            // 借用还被别人持着：这一拍到此为止，下一拍（心跳）接着补跑。
+            let Ok(mut slot) = self.player.try_borrow_mut() else {
+                return;
+            };
+            let next = self.pending_player_actions.borrow_mut().pop_front();
+            let Some(action) = next else {
+                return;
+            };
+            action(&mut slot);
+            drop(slot);
+            self.apply_pending_view();
+        }
+    }
+
+    /// 播放器槽是否已有会话（不 panic：借用中就等于有）。
+    fn has_player(&self) -> bool {
+        match self.player.try_borrow() {
+            Ok(slot) => slot.is_some(),
+            Err(_) => true,
+        }
+    }
+
+    /// 调试通道用：读播放器的即时视图（若有播放会话）。
+    fn live_player_view(&self) -> Option<nova_ui::PlayerView> {
+        match self.player.try_borrow_mut() {
+            Ok(mut slot) => slot.as_mut().map(Player::live_view),
+            // 借用中（同一拍里重入）：退回界面镜像，宁可少一拍新数据也不 panic。
+            Err(_) => {
+                tracing::debug!("播放器正被借用，view.player 退回界面镜像");
+                Some(self.app.player_view())
+            }
+        }
     }
 
     /// 把播放器排队的视图提交给界面。
     ///
     /// 必须在**放下** `player` 借用之后调用：`App::set_player` 会同步回调 nova-ui 的
     /// 播放页处理器（字幕安全区），那里会再次借用播放器。
-    /// 调试通道用：读播放器的即时视图（若有播放会话）。
-    fn live_player_view(&self) -> Option<nova_ui::PlayerView> {
-        let mut slot = self.player.borrow_mut();
-        slot.as_mut().map(Player::live_view)
-    }
-
     fn apply_pending_view(&self) {
-        let view = {
-            let mut slot = self.player.borrow_mut();
-            slot.as_mut().and_then(Player::take_pending_view)
+        let view = match self.player.try_borrow_mut() {
+            Ok(mut slot) => slot.as_mut().and_then(Player::take_pending_view),
+            // 借用中：视图还在 `pending_view` 里，下一次 `after_player_borrow` 会提交。
+            Err(_) => None,
         };
         if let Some(view) = view {
             self.app.set_player(&view);
@@ -655,11 +734,14 @@ impl Shell {
     /// 退出播放页 / 关窗时的收尾。
     fn stop_playback(&self) {
         self.timer.stop();
-        let mut slot = self.player.borrow_mut();
-        if let Some(player) = slot.as_mut() {
-            player.shutdown();
-        }
-        *slot = None;
+        // 先把播放器从槽里拿走再收尾：`shutdown()` 会阻塞等进度补发落盘，
+        // 这段不能占着 `self.player` 的借用（收尾期间播放页回调还要用它）。
+        self.run_player_action(Box::new(|slot: &mut Option<Player>| {
+            if let Some(mut player) = slot.take() {
+                player.shutdown();
+            }
+        }));
+        self.after_player_borrow();
     }
 
     /// 把播放链路的异步结果交给播放器。
@@ -669,10 +751,12 @@ impl Shell {
                 generation,
                 request,
             } => {
-                let mut slot = self.player.borrow_mut();
-                if let Some(player) = slot.as_mut() {
-                    player.on_open_ready(generation, request);
-                }
+                self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
+                    if let Some(player) = slot.as_mut() {
+                        player.on_open_ready(generation, request);
+                    }
+                }));
+                self.after_player_borrow();
             }
         }
     }
@@ -828,6 +912,15 @@ impl Shell {
                         "audio_menu": view.audio_menu_open,
                         "subtitle_menu": view.subtitle_menu_open,
                         "position_ms": view.position.as_millis() as u64,
+                        "ended": view.ended,
+                        // 控制层当前是否可见（体检 R9-C5：控制层隐藏 / 可见两条 Enter 路径）。
+                        // 隐藏时 `targets` 里 `player.*` 会大量消失（控制块不再布局），
+                        // 想点它们得先 `key Down` 等任意键唤醒。
+                        "controls_visible": view.controls_visible,
+                        // 窗口是否真的在全屏（体检 R9-C1）：以前 `view` 读不到，
+                        // “点了全屏到底有没有切换过去”无法验证。取窗口真实状态，
+                        // 不是 nova-ui 侧“想切”的标记。
+                        "fullscreen": ui.window().is_fullscreen(),
                         "error": view.error,
                         // 当前选中的音轨 / 字幕轨（引擎编号 + 菜单里的标签）。
                         // `null` = 没有选中（字幕关闭）或引擎还没枚举到轨道。
@@ -1193,6 +1286,7 @@ impl Shell {
             host: Rc::new(RefCell::new(player::Host::new(true))),
             pending_shot: RefCell::new(None),
             player: RefCell::new(None),
+            pending_player_actions: RefCell::new(VecDeque::new()),
             timer: slint::Timer::default(),
             pending_capture: RefCell::new(None),
             pending_source: RefCell::new(None),
@@ -1203,6 +1297,20 @@ impl Shell {
             library_sort: RefCell::new(views::LibrarySort::default()),
             detail_generation: RefCell::new(0),
         }
+    }
+
+    /// 测试用：塞一个真播放器进槽（不建 mpv 引擎，`Player::new` 只做准备）。
+    #[cfg(test)]
+    fn install_player_for_test(self: &Rc<Self>) {
+        let player = Player::new(
+            Rc::clone(&self.app),
+            Arc::clone(&self.local),
+            self.runtime.clone(),
+            Rc::clone(&self.host),
+            None,
+            Rc::clone(&self.capture_out),
+        );
+        *self.player.borrow_mut() = Some(player);
     }
 
     /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
@@ -1219,7 +1327,7 @@ impl Shell {
     ///   从别处（hero / 详情页）新开的播放器。
     fn sweep(&self, dead_only: bool) -> serde_json::Value {
         let was_fullscreen = self.app.player_fullscreen();
-        let had_player = self.player.borrow().is_some();
+        let had_player = self.has_player();
         let (restored, report) = sweep_preserving_audio(&self.app, || self.app.sweep());
         // `restored` = **扫描结束时音频与扫描前一致**（体检 R9-C3）：没被改动过、无需
         // 恢复的页面也算 `true`。以前它是“恢复器有没有写过界面”，于是无音频的页面
@@ -1228,7 +1336,7 @@ impl Shell {
         if self.app.player_fullscreen() != was_fullscreen {
             self.app.ui().window().set_fullscreen(was_fullscreen);
         }
-        if !had_player && self.player.borrow().is_some() {
+        if !had_player && self.has_player() {
             self.stop_playback();
         }
         // 恢复器写回的是 `nova-ui` 的视图；调试通道 `view.search` 读的是本层镜像。
@@ -2357,7 +2465,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_subtitle_margin(move |margin| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_subtitle_margin(margin));
+                shell.with_player(move |player| player.set_subtitle_margin(margin));
             }
         });
     }
@@ -2367,7 +2475,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_play_pause(move |playing| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_playing(playing));
+                shell.with_player(move |player| player.set_playing(playing));
             }
         });
     }
@@ -2375,7 +2483,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_seek(move |position| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.seek(position));
+                shell.with_player(move |player| player.seek(position));
             }
         });
     }
@@ -2383,7 +2491,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_volume(move |volume| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_volume(volume));
+                shell.with_player(move |player| player.set_volume(volume));
             }
         });
     }
@@ -2391,7 +2499,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_muted(move |muted| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_muted(muted));
+                shell.with_player(move |player| player.set_muted(muted));
             }
         });
     }
@@ -2399,7 +2507,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_rate(move |rate| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_rate(rate));
+                shell.with_player(move |player| player.set_rate(rate));
             }
         });
     }
@@ -2408,7 +2516,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_subtitle_delay(move |seconds| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.set_subtitle_delay(seconds));
+                shell.with_player(move |player| player.set_subtitle_delay(seconds));
             }
         });
     }
@@ -2416,7 +2524,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_audio_track(move |index| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.select_audio(index));
+                shell.with_player(move |player| player.select_audio(index));
             }
         });
     }
@@ -2424,7 +2532,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_subtitle_track(move |index| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.select_subtitle(index));
+                shell.with_player(move |player| player.select_subtitle(index));
             }
         });
     }
@@ -2450,7 +2558,7 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_exit(move |position| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(|player| player.exit(position));
+                shell.with_player(move |player| player.exit(position));
                 shell.timer.stop();
                 // 播放页退场：停止往窗口画 mpv，否则回到首页会是最后一帧视频。
                 shell.host.borrow_mut().set_player_active(false);
@@ -2862,6 +2970,7 @@ mod tests {
         sweep_preserving_audio,
     };
     use super::{accept_detail, sweep_with_audio_guard};
+    use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
@@ -3407,6 +3516,84 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// 体检 R9-C1 的重入回归用装配：已初始化、带一个（不建引擎的）真播放器。
+    fn shell_with_player_for_test() -> Rc<super::Shell> {
+        init_test_backend();
+        let dir = tempfile::tempdir().expect("临时目录");
+        let env = crate::env::Env {
+            data_dir: dir.path().to_path_buf(),
+            credentials: crate::env::CredentialMode::Memory,
+        };
+        let local = Arc::new(crate::local::Local::open(&env, None).expect("打开本地状态"));
+        let app = Rc::new(App::new_with(AppWindow::new().expect("窗口")));
+        app.ui()
+            .window()
+            .set_size(slint::LogicalSize::new(1280.0, 800.0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shell = Rc::new(super::Shell::for_test(
+            Rc::clone(&app),
+            Arc::clone(&local),
+            runtime.handle().clone(),
+        ));
+        shell.install_player_for_test();
+        // `dir` / `runtime` 必须活到用例结束：播放器的进度 worker 靠它们。
+        std::mem::forget((dir, runtime));
+        shell
+    }
+
+    /// 体检 R9-C1：播放器正被**同一拍**借用时，界面动作要延后，不能二次借用。
+    ///
+    /// 真机链路：`tick_playback` 持着 `self.player` 跑 `Player::tick`，`tick` 里的
+    /// `take_snapshot()` 在同一个调用栈上同步跑完一轮 Slint 布局求值；布局一变
+    /// （全屏切换后窗口尺寸变了）就同步回调字幕安全区 → `Shell::with_player`。
+    /// 修复前这里的 `borrow_mut()` 直接 panic（`RefCell already borrowed`，
+    /// ui.rs:627），整个进程退出。
+    #[test]
+    fn reentrant_player_action_is_deferred_instead_of_panicking() {
+        let shell = shell_with_player_for_test();
+        let hits: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let inner_hits = Rc::clone(&hits);
+        let nested = Rc::downgrade(&shell);
+        shell.with_player(move |_player| {
+            inner_hits.borrow_mut().push("outer");
+            if let Some(shell) = nested.upgrade() {
+                let inner_hits = Rc::clone(&inner_hits);
+                shell.with_player(move |_player| inner_hits.borrow_mut().push("inner"));
+            }
+        });
+
+        assert_eq!(
+            hits.borrow().as_slice(),
+            ["outer", "inner"],
+            "重入的动作不能丢（丢了就是按了没反应），也不能炸借用"
+        );
+    }
+
+    /// 同上，但不靠嵌套调用：借用被心跳持着时进来的动作，要排到借用放掉之后。
+    #[test]
+    fn player_action_deferred_while_the_slot_is_borrowed() {
+        let shell = shell_with_player_for_test();
+        let hits: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let guard = shell.player.borrow_mut();
+        let sink = Rc::clone(&hits);
+        shell.with_player(move |_player| sink.borrow_mut().push("deferred"));
+        assert!(hits.borrow().is_empty(), "借用中不能硬来（会 panic）");
+        drop(guard);
+
+        // 借用放掉后由心跳的收尾统一补跑。
+        shell.after_player_borrow();
+        assert_eq!(
+            hits.borrow().as_slice(),
+            ["deferred"],
+            "延后的动作必须在借用放掉后真的执行"
+        );
     }
 
     fn init_test_backend() {

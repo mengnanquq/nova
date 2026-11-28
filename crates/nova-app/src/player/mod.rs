@@ -66,6 +66,13 @@ const PRESENT_STALL: Duration = Duration::from_millis(400);
 /// 兜底驱动的最小间隔（`take_snapshot()` 会把整帧读回 CPU，别跑太密）。
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(16);
 
+/// 当位置贴到时长这么近以内时，就当作“已经停在片尾”。
+///
+/// 拖动 / 跳到 100% 时 `Session::seek` 只把位置 clamp 到时长，状态还是 `Paused`
+///（引擎还没报 `Ended`，也可能永远不报：mpv 的 `eof-reached` 本来就已经是 `true`）。
+/// 留着几毫秒的容差是因为引擎给的位置会自己往前走一小截。
+const END_OF_MEDIA_TOLERANCE: Duration = Duration::from_millis(250);
+
 /// 没有服务器时播放失败的用户可见文案。
 ///
 /// 这段文字直接进播放页的 `error`（桌面界面），所以只说应用内的入口
@@ -834,7 +841,10 @@ impl Player {
         // 不能沿用续播点：播完的条目在服务端/本地缓存里的续播点常常还贴在片尾
         // （体检 R8-B1/B2 的真机现象就是“按了播放键，画面还是最后一帧”），续上去
         // 等于什么也没发生。会话代号照常递增：同一部片重播也是**新会话**。
-        let replay = self.session.state() == SessionState::Ended
+        //
+        // “播完”用 [`Player::at_end_of_media`]：不止引擎报过的 `Ended`，也包括
+        // 被拖 / 跳到片尾后定格在时长上、引擎不再报 `Ended` 的暂停态（体检 R9-C5）。
+        let replay = self.at_end_of_media()
             && self
                 .target
                 .as_ref()
@@ -1316,7 +1326,7 @@ impl Player {
         // 界面在播完后本来就会走起播路径（`player_finished` → `play_current`），
         // 这里兼作防御：界面视图晚一拍（节流推送）时，`set_playing(true)` 也不能
         // 落到“引擎停在 EOF、只收到一个 play”的死局。
-        if playing && self.session.state() == SessionState::Ended {
+        if playing && self.at_end_of_media() {
             self.replay();
             return;
         }
@@ -1332,6 +1342,29 @@ impl Player {
             self.report(ProgressTrigger::Pause);
         }
         self.dirty = true;
+    }
+
+    /// 会话是否已经停在片尾（包括引擎没报 `Ended` 的那种）。
+    ///
+    /// 两种情形都是“已经看完了”，按播放键必须从头重播：
+    ///
+    /// - 引擎报过 `Ended`（`SessionState::Ended`）；
+    /// - 会话被**定格在时长上**：拖 / 跳到 100%（含 `→` 连按到片尾）时
+    ///   `Session::seek` 把位置 clamp 到时长，状态却是 `Paused`；mpv 此时
+    ///   `eof-reached` 本来就是 `true`，seek 到时长不会再翻成 `false`，所以
+    ///   往往**没有**新的 `Ended` 事件。不在宿主拦下来的话，按播放 / `Enter`
+    ///   就是“从片尾恢复”，一秒后又结束（体检 R9-C5 的“按了没从头播”）。
+    fn at_end_of_media(&self) -> bool {
+        match self.session.state() {
+            SessionState::Ended => true,
+            SessionState::Paused => match self.session.duration() {
+                Some(duration) if !duration.is_zero() => {
+                    self.session.position() + END_OF_MEDIA_TOLERANCE >= duration
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// seek（只有进度条松手才会到这里）。
@@ -3452,6 +3485,43 @@ mod tests {
         assert!(
             player.session_seq > first_seq,
             "播完重播是新会话（代号递增，{} 应大于 {first_seq}）",
+            player.session_seq
+        );
+    }
+
+    /// 体检 R9-C5：会话**停在片尾却没有报 `Ended`** 时，按播放 / `Enter` 也必须重播。
+    ///
+    /// 真机路径：控制层隐藏 / 拖到 100% 时 `Session::seek` 把位置 clamp 到时长，
+    /// 状态还是 `Paused`（mpv 的 `eof-reached` 本来就是 `true`，不会再报一次
+    /// `Ended`）。修复前这里只是 `Session::play()`：从片尾恢复，一秒后又结束——
+    /// 用户看到的是“按了没从头播”。
+    #[test]
+    fn playing_when_paused_at_the_end_starts_a_new_session_from_zero() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        let first = wait_for_open(&posted).expect("首次起播请求");
+        player.target = player.pending.take();
+        let first_seq = player.session_seq;
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.pause();
+        // 拖 / 跳到 100%：位置钉在时长，状态仍是暂停（没有 `Ended` 事件）。
+        let duration = player.session.duration().expect("用例前提：时长已知");
+        assert!(player.session.seek(duration));
+        assert_eq!(player.session.position(), duration);
+        assert_eq!(player.session.state(), SessionState::Paused);
+        assert!(!first.resume_at.is_zero(), "用例前提：首次起播是续播");
+
+        player.set_playing(true);
+
+        let replay = wait_for_open(&posted).expect("停在片尾按播放必须重新起播");
+        assert_eq!(replay.resume_at, Duration::ZERO, "必须从 0 开始");
+        assert_eq!(player.session.state(), SessionState::Opening);
+        assert_eq!(player.session.position(), Duration::ZERO);
+        assert!(
+            player.session_seq > first_seq,
+            "重播是新会话（代号递增，{} 应大于 {first_seq}）",
             player.session_seq
         );
     }
