@@ -483,8 +483,11 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 - **“停在片尾”也算播完**（体检 R9-C5）：拖 / 跳到 100%、或 `→` 连按到片尾时，`Session::seek`
   只把位置 clamp 到时长，状态可能停在 `Paused`（mpv 的 `eof-reached` 本来就是 `true`，不再
   产生第二次 `Ended`）。这类“钉在时长上的暂停”按播完处理（`Player::at_end_of_media`：
-  `Ended`，或 `Paused` 且位置在时长 250ms 内），按播放 / `Enter` 仍是**从头重播**——否则
-  只是“从片尾恢复”，一秒后又结束（用户看到的是“按了没从头播”）。这一条在宿主侧判断，
+  `Ended`，或 `Paused` 且位置距时长**不超过一帧（40ms）**），按播放 / `Enter` 仍是**从头重播**
+  ——否则只是“从片尾恢复”，一秒后又结束（用户看到的是“按了没从头播”）。容差只留一帧：
+  放宽到几百毫秒会把“片尾前 200ms 暂停”误判成播完（按播放会从头重播），短素材在开头
+  暂停也会被误判。真机 R9-C5 的读数（`position_ms=6002078` vs 时长 6002079）在这个容差下
+  仍然算片尾。`duration` 未知时返回 `false`。这一条在宿主侧判断，
   **不依赖界面视图**：`view.player` 是节流推送的，控制层隐藏 / 那一拍刚好没推时，靠界面
   的 `player_finished` 判断会漏掉。
 - 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
@@ -559,11 +562,25 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
 
 **全屏切换 = 一次窗口 resize**：布局高度变了，字幕安全区要重算（`player-shell.slint` 的
 `changed height` / `changed subtitle-safe-inset` → `player-subtitle-reflow`）。这条回调会
-**同步**回到 `nova-app` 的 `Shell::with_player`，而它在心跳（`tick_playback` → `Player::tick`）
-里可能正被 `take_snapshot()` 驱动的布局求值触发——`self.player` 还在借用中。所以
-`Shell` 里所有播放器动作都走 `run_player_action`：借用冲突时**排队延后**，借用放掉后
-（`after_player_borrow`）按顺序补跑，动作不会丢，也不允许退回 `borrow_mut()` 硬来
-（体检 R9-C1：全屏后 1–2 秒内必炸 `RefCell already borrowed`）。
+**同步**回到 `nova-app` 的 `Shell::set_player_subtitle_margin`，而它在心跳（`tick_playback`
+→ `Player::tick`）里可能正被 `take_snapshot()` 驱动的布局求值触发——`self.player` 还在
+借用中。所以 `Shell` 里所有播放器动作都走 `run_player_action`：借用冲突时**排队延后**，
+借用放掉后（`after_player_borrow`）按顺序补跑，动作不会丢，也不允许退回 `borrow_mut()`
+硬来（体检 R9-C1：全屏后 1–2 秒内必炸 `RefCell already borrowed`）。
+
+补跑有两道闸：
+
+- **一次最多补跑 32 个动作**（`MAX_CATCH_UP_ACTIONS`）：动作可能在执行时又入队（或触发
+  reflow 再入队），没有上限时同一次 drain 会自激成死循环、卡死主线程。到上限打 warn，
+  剩下的留给下一拍心跳。
+- **字幕安全区只保留最新值**（last-write-wins，不走 FIFO）：全屏切换时
+  `apply_pending_view()` 同步触发 reflow，新 margin 会内联执行；若旧的 margin 还排在
+  FIFO 里，drain 补跑会把它盖回去（字幕停在错误高度）。所以 margin 用单槽合并语义：
+  借用中只覆盖槽里的最新值，内联成功就清掉旧值。其他动作仍按 FIFO 顺序补跑。
+
+借用期间 `has_player` / `live_player_view` 用独立的“槽里确实有播放器”标志降级：
+槽本来就是空的（从未起播 / 已经收尾）时返回 `false` / `None`，不凭界面镜像报出一个
+陈旧会话；只有确实有播放器时才退回镜像。
 
 布局（自下而上）：
 

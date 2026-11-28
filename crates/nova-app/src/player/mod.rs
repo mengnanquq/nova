@@ -66,12 +66,14 @@ const PRESENT_STALL: Duration = Duration::from_millis(400);
 /// 兜底驱动的最小间隔（`take_snapshot()` 会把整帧读回 CPU，别跑太密）。
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(16);
 
-/// 当位置贴到时长这么近以内时，就当作“已经停在片尾”。
+/// 当位置贴在时长这么近以内时，就当作“已经停在片尾”。
 ///
 /// 拖动 / 跳到 100% 时 `Session::seek` 只把位置 clamp 到时长，状态还是 `Paused`
 ///（引擎还没报 `Ended`，也可能永远不报：mpv 的 `eof-reached` 本来就已经是 `true`）。
-/// 留着几毫秒的容差是因为引擎给的位置会自己往前走一小截。
-const END_OF_MEDIA_TOLERANCE: Duration = Duration::from_millis(250);
+/// 容差只留**一帧**（40ms）：既容得下引擎读数的尾数（体检 R9-C5 真机
+/// `position_ms=6002078` vs 时长 6002079），又不会把“片尾前 200ms 暂停”或
+/// 短素材在开头暂停误判成播完（那样按播放会从头重播，而不是继续播）。
+const END_OF_MEDIA_TOLERANCE: Duration = Duration::from_millis(40);
 
 /// 没有服务器时播放失败的用户可见文案。
 ///
@@ -366,6 +368,12 @@ impl Host {
     fn video_size(&self) -> Option<(u32, u32)> {
         let (_, width, height) = self.engine.as_ref()?.texture()?;
         Some((width, height))
+    }
+
+    /// 测试：已下发给引擎的字幕上抬量（百分比）序列。
+    #[cfg(test)]
+    pub(crate) fn subtitle_margins_for_test(&self) -> Vec<i64> {
+        self.subtitle_margins.clone()
     }
 
     fn diagnostics(&self) -> Option<EngineDiagnostics> {
@@ -1354,6 +1362,12 @@ impl Player {
     ///   `eof-reached` 本来就是 `true`，seek 到时长不会再翻成 `false`，所以
     ///   往往**没有**新的 `Ended` 事件。不在宿主拦下来的话，按播放 / `Enter`
     ///   就是“从片尾恢复”，一秒后又结束（体检 R9-C5 的“按了没从头播”）。
+    ///
+    /// `Paused` 分支只对**真正到了片尾**的情况判定：`position` 距 `duration`
+    /// 不超过一帧（[`END_OF_MEDIA_TOLERANCE`]）。不能放宽到几百毫秒——那会把
+    /// “片尾前 200ms 暂停”当播完，按播放变成从头重播；短素材在开头暂停也会
+    /// 被误判（`250ms` 容差下 200ms 素材的 `position = 0` 就“播完”了）。
+    /// `duration` 未知时返回 `false`（位置推不到头，不能猜）。
     fn at_end_of_media(&self) -> bool {
         match self.session.state() {
             SessionState::Ended => true,
@@ -3523,6 +3537,87 @@ mod tests {
             player.session_seq > first_seq,
             "重播是新会话（代号递增，{} 应大于 {first_seq}）",
             player.session_seq
+        );
+    }
+
+    /// 片尾前 200ms 暂停后按播放：继续播最后那一点，不能从头重播。
+    ///
+    /// 修复前 `at_end_of_media` 把“距时长 250ms 内”都算播完，于是用户在离片尾
+    /// 不到 250ms 的地方暂停一下、再按播放，会莫名其妙回到开头。
+    #[test]
+    fn pausing_before_the_end_continues_instead_of_replaying() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        wait_for_open(&posted).expect("首次起播请求");
+        player.target = player.pending.take();
+        player.session.handle(EngineEvent::FirstFrame);
+        player.session.pause();
+        let duration = player.session.duration().expect("用例前提：时长已知");
+        let near_end = duration - Duration::from_millis(200);
+        assert!(player.session.seek(near_end));
+        assert_eq!(player.session.state(), SessionState::Paused);
+        let seq = player.session_seq;
+
+        player.set_playing(true);
+
+        assert_eq!(
+            player.session.state(),
+            SessionState::Playing,
+            "片尾前 200ms 暂停后按播放应当继续播，而不是重播"
+        );
+        assert_eq!(player.session.position(), near_end, "继续播不重置位置");
+        assert_eq!(player.session_seq, seq, "继续播不是新会话");
+        let trace = Arc::clone(&player.host.borrow().trace);
+        let trace = trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            trace.iter().any(|entry| entry == "play"),
+            "应当给引擎发 play：{trace:?}"
+        );
+        assert!(
+            !trace.iter().any(|entry| entry.starts_with("open:")),
+            "不能重新起播：{trace:?}"
+        );
+    }
+
+    /// 短素材在开头暂停不算播完：容差不能宽到把“还没开始”当“已经结束”。
+    ///
+    /// 修复前 250ms 容差下，200ms 的素材在 `position = 0` 暂停就满足
+    /// `0 + 250ms >= 200ms`，按播放会直接从头重播。
+    #[test]
+    fn pausing_at_the_start_of_a_short_clip_is_not_the_end() {
+        let (_dir, _local, mut player, _runtime, _posted) = resume_fixture(true);
+
+        player
+            .session
+            .begin(Duration::ZERO, Some(Duration::from_millis(200)));
+        player.session.handle(EngineEvent::FirstFrame);
+        assert!(player.session.pause());
+
+        assert!(
+            !player.at_end_of_media(),
+            "200ms 的素材在 0ms 暂停不能算播完"
+        );
+    }
+
+    /// 体检 R9-C5 真机读数：位置 6002078ms、时长 6002079ms，差 1ms 仍算停在片尾。
+    #[test]
+    fn paused_within_one_frame_of_the_end_counts_as_finished() {
+        let (_dir, _local, mut player, _runtime, _posted) = resume_fixture(true);
+
+        player
+            .session
+            .begin(Duration::ZERO, Some(Duration::from_millis(6_002_079)));
+        player.session.handle(EngineEvent::FirstFrame);
+        assert!(player.session.seek(Duration::from_millis(6_002_078)));
+        assert!(player.session.pause());
+
+        assert!(
+            player.at_end_of_media(),
+            "距片尾一帧以内仍按“停在片尾”处理（R9-C5）"
         );
     }
 

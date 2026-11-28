@@ -20,7 +20,7 @@
 //!   闭包；闭包在主线程上通过 thread-local 找到 `Rc<Shell>` 并应用消息；
 //! - 解码后的像素在主线程上才转成 `slint::Image`（纹理属于界面线程）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -147,6 +147,12 @@ struct UiState {
 /// 这样「重入被挡下」时连建播放器 + 起播也能一起延后。
 type PlayerAction = Box<dyn FnOnce(&mut Option<Player>)>;
 
+/// 一次 [`Shell::after_player_borrow`] 最多补跑多少个动作。
+///
+/// 补跑的动作可能又触发 reflow / 又把自己排进队列：没有上限时同一次 drain 会
+/// 自激成死循环，卡死主线程。到上限就 warn，剩下的留给下一拍心跳。
+const MAX_CATCH_UP_ACTIONS: usize = 32;
+
 /// 主线程上的装配体。
 pub(crate) struct Shell {
     app: Rc<App>,
@@ -166,6 +172,18 @@ pub(crate) struct Shell {
     player: RefCell<Option<Player>>,
     /// 重入挡下的播放器动作（顺序补跑，见 [`Shell::run_player_action`]）。
     pending_player_actions: RefCell<VecDeque<PlayerAction>>,
+    /// 字幕安全区：只保留**最新值**（单槽 last-write-wins，不走 FIFO）。
+    ///
+    /// 全屏切换时 `apply_pending_view()` 同步触发 reflow，新的 margin 会内联执行；
+    /// 若旧 margin 还排在 FIFO 里，补跑时会把它盖回去（见
+    /// [`Shell::set_player_subtitle_margin`]）。
+    pending_subtitle_margin: RefCell<Option<i64>>,
+    /// 播放器槽里是否**确实**有播放器。
+    ///
+    /// 借用期间不能借用 `player` 判断（[`Shell::has_player`] /
+    /// [`Shell::live_player_view`] 的降级分支），所以单独维护一个标志：
+    /// 它只在动作真正改槽时更新，不参与 `RefCell` 借用。
+    player_present: Rc<Cell<bool>>,
     /// 播放心跳（8ms）：事件泵、会话 tick、帧 watchdog。
     timer: slint::Timer,
     /// `--play` 指定的捕获参数（等 `App::play` 回调到 [`Shell::play`] 时消费）。
@@ -309,6 +327,8 @@ pub fn run_window(
         pending_shot: RefCell::new(None),
         player: RefCell::new(None),
         pending_player_actions: RefCell::new(VecDeque::new()),
+        pending_subtitle_margin: RefCell::new(None),
+        player_present: Rc::new(Cell::new(false)),
         timer: slint::Timer::default(),
         pending_capture: RefCell::new(None),
         pending_source: RefCell::new(None),
@@ -585,6 +605,7 @@ impl Shell {
         // 起播也要走重入安全的入口：`Player::new` / `begin` 会读本地库、起 tokio 任务，
         // 重入时（见 [`Shell::with_player`] 的注释）不能把动作丢掉，只能延后。
         let weak = Rc::downgrade(self);
+        let present = Rc::clone(&self.player_present);
         let post = Arc::clone(post);
         let item_id = item_id.to_owned();
         self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
@@ -600,6 +621,7 @@ impl Shell {
                     capture,
                     Rc::clone(&shell.capture_out),
                 ));
+                present.set(true);
             }
             if let Some(player) = slot.as_mut() {
                 player.begin(&item_id, source_id, Some(prefs), &post);
@@ -657,7 +679,8 @@ impl Shell {
     /// 同步跑完一整轮 Slint 布局求值。布局一变（全屏切换 / 窗口 resize 后控制块
     /// 贴底位置变了），`player_shell.slint` 的 `changed height` / `changed
     /// subtitle-safe-inset` 就同步回调 `player-subtitle-reflow` → `nova-ui` 的
-    /// `player_push_subtitle_margin` → 本层的字幕安全区回调 → `with_player`。
+    /// `player_push_subtitle_margin` → 本层的字幕安全区回调
+    /// （[`Shell::set_player_subtitle_margin`]，last-write-wins）。
     /// 而这一拍的 `tick_playback` 正持着 `self.player` 的可变借用——直接
     /// `borrow_mut()` 就是 `RefCell already borrowed` 崩溃（体检 R9-C1：全屏切换后
     /// 窗口尺寸变化 + 合成器停帧，每拍都 `take_snapshot`，1–2 秒内必炸）。
@@ -671,6 +694,7 @@ impl Shell {
             return false;
         };
         action(&mut slot);
+        self.player_present.set(slot.is_some());
         true
     }
 
@@ -679,35 +703,82 @@ impl Shell {
     /// 每个「放下 `self.player` 借用」的地方都要调一次：视图提交（`App::set_player`）
     /// 与补跑的动作都可能再触发 nova-ui 的播放页回调，所以顺序是
     /// 先提交视图、再补动作、每跑完一个再来一轮。
+    ///
+    /// 一次最多补跑 [`MAX_CATCH_UP_ACTIONS`] 个：动作可能在执行时又入队（或触发
+    /// reflow 再入队），没有上限时同一次 drain 会自激循环、卡死主线程。
+    /// 到上限打 warn，剩下的留给下一拍心跳。
     fn after_player_borrow(&self) {
         self.apply_pending_view();
-        loop {
+        for _ in 0..MAX_CATCH_UP_ACTIONS {
             // 借用还被别人持着：这一拍到此为止，下一拍（心跳）接着补跑。
             let Ok(mut slot) = self.player.try_borrow_mut() else {
                 return;
             };
-            let next = self.pending_player_actions.borrow_mut().pop_front();
-            let Some(action) = next else {
-                return;
-            };
-            action(&mut slot);
+            // 字幕安全区只要最新值：先于 FIFO 补跑，且槽里最多一个。
+            if let Some(margin) = self.pending_subtitle_margin.borrow_mut().take() {
+                if let Some(player) = slot.as_mut() {
+                    player.set_subtitle_margin(margin);
+                }
+            } else {
+                let next = self.pending_player_actions.borrow_mut().pop_front();
+                let Some(action) = next else {
+                    return;
+                };
+                action(&mut slot);
+            }
+            self.player_present.set(slot.is_some());
             drop(slot);
             self.apply_pending_view();
         }
+        let remaining = self.pending_player_actions.borrow().len();
+        if remaining > 0 || self.pending_subtitle_margin.borrow().is_some() {
+            tracing::warn!(
+                remaining,
+                limit = MAX_CATCH_UP_ACTIONS,
+                "一次补跑达到上限，剩余播放器动作留到下一拍"
+            );
+        }
     }
 
-    /// 播放器槽是否已有会话（不 panic：借用中就等于有）。
+    /// 字幕安全区（`player-subtitle-margin`）：只保留**最新值**的合并语义。
+    ///
+    /// 与 FIFO 的 [`Shell::with_player`] 不同：全屏切换时 `apply_pending_view()` 会
+    /// 同步触发 reflow，新的 margin 在那里内联生效；先前因重入排队的旧 margin 是
+    /// 过期值，补跑会把新值盖回去（字幕停在错误高度）。所以这里用单槽
+    /// last-write-wins：借用中只覆盖槽里的最新值，内联成功就清掉旧值。
+    fn set_player_subtitle_margin(&self, margin: i64) {
+        let Ok(mut slot) = self.player.try_borrow_mut() else {
+            *self.pending_subtitle_margin.borrow_mut() = Some(margin);
+            return;
+        };
+        if let Some(player) = slot.as_mut() {
+            player.set_subtitle_margin(margin);
+        }
+        // 新值已经内联生效：槽里更早的值作废。
+        *self.pending_subtitle_margin.borrow_mut() = None;
+        drop(slot);
+        self.after_player_borrow();
+    }
+
+    /// 播放器槽是否已有会话。
+    ///
+    /// 借用中不能借用 `player`：按 [`Shell::player_present`] 判断，而不是无条件
+    /// `true`——槽里从来没有播放器（还没起播 / 已经收尾）时要如实返回 `false`。
     fn has_player(&self) -> bool {
         match self.player.try_borrow() {
             Ok(slot) => slot.is_some(),
-            Err(_) => true,
+            Err(_) => self.player_present.get(),
         }
     }
 
     /// 调试通道用：读播放器的即时视图（若有播放会话）。
+    ///
+    /// 借用中（同一拍里重入）退回界面镜像，但只有**确实有过播放器**时才这样做：
+    /// 槽本来就是空的就返回 `None`，不能凭镜像报出一个陈旧的会话。
     fn live_player_view(&self) -> Option<nova_ui::PlayerView> {
         match self.player.try_borrow_mut() {
             Ok(mut slot) => slot.as_mut().map(Player::live_view),
+            Err(_) if !self.player_present.get() => None,
             // 借用中（同一拍里重入）：退回界面镜像，宁可少一拍新数据也不 panic。
             Err(_) => {
                 tracing::debug!("播放器正被借用，view.player 退回界面镜像");
@@ -732,12 +803,18 @@ impl Shell {
     }
 
     /// 退出播放页 / 关窗时的收尾。
+    ///
+    /// 约定：**外层持有 `self.player` 借用的调用方必须调用 [`Shell::after_player_borrow`]**。
+    /// 这里只把收尾排进 [`Shell::run_player_action`]（借用中会延后），动作真正执行完
+    /// 后的视图提交与补跑都由 `after_player_borrow` 负责；漏调就是“退出后动作不生效”。
     fn stop_playback(&self) {
         self.timer.stop();
         // 先把播放器从槽里拿走再收尾：`shutdown()` 会阻塞等进度补发落盘，
         // 这段不能占着 `self.player` 的借用（收尾期间播放页回调还要用它）。
-        self.run_player_action(Box::new(|slot: &mut Option<Player>| {
+        let present = Rc::clone(&self.player_present);
+        self.run_player_action(Box::new(move |slot: &mut Option<Player>| {
             if let Some(mut player) = slot.take() {
+                present.set(false);
                 player.shutdown();
             }
         }));
@@ -1287,6 +1364,8 @@ impl Shell {
             pending_shot: RefCell::new(None),
             player: RefCell::new(None),
             pending_player_actions: RefCell::new(VecDeque::new()),
+            pending_subtitle_margin: RefCell::new(None),
+            player_present: Rc::new(Cell::new(false)),
             timer: slint::Timer::default(),
             pending_capture: RefCell::new(None),
             pending_source: RefCell::new(None),
@@ -1311,6 +1390,7 @@ impl Shell {
             Rc::clone(&self.capture_out),
         );
         *self.player.borrow_mut() = Some(player);
+        self.player_present.set(true);
     }
 
     /// 交互扫描：委托 [`nova_ui::App::sweep`]（纯界面逻辑，不需要 Shell 状态）。
@@ -2465,7 +2545,8 @@ fn install_callbacks(shell: &Rc<Shell>) {
         let weak = Rc::downgrade(shell);
         shell.app.on_player_subtitle_margin(move |margin| {
             if let Some(shell) = weak.upgrade() {
-                shell.with_player(move |player| player.set_subtitle_margin(margin));
+                // 只要最新值：旧的 FIFO 会补跑过期 margin，覆盖 reflow 刚算出的新值。
+                shell.set_player_subtitle_margin(margin);
             }
         });
     }
@@ -3518,8 +3599,8 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    /// 体检 R9-C1 的重入回归用装配：已初始化、带一个（不建引擎的）真播放器。
-    fn shell_with_player_for_test() -> Rc<super::Shell> {
+    /// 体检 R9-C1 的重入回归用装配：已初始化，播放器槽为空。
+    fn shell_fixture() -> (Rc<super::Shell>, tempfile::TempDir, tokio::runtime::Runtime) {
         init_test_backend();
         let dir = tempfile::tempdir().expect("临时目录");
         let env = crate::env::Env {
@@ -3540,10 +3621,18 @@ mod tests {
             Arc::clone(&local),
             runtime.handle().clone(),
         ));
+        (shell, dir, runtime)
+    }
+
+    /// 同上，再塞一个（不建引擎的）真播放器。
+    ///
+    /// 返回值里的目录 / runtime 由调用方正常持有到用例结束：播放器的进度 worker
+    /// 靠它们（以前的 `mem::forget` 把两者泄漏在进程里）。
+    fn shell_with_player_for_test() -> (Rc<super::Shell>, tempfile::TempDir, tokio::runtime::Runtime)
+    {
+        let (shell, dir, runtime) = shell_fixture();
         shell.install_player_for_test();
-        // `dir` / `runtime` 必须活到用例结束：播放器的进度 worker 靠它们。
-        std::mem::forget((dir, runtime));
-        shell
+        (shell, dir, runtime)
     }
 
     /// 体检 R9-C1：播放器正被**同一拍**借用时，界面动作要延后，不能二次借用。
@@ -3555,7 +3644,7 @@ mod tests {
     /// ui.rs:627），整个进程退出。
     #[test]
     fn reentrant_player_action_is_deferred_instead_of_panicking() {
-        let shell = shell_with_player_for_test();
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
         let hits: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
 
         let inner_hits = Rc::clone(&hits);
@@ -3578,7 +3667,7 @@ mod tests {
     /// 同上，但不靠嵌套调用：借用被心跳持着时进来的动作，要排到借用放掉之后。
     #[test]
     fn player_action_deferred_while_the_slot_is_borrowed() {
-        let shell = shell_with_player_for_test();
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
         let hits: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
 
         let guard = shell.player.borrow_mut();
@@ -3594,6 +3683,99 @@ mod tests {
             ["deferred"],
             "延后的动作必须在借用放掉后真的执行"
         );
+    }
+
+    /// 补跑必须有迭代上限：动作执行时又把自己排进队列，不能把一次 drain 变成死循环。
+    #[test]
+    fn catch_up_drain_stops_after_the_limit() {
+        fn requeue(shell: &Rc<super::Shell>, runs: Rc<std::cell::Cell<usize>>) {
+            let weak = Rc::downgrade(shell);
+            shell.run_player_action(Box::new(move |_slot| {
+                runs.set(runs.get() + 1);
+                if let Some(shell) = weak.upgrade() {
+                    requeue(&shell, Rc::clone(&runs));
+                }
+            }));
+        }
+
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+        let runs = Rc::new(std::cell::Cell::new(0usize));
+        let logs = capture_logs(|| {
+            // 第一次（借用空闲）当场执行；之后每次执行都再排入一个，永远排不完。
+            requeue(&shell, Rc::clone(&runs));
+            shell.after_player_borrow();
+        });
+
+        assert_eq!(
+            runs.get(),
+            super::MAX_CATCH_UP_ACTIONS + 1,
+            "一次 drain 最多补跑 {} 个动作（加上第一次当场执行）",
+            super::MAX_CATCH_UP_ACTIONS
+        );
+        assert!(
+            !shell.pending_player_actions.borrow().is_empty(),
+            "超过上限的剩余动作要留给下一拍"
+        );
+        assert!(
+            logs.contains("达到上限"),
+            "到上限必须留下 warn，而不是静默丢弃：{logs}"
+        );
+    }
+
+    /// 全屏切换时旧的 margin 不能在 drain 里盖掉新值：字幕安全区是 last-write-wins。
+    ///
+    /// 真机链路：`apply_pending_view()` 同步触发 reflow，新 margin 内联执行；随后
+    /// drain 又补跑先前因重入入队的旧 margin，字幕被推回旧高度。
+    #[test]
+    fn stale_subtitle_margin_does_not_override_the_newer_value() {
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+
+        // 借用中入队的旧值（控制层隐藏 = 0）。
+        let guard = shell.player.borrow_mut();
+        shell.set_player_subtitle_margin(0);
+        drop(guard);
+        // reflow 内联算出的新值（控制层可见 = 266px，800 高画面的 33%）。
+        shell.set_player_subtitle_margin(266);
+
+        assert_eq!(
+            shell.host.borrow().subtitle_margins_for_test(),
+            vec![33],
+            "旧 margin 不能在 drain 里补跑，把新值盖回去"
+        );
+    }
+
+    /// 借用期间槽里没有播放器：降级分支不能报出一个陈旧会话。
+    #[test]
+    fn degraded_player_accessors_report_no_player_when_the_slot_is_empty() {
+        let (shell, _dir, _runtime) = shell_fixture();
+
+        let guard = shell.player.borrow_mut();
+        assert!(
+            !shell.has_player(),
+            "槽里没有播放器时，借用中也必须返回 false"
+        );
+        assert!(
+            shell.live_player_view().is_none(),
+            "槽里没有播放器时不能退回界面镜像（会报出一个陈旧会话）"
+        );
+        drop(guard);
+
+        assert!(!shell.has_player());
+        assert!(shell.live_player_view().is_none());
+    }
+
+    /// 有播放器时，借用期间仍然退回界面镜像（不能把降级路径整个去掉）。
+    #[test]
+    fn degraded_player_view_falls_back_to_the_mirror_with_a_player() {
+        let (shell, _dir, _runtime) = shell_with_player_for_test();
+
+        let guard = shell.player.borrow_mut();
+        assert!(shell.has_player(), "有播放器时借用中应报告存在");
+        assert!(
+            shell.live_player_view().is_some(),
+            "有播放器时借用中退回镜像，而不是 None"
+        );
+        drop(guard);
     }
 
     fn init_test_backend() {
