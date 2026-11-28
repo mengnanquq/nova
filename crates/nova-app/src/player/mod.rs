@@ -1418,6 +1418,9 @@ impl Player {
     ///
     /// 兜底要求引擎报 EOF **且**位置还在那个片尾附近（[`Player::engine_at_eof`]）：
     /// `eof-reached` 是引擎的实时状态，但用户拖走后它可能晚好几秒才翻成 `false`。
+    /// 拖动（`Command::Seek`）时引擎侧的 `eof` / `eof_position` **不清**：mpv 在片尾之后
+    /// `eof-reached` 一直是 `true`，seek 到时长不会再发属性通知，清了这条兜底就失效
+    /// （复审 🟡1）；拖回中段由位置守卫拦下来。
     fn at_end_of_media(&self) -> bool {
         match self.session.state() {
             SessionState::Ended => true,
@@ -3807,6 +3810,56 @@ mod tests {
         assert!(
             trace.iter().any(|entry| entry == "play"),
             "应当给引擎发 play：{trace:?}"
+        );
+    }
+
+    /// 复审 🟡1：元数据时长比真实文件长 2s，播到真实片尾后再拖到 100%（= 时长），
+    /// 按播放必须从头重播。
+    ///
+    /// 这个形态里两条基于 `duration` 的判据都不成立：mpv 到片尾后 `eof-reached`
+    /// 一直是 `true`（seek 到时长不会让它翻转、不会再发属性通知），seek 后 `time-pos`
+    /// 又回到**真实**片尾（离元数据时长还差 2s）。所以 worker 不能在 seek 时清掉
+    /// 共享的 `eof` / `eof_position`：第三条兜底靠“位置仍在记下的片尾附近”继续生效。
+    #[test]
+    fn seeking_to_the_metadata_duration_after_the_real_end_replays_from_the_start() {
+        let (_dir, _local, mut player, _runtime, posted) = resume_fixture(true);
+        let post = post_to(&posted);
+
+        player.begin("item-1", None, None, &post);
+        wait_for_open(&posted).expect("首次起播请求");
+        player.target = player.pending.take();
+        let first_seq = player.session_seq;
+        player.session.handle(EngineEvent::FirstFrame);
+        let duration = player.session.duration().expect("用例前提：时长已知");
+        // 播到真实 EOF（元数据说还差 2 秒）并暂停：引擎报 EOF，记下片尾位置。
+        let real_end = duration - Duration::from_secs(2);
+        assert!(player.session.seek(real_end));
+        assert!(player.session.pause());
+        player
+            .host
+            .borrow_mut()
+            .set_engine_eof_for_test(true, Some(real_end));
+
+        // 拖到 100%：会话把位置 clamp 到时长，mpv 侧 `time-pos` 回到真实片尾。
+        player.seek(duration);
+        player
+            .session
+            .handle(EngineEvent::PositionChanged(real_end));
+        assert_eq!(player.session.state(), SessionState::Paused);
+        assert!(
+            player.session.position() + END_OF_MEDIA_TOLERANCE < duration,
+            "用例前提：位置停在真实片尾，离元数据时长还差 2s，容差命中不了"
+        );
+
+        player.set_playing(true);
+
+        let replay = wait_for_open(&posted)
+            .expect("引擎仍报 EOF 且位置就在记下的片尾上，按播放必须从头重播");
+        assert_eq!(replay.resume_at, Duration::ZERO, "必须从 0 开始");
+        assert!(
+            player.session_seq > first_seq,
+            "重播是新会话（代号递增，{} 应大于 {first_seq}）",
+            player.session_seq
         );
     }
 

@@ -144,54 +144,25 @@ impl SharedState {
 
     /// 把一条属性观察落进共享状态（缓冲判定与 watchdog 都读它）。
     ///
-    /// 返回 `false` = 这条观察被丢弃：`file-loaded` 之前收到的 `eof-reached` 属于
-    /// **上一部**片子（`loadfile replace` 之后旧文件的 `eof-reached=true` 可能才被处理
-    /// 到，见 [`SharedState::observe_eof`]）。
-    pub(crate) fn apply_observed(
-        &mut self,
-        observed: &ObservedProperty,
-        loaded: bool,
-        time_pos: Option<f64>,
-    ) -> bool {
+    /// `eof-reached` **不在这里**：它要先过 [`EndedGuard`] 的过滤，通过之后才写
+    /// （见 [`apply_eof_observation`]）。
+    pub(crate) fn apply_observed(&mut self, observed: &ObservedProperty) {
         match observed {
             ObservedProperty::Pause(paused) => self.paused = *paused,
             ObservedProperty::CoreIdle(idle) => self.core_idle = *idle,
             ObservedProperty::Cache(percent) => self.cache_percent = *percent,
-            ObservedProperty::Eof(reached) => return self.observe_eof(loaded, *reached, time_pos),
             _ => {}
         }
-        true
     }
 
     /// `eof-reached` 观察：翻成 `true` 时记下当时的 `time-pos` 作为 [`Self::eof_position`]。
-    ///
-    /// `loaded = false`（本次文件还没 `file-loaded`）时一律丢弃：换片时旧文件迟到的
-    /// `eof-reached=true` 观察会把 `eof` 写回 `true`，新会话刚起播就被判成片尾。
-    pub(crate) fn observe_eof(
-        &mut self,
-        loaded: bool,
-        reached: bool,
-        time_pos: Option<f64>,
-    ) -> bool {
-        if !loaded {
-            return false;
-        }
+    pub(crate) fn observe_eof(&mut self, reached: bool, time_pos: Option<f64>) {
         self.eof = reached;
         self.eof_position = if reached {
             time_pos.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
         } else {
             None
         };
-        true
-    }
-
-    /// UI 自己要求离开片尾（拖动 / 跳转）：`eof` **立即**失效。
-    ///
-    /// 不能等 mpv 送 `eof-reached=false`（网络流上实测能晚好几秒）：那段窗口里
-    /// 播放器会把“拖回中段后的暂停”当成停在片尾，按播放就从 0 重播、吞掉刚才的 seek。
-    pub(crate) fn leave_eof(&mut self) {
-        self.eof = false;
-        self.eof_position = None;
     }
 
     /// 记一笔起播阶段的时序（相对于本次打开）。
@@ -217,6 +188,64 @@ impl SharedState {
         self.trace.clear();
         self.hwdec_warned = false;
     }
+}
+
+fn lock_shared_state(shared: &Mutex<SharedState>) -> std::sync::MutexGuard<'_, SharedState> {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 一条 `eof-reached` 观察的落地：先过 [`EndedGuard`]，**通过之后**才写共享状态。
+///
+/// 顺序不能反（复审 💡5）：写在前面的过期观察即使被守卫吞掉，也已经把 `shared.eof`
+/// 写回 `true` 了；这时 `time-pos` 未知 → `eof_position` 是 `None`，界面
+/// （`Player::engine_at_eof`）在 `None` 上退回“只看 `eof-reached`”，刚被拖走的位置又
+/// 会被当成片尾（按播放从 0 重播、吞掉 seek）。
+///
+/// `loaded = false`（本次文件还没 `file-loaded`）时整条丢弃：换片时旧文件迟到的
+/// `eof-reached=true` 观察会把 `eof` 写回 `true`，新会话刚起播就被判成片尾。
+///
+/// 返回 `true` = 这次片尾要报 `Ended`。
+fn apply_eof_observation(
+    shared: &Mutex<SharedState>,
+    ended: &mut EndedGuard,
+    loaded: bool,
+    reached: bool,
+    time_pos: Option<f64>,
+) -> bool {
+    if !loaded {
+        return false;
+    }
+    // `eof-reached=false` 一律落地（守卫只负责清自己的标记）：它只会把状态往
+    // “没到片尾”方向修，没有害处。
+    if !reached {
+        ended.on_eof_observed(false);
+        lock_shared_state(shared).observe_eof(false, time_pos);
+        return false;
+    }
+    if !ended.on_eof_observed(true) {
+        return false;
+    }
+    lock_shared_state(shared).observe_eof(true, time_pos);
+    true
+}
+
+/// `Command::Seek` 的记账（可单测）：清「已报过片尾」并吞掉队列里的旧观察。
+///
+/// **不碰** `eof` / `eof_position`（复审 🟡1）。曾经在这里 `leave_eof()` 把两者一起
+/// 清掉，于是“拖到 100%”彻底失效：mpv 在片尾之后 `eof-reached` 一直是 `true`，seek 到
+/// 时长不改变它、也就不会再发属性通知；元数据时长偏长时 `time-pos` 又会回到**真实**
+/// 片尾（小于时长），两条基于 `duration` 的判据就都不成立，按播放没有任何反应。
+/// 留着上一拍记下的 `eof_position`，位置守卫才分得清两种拖动：
+///
+/// - 拖回中段：`position + 40ms >= eof_position` 不成立 → 不算片尾 → 继续播；
+/// - 拖到 100%：`position` 约等于 `eof_position` → 算片尾 → 按播放从 0 重播。
+fn begin_seek(shared: &Mutex<SharedState>, ended: &mut EndedGuard) {
+    // 这里**不**清共享的 `eof` / `eof_position`（理由见上）。`shared` 留在签名里，
+    // 让“这条路径属于共享状态”可见，也让单测能钉住这个契约。
+    let _ = shared;
+    ended.after_seek();
 }
 
 /// 事件投递端：把 `EngineEvent` 塞进事件流（tokio 的 unbounded channel 自己负责唤醒）。
@@ -447,10 +476,8 @@ impl Worker {
                 // 片尾不会再报 `Ended`，界面会一直停在“播放中”（体检 R8-B3）；
                 // 同时把 seek 之前产生、还没处理到的 `eof-reached=true` 标成旧观察
                 // （主循环先处理命令再处理事件，见 [`EndedGuard`]）。
-                self.ended.after_seek();
-                // UI 自己要求离开片尾：共享的 `eof` 立即清零，不等 mpv 送
-                // `eof-reached=false`——那之前按播放会被判成“停在片尾”从 0 重播。
-                self.lock_shared().leave_eof();
+                // 共享的 `eof` / `eof_position` **不清**（复审 🟡1，见 [`begin_seek`]）。
+                begin_seek(&self.shared, &mut self.ended);
                 let seconds = position.as_secs_f64();
                 self.command(&["seek", &format!("{seconds:.3}"), "absolute"]);
             }
@@ -543,18 +570,20 @@ impl Worker {
                 self.trace_shared("file-loaded");
                 self.apply_desired_state();
                 self.poll_properties();
+                // 极短文件的事件顺序可能颠倒：`eof-reached=true` 排在本事件之前被
+                // `loaded` 过滤当成上一部片子的残留丢掉，mpv 之后不会再补发。
+                // 实时读一次作为初值，做法同 [`MpvEvent::PlaybackRestart`]。
+                if let Some(reached) = self.read_eof() {
+                    if self.handle_eof(reached) {
+                        self.events.emit(EngineEvent::Ended);
+                    }
+                }
             }
             MpvEvent::VideoReconfig => self.trace_shared("video-reconfig"),
             MpvEvent::PlaybackRestart => {
                 // 不算“seek 已生效”的证据：`eof-reached` 此刻已经翻成 `false` 才算
                 // （详见 [`EndedGuard::on_playback_restart`]）。
-                // 三态：读不到或读到未知值都按 `None` 处理（保守：不清旧观察）。
-                let eof_now = match self.handle.get_string("eof-reached").as_deref() {
-                    Some("yes") => Some(true),
-                    Some("no") => Some(false),
-                    _ => None,
-                };
-                self.ended.on_playback_restart(eof_now);
+                self.ended.on_playback_restart(self.read_eof());
                 self.trace_shared("playback-restart");
                 self.poll_properties();
             }
@@ -622,37 +651,22 @@ impl Worker {
             }
             _ => return,
         };
-        // 观察到的属性先落到共享状态（缓冲判定与 watchdog 都读它）。
-        //
-        // `file-loaded` 之前收到的 `eof-reached` 属于**上一部**片子，一律丢弃。
-        if !self
-            .lock_shared()
-            .apply_observed(&observed, self.loaded, self.last_time_pos)
-        {
-            debug!(
-                target: "nova_playback_mpv",
-                "丢弃 file-loaded 之前的 eof-reached 观察：上一部片子的残留"
-            );
+        // 片尾单独走：片尾的“报不报”全部交给 [`EndedGuard`]（它既吞掉同一次片尾的重复
+        // 观察，也吞掉 seek 之前产生、seek 之后才被处理到的旧观察），**通过之后**才写
+        // 共享状态（复审 💡5，见 [`apply_eof_observation`]）。
+        if let ObservedProperty::Eof(reached) = &observed {
+            if self.handle_eof(*reached) {
+                self.events.emit(EngineEvent::Ended);
+            }
             return;
         }
+        // 其余观察先落到共享状态（缓冲判定与 watchdog 都读它）。
+        self.lock_shared().apply_observed(&observed);
         if matches!(
             observed,
             ObservedProperty::Pause(_) | ObservedProperty::CoreIdle(_) | ObservedProperty::Cache(_)
         ) {
             self.refresh_buffering();
-        }
-        // 片尾的“报不报”全部交给 [`EndedGuard`]：它既吞掉同一次片尾的重复观察，
-        // 也吞掉 seek 之前产生、seek 之后才被处理到的旧观察（见它的注释）。
-        if let ObservedProperty::Eof(reached) = &observed {
-            if !self.ended.on_eof_observed(*reached) {
-                if *reached {
-                    debug!(
-                        target: "nova_playback_mpv",
-                        "忽略重复 / 过期的 eof-reached=true：不再报一次 Ended"
-                    );
-                }
-                return;
-            }
         }
         // `time-pos` 只在本次文件 **file-loaded 之后**才算数。
         //
@@ -918,8 +932,42 @@ impl Worker {
         self.lock_shared().trace(label);
     }
 
+    /// 实时读一次 mpv 的 `eof-reached`。三态：读不到或读到未知值都按 `None` 处理。
+    fn read_eof(&self) -> Option<bool> {
+        match self.handle.get_string("eof-reached").as_deref() {
+            Some("yes") => Some(true),
+            Some("no") => Some(false),
+            _ => None,
+        }
+    }
+
+    /// 把一次 `eof-reached` 落进共享状态与 [`EndedGuard`]；返回“要不要报 `Ended`”。
+    fn handle_eof(&mut self, reached: bool) -> bool {
+        let report = apply_eof_observation(
+            &self.shared,
+            &mut self.ended,
+            self.loaded,
+            reached,
+            self.last_time_pos,
+        );
+        if !report && reached {
+            if self.loaded {
+                debug!(
+                    target: "nova_playback_mpv",
+                    "忽略重复 / 过期的 eof-reached=true：不再报一次 Ended"
+                );
+            } else {
+                debug!(
+                    target: "nova_playback_mpv",
+                    "丢弃 file-loaded 之前的 eof-reached 观察：上一部片子的残留"
+                );
+            }
+        }
+        report
+    }
+
     fn lock_shared(&self) -> std::sync::MutexGuard<'_, SharedState> {
-        self.shared.lock().unwrap_or_else(|e| e.into_inner())
+        lock_shared_state(&self.shared)
     }
 }
 
@@ -1154,47 +1202,115 @@ mod tests {
         );
     }
 
-    /// 复审 🟡1：UI 自己要求离开片尾（`Command::Seek` 分支调 `leave_eof`）后，
-    /// 共享的 `eof` 必须**立即**为 `false`——不能等 mpv 送 `eof-reached=false`（网络流
-    /// 上可能晚好几秒，那段窗口里按播放会从 0 重播、吞掉刚做的 seek）。
+    /// 复审 🟡1：`Command::Seek` **不清**共享的 `eof` / `eof_position`。
+    ///
+    /// 拖到 100%（= 元数据时长）时 mpv 的 `eof-reached` 一直是 `true`，seek 到时长不会
+    /// 让它翻转、也就不会再有属性通知；元数据时长偏长时 `time-pos` 又回到**真实**片尾
+    /// （小于时长）。清了这份记账，位置守卫没有可比的位置，按播放就什么都不发生。
+    /// 拖回中段不需要清：位置守卫（`Player::engine_at_eof`）看位置不再贴着记下的片尾
+    /// 就不算片尾。
     #[test]
-    fn seek_clears_the_shared_eof_immediately() {
-        let mut shared = SharedState::new("auto".to_string());
+    fn seek_keeps_the_shared_eof_so_the_position_guard_still_works() {
+        let shared = Mutex::new(SharedState::new("auto".to_string()));
+        let mut ended = EndedGuard::default();
         assert!(
-            shared.apply_observed(&ObservedProperty::Eof(true), true, Some(120.0)),
+            apply_eof_observation(&shared, &mut ended, true, true, Some(120.0)),
             "file-loaded 之后的 eof 观察要落地"
         );
-        assert!(shared.eof);
-        assert_eq!(shared.eof_position, Some(Duration::from_secs(120)));
+        assert!(lock_shared_state(&shared).eof);
+        assert_eq!(
+            lock_shared_state(&shared).eof_position,
+            Some(Duration::from_secs(120))
+        );
 
         // `Command::Seek` 分支做的同一件事。
-        shared.leave_eof();
+        begin_seek(&shared, &mut ended);
 
-        assert!(!shared.eof, "seek 之后 eof 立即为 false");
-        assert_eq!(shared.eof_position, None, "片尾位置也一并失效");
+        let shared = lock_shared_state(&shared);
+        assert!(
+            shared.eof,
+            "seek 不清 eof：mpv 到片尾后一直是 true，seek 到时长不会再发通知"
+        );
+        assert_eq!(
+            shared.eof_position,
+            Some(Duration::from_secs(120)),
+            "片尾位置要留着：位置守卫靠它区分“拖回中段”与“拖到 100%”"
+        );
+        assert!(!ended.reported, "“已报过片尾”仍要清零");
+    }
+
+    /// 复审 💡5：过期的 `eof-reached=true`（seek 之前产生、seek 之后才被处理到）
+    /// **不写**共享状态。
+    ///
+    /// 写在过滤之前的旧观察即使被 [`EndedGuard`] 吞掉，也已经把 `shared.eof` 写回
+    /// `true`；这时 `time-pos` 未知 → `eof_position` 是 `None`，界面
+    /// （`Player::engine_at_eof`）在 `None` 上退回“只看 `eof-reached`”，刚拖走的位置
+    /// 又被当成片尾。
+    #[test]
+    fn stale_eof_observation_does_not_rewrite_the_shared_state() {
+        let shared = Mutex::new(SharedState::new("auto".to_string()));
+        let mut ended = EndedGuard::default();
+        // 播到片尾并报过 `Ended`（这一拍的 `time-pos` 未知 → 片尾位置是 `None`）。
+        assert!(apply_eof_observation(&shared, &mut ended, true, true, None));
+        assert!(lock_shared_state(&shared).eof);
+        assert_eq!(lock_shared_state(&shared).eof_position, None);
+
+        // 用户拖回中段：旧观察标记设上，`eof-reached=false` 还没到。
+        begin_seek(&shared, &mut ended);
+
+        // 队列里排着的旧 `eof-reached=true`：既不再报 `Ended`，也不写共享状态。
+        assert!(
+            !apply_eof_observation(&shared, &mut ended, true, true, Some(60.0)),
+            "过期的 eof=true 不能再报一次 Ended"
+        );
+        assert_eq!(
+            lock_shared_state(&shared).eof_position,
+            None,
+            "过期观察不能写共享状态：片尾位置会被写成错的读数"
+        );
     }
 
     /// 复审 🟡3：换片时旧文件迟到的 `eof-reached=true` 观察（新文件还没 `file-loaded`）
     /// 不能把新会话的共享状态写成“已到片尾”。
     #[test]
     fn late_eof_observation_from_the_previous_file_does_not_mark_the_new_one() {
-        let mut shared = SharedState::new("auto".to_string());
-        assert!(shared.apply_observed(&ObservedProperty::Eof(true), true, Some(120.0)));
+        let shared = Mutex::new(SharedState::new("auto".to_string()));
+        let mut ended = EndedGuard::default();
+        assert!(apply_eof_observation(
+            &shared,
+            &mut ended,
+            true,
+            true,
+            Some(120.0)
+        ));
 
-        // 换片：`open` 清掉旧状态，`file-loaded` 还没到。
-        shared.begin_open();
-        assert!(!shared.eof);
+        // 换片：`open` 清掉旧状态（守卫也一并重置），`file-loaded` 还没到。
+        lock_shared_state(&shared).begin_open();
+        ended = EndedGuard::default();
+        assert!(!lock_shared_state(&shared).eof);
         assert!(
-            !shared.apply_observed(&ObservedProperty::Eof(true), false, Some(120.0)),
+            !apply_eof_observation(&shared, &mut ended, false, true, Some(120.0)),
             "file-loaded 之前的 eof 观察属于上一部片子，要丢弃"
         );
-        assert!(!shared.eof, "新会话不能被旧文件的 eof 观察判成片尾");
-        assert_eq!(shared.eof_position, None);
+        assert!(
+            !lock_shared_state(&shared).eof,
+            "新会话不能被旧文件的 eof 观察判成片尾"
+        );
+        assert_eq!(lock_shared_state(&shared).eof_position, None);
 
         // 新文件自己播到片尾：照常认，并记下它自己的片尾位置。
-        assert!(shared.apply_observed(&ObservedProperty::Eof(true), true, Some(60.0)));
-        assert!(shared.eof);
-        assert_eq!(shared.eof_position, Some(Duration::from_secs(60)));
+        assert!(apply_eof_observation(
+            &shared,
+            &mut ended,
+            true,
+            true,
+            Some(60.0)
+        ));
+        assert!(lock_shared_state(&shared).eof);
+        assert_eq!(
+            lock_shared_state(&shared).eof_position,
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[test]

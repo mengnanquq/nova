@@ -501,9 +501,16 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
      尤甚），只看 `eof-reached` 会把这时的暂停当“播完”，按播放从 0 重播、吞掉刚做的
      seek（复审 🟡）。宿主借用中（同一拍里重入）读不到引擎状态就当作“不知道”，宁可
      少判一次播完，也不能把“片尾前暂停”重播成从 0 开始。
-     拖动 / 跳转（`Command::Seek`）时 worker 自己把共享的 `eof` 立即清零，不等 mpv
-     送 `eof-reached=false`；换片时 `file-loaded` 之前收到的 `eof-reached` 观察属于
-     上一部片子，一律丢弃。
+     拖动 / 跳转（`Command::Seek`）**不清理**引擎侧的 `eof` / `eof_position`（复审
+     🟡1）：mpv 在片尾之后 `eof-reached` 一直是 `true`，seek 到时长不会让它翻转、也就
+     不会再发属性通知，一旦清掉就再也补不回来——两种拖动全靠位置守卫区分：拖回中段
+     时 `position + 40ms >= eof_position` 不成立（继续播），拖到 100% 时位置约等于
+     `eof_position`（算片尾，按播放从头重播）。所以这条兜底既覆盖“元数据时长偏长、
+     停在真实 EOF 的暂停态”，也覆盖“拖到 100%”（元数据时长偏长时 `time-pos` 会回到
+     真实片尾，第二条同样命中不了）。换片时 `file-loaded` 之前收到的 `eof-reached`
+     观察属于上一部片子，一律丢弃；`file-loaded` 之后 worker 会实时读一次
+     `eof-reached` 作为初值（极短文件的事件顺序可能颠倒），过期的观察既不会再报一次
+     `Ended`、也不会写回引擎侧的 `eof`。
   这一条在宿主侧判断，**不依赖界面视图**：`view.player` 是节流推送的，控制层隐藏 /
   那一拍刚好没推时，靠界面的 `player_finished` 判断会漏掉。
 - 错误卡（`PlayerView::error` 非空）上的 `Enter` / `Space` / 控制层播放键 = 卡上的「重试」，
@@ -541,11 +548,17 @@ Idle → Opening（黑底 + 标题 + 转圈，超过 400ms 才显示转圈，避
    不依赖 mpv 的具体时序（实测 mpv 0.42 + `keep-open=yes`：片尾**只有** `eof-reached=true`
    属性、没有 `end-file` 事件；seek 之后才送 `eof-reached=false` + `playback-restart`）。
    旧实现只靠 `eof-reached` 回到 `false` 来清，第二次播完就可能不再产生 `Ended`。
-   同一个 `Command::Seek` 还要把共享的 `eof` **立即**清零（`SharedState::leave_eof`）：
-   网络流上 mpv 的 `eof-reached=false` 可能晚好几秒，那段窗口里宿主会把“拖回中段后的
-   暂停”当成停在片尾，按播放从 0 重播、吞掉刚做的 seek。换片时新文件 `file-loaded`
-   之前收到的 `eof-reached` 观察一律丢弃（`SharedState::observe_eof`）：否则旧文件迟到的
-   `eof-reached=true` 会把新会话写回“已到片尾”。
+   同一个 `Command::Seek` **不清理**共享的 `eof` / `eof_position`（复审 🟡1）：mpv 到片尾后
+   `eof-reached` 一直是 `true`，seek 到时长不会让它翻转、也就不会再发属性通知，清了就再也
+   补不回来。“拖回中段”交给位置守卫（`position + 40ms >= eof_position` 不成立就不算片尾），
+   “拖到 100%”反而靠它（位置约等于记下的片尾 → 仍算片尾，按播放从头重播）。
+   过期的 `eof-reached=true` 只有在 `EndedGuard` 过滤**通过之后**才写共享状态
+   （复审 💡5）：写在前面会把 `eof` 写回 `true`，而 `time-pos` 未知时 `eof_position`
+   是 `None`，位置守卫在 `None` 上退回只看 `eof-reached`，刚拖走的位置又被当成片尾。
+   换片时新文件 `file-loaded` 之前收到的 `eof-reached` 观察一律丢弃
+   （`worker::apply_eof_observation` 的 `loaded`）：否则旧文件迟到的 `eof-reached=true`
+   会把新会话写回“已到片尾”；`file-loaded` 之后 worker 还会实时读一次 `eof-reached`
+   作为初始值（极短文件的事件顺序可能颠倒，真实的 EOF 否则会被丢掉）。
    同时 seek 还要把“seek 之前产生、seek 之后才被处理到”的 `eof-reached=true` 标成旧观察
    （`EndedGuard::stale_eof`）：主循环**先处理命令再处理事件**，不吞掉它就会在清标记之后
    立刻误报第二次 `Ended`——界面把状态钉成 `Ended`、位置钉到时长（显示「已看完」），
