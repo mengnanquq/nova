@@ -25,10 +25,8 @@ Slint 标记只负责摆放和动画。这样界面测试不需要网络和数�
 `App::set_detail` / `set_library` / `set_page` 再 `borrow_mut()` 同一个 `State`。所以：
 
 1. **`if let` / `match` / `while let` 的 scrutinee（被匹配表达式）里不准出现 `borrow()`**：
-   那里产生的临时 `Ref` 活到整个块结束，肉眼看不见。R9-D1 的崩溃就是这样来的——
-   `play_current` 写了 `if let Some(Route::Detail { .. }) = state.borrow().nav.current()`，
-   块内的「我的列表」回调走到 `Shell::toggle_detail_mylist` → `App::set_detail` →
-   `borrow_mut()`，剧集详情按 `Enter` 整个进程退出（`RefCell already borrowed`，真机 2/2 复现）。
+   那里产生的临时 `Ref` 活到整个块结束，肉眼看不见；块内一旦调回调，上层
+   `borrow_mut()` 就会 `RefCell already borrowed`。
    要用的值先在独立作用域里拷出来（`let (..) = { let s = state.borrow(); .. };`），再调回调。
 2. **取 handler 一律先克隆再调**：`let handler = { let s = state.borrow(); s.callbacks.x.clone() };`
    然后 `if let Some(handler) = handler { handler(..) }`。不要在匹配表达式里顺手写 `borrow()`。

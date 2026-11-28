@@ -3240,13 +3240,10 @@ fn play_current(ui: &AppWindow, state: &Rc<RefCell<State>>) -> bool {
     // 不能复活一个界面上不存在的按钮，落到焦点所在的「我的列表」上（与
     // `focus_rows` 的单行模型一致）。
     //
-    // **借用必须先放掉**（R9-D1）：handler 会同步回到 `nova-app`
+    // **借用必须先放掉**：handler 会同步回到 `nova-app`
     // （`Shell::toggle_detail_mylist` → 写本地库 → `App::set_detail`），那里要
-    // `state.borrow_mut()`。以前这里写成
-    // `if let Some(Route::Detail { .. }) = state.borrow().nav.current()`：if-let
-    // 的 scrutinee 临时 `Ref` 活到**整块结束**，块内回调必炸
-    // `RefCell already borrowed`（真机 2/2 复现，剧集详情按 Enter 整个进程退出）。
-    // 所以先在独立作用域里把要用的三个值取出来，再在借用外调 handler。
+    // `state.borrow_mut()`。所以先在独立作用域里取出要用的值，再在借用外调 handler
+    // （见 `docs/ui-architecture.md`「`State` 借用约定」）。
     let (on_detail, playable, handler) = {
         let state = state.borrow();
         (
